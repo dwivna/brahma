@@ -1,0 +1,4 @@
+interface:
+  display_name: "Brahma Grill Me"
+  short_description: "Turn open questions into a reviewable feature plan"
+  default_prompt: "Use $brahma-grill-me to question me about this feature and prepare its Gherkin contract."
