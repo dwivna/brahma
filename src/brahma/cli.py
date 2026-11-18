@@ -96,7 +96,7 @@ def main(argv=None):
                     finally:
                         store.close()
                     print(f"Queued approved jobs: {len(queued)}. Quota is checked from provider signals when work is due; "
-                          "unknown quota is not treated as available.")
+                          "unknown quota permits one bounded approved attempt; a reported limit suspends work.")
             return 0
         except (ValueError, OSError, subprocess.SubprocessError) as error:
             print(f"brahma: {error}", file=sys.stderr)

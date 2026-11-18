@@ -118,7 +118,7 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
 
     error = None if work.cancelled() else work.exception()
     result = None if work.cancelled() or error else work.result()
-    if interrupted and (result is None or result.status != "ready"):
+    if interrupted and error is None and (result is None or result.status == "cancelled"):
         _requeue_interrupted(store, session, job)
         return True
     if error is None and result is not None:
@@ -143,6 +143,8 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
     Store.enqueue is a no-op for a durably stopped/paused session, so a user stop is never undone.
     """
     try:
+        if store.session(session.key)["status"] in ("waiting", "blocked", "incomplete", "ready"):
+            return
         store.enqueue(session.key, session.generation, job["digest"], time.time(),
                       "Service stopped; approved work resumes when the service restarts")
     except Exception:

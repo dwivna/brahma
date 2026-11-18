@@ -26,9 +26,7 @@ def repository(path: Path) -> Path:
     return Path(git(path.expanduser().resolve(), "rev-parse", "--show-toplevel"))
 
 
-def create_worktree(repo: Path, home: Path, session: str) -> Path:
-    if git(repo, "status", "--porcelain", "--untracked-files=no"):
-        raise ValueError("Tracked changes exist. Commit/stash them yourself or select a clean worktree first")
+def create_worktree(repo: Path, home: Path, session: str, base_revision: str = "HEAD") -> Path:
     path = home / "worktrees" / session
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
@@ -39,7 +37,9 @@ def create_worktree(repo: Path, home: Path, session: str) -> Path:
         if left != right or git(path, "branch", "--show-current") != "brahma/" + session:
             raise ValueError("Saved worktree identity does not match this session")
         return path
-    git(repo, "worktree", "add", "-b", "brahma/" + session, str(path), "HEAD")
+    if git(repo, "status", "--porcelain", "--untracked-files=no"):
+        raise ValueError("Tracked changes exist. Commit/stash them yourself or select a clean worktree first")
+    git(repo, "worktree", "add", "-b", "brahma/" + session, str(path), base_revision)
     return path
 
 

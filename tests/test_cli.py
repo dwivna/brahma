@@ -116,7 +116,7 @@ class Commands(unittest.TestCase):
                 code, out, _ = run_cli("service", "status", state=Path(tmp) / "state")
             self.assertEqual(code, 0)
             self.assertIn("Queued approved jobs: 1", out)
-            self.assertIn("unknown quota is not treated as available", out)
+            self.assertIn("unknown quota permits one bounded approved attempt", out)
 
     def test_pause_is_durable_and_blocks_automatic_resume(self):
         with tempfile.TemporaryDirectory() as tmp:

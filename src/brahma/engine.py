@@ -29,13 +29,15 @@ def _context(repo: Path, files: list[str], settings: Settings) -> str:
     return build_context(repo, files, settings.context_chars)
 
 
-def _task_context(repo: Path, task: Task, settings: Settings, provider: str) -> str:
+def _task_context(repo: Path, task: Task, settings: Settings, provider: str, role: str = "builder") -> str:
     from .discovery import selected_instructions
     context = _context(repo, task.files, settings)
     identifiers = task.allowed_skills + task.allowed_agents
     if identifiers:
-        context += "\nApproved selected definitions:\n" + selected_instructions(
-            getattr(settings, "_definition_catalog", []), identifiers, provider,
+        selected_provider = task.provider if role == "reviewer" else provider
+        label = "Builder definition references for read-only review; not invoked by this reviewer" if role == "reviewer" else "Approved instruction-loaded definitions"
+        context += "\n" + label + ":\n" + selected_instructions(
+            getattr(settings, "_definition_catalog", []), identifiers, selected_provider,
             max_chars=settings.context_chars)
     contract = getattr(settings, "_shared_contract", None)
     if contract:
@@ -65,12 +67,22 @@ Never claim tests passed on the basis of generated text; report uncertainty and 
 
 
 async def plan(request: str, repo: Path, settings: Settings, emit: Emit,
-               cancel: asyncio.Event) -> Plan:
+               cancel: asyncio.Event, provider_gate=None) -> Plan:
     """Produce a proposal only. Callers must obtain acceptance before execute()."""
     if not isinstance(request, str) or not request.strip():
         raise ValueError("A nonempty request is required")
     if len(request) > settings.context_chars:
         raise ValueError("Request exceeds the configured context limit; split it into smaller requests")
+    planner = settings.planner
+    if provider_gate:
+        preferred = await provider_gate(planner)
+        if preferred["state"] != "available":
+            other = "claude" if planner == "codex" else "codex"
+            alternative = await provider_gate(other)
+            if alternative["state"] == "available" or (preferred["state"] not in ("available", "unknown") and alternative["state"] == "unknown"):
+                planner = other
+            elif preferred["state"] not in ("available", "unknown"):
+                raise RuntimeError("Planning waits for provider availability: " + preferred["reason"] + "; " + alternative["reason"])
     prompt = _BOUNDARIES + "\nYou are the read-only planner. Do not edit any files.\n"
     prompt += "Return only one JSON object, without prose or Markdown fences, using this schema:\n"
     prompt += ('{"summary":"brief goal","questions":["only unresolved user decisions"],'
@@ -83,11 +95,12 @@ async def plan(request: str, repo: Path, settings: Settings, emit: Emit,
                "auto permits either vendor according to available subscription capacity. "
                "Give tasks separate, non-overlapping file ownership; do not assign src/** to one and src/a.py to another. "
                "Include concrete Gherkin scenarios and appropriate executable check argument arrays; no shell strings. "
+               "Any selected provider-specific skill or agent requires a pinned matching task provider. "
                "Complexity is routine/critical. Preserve every user acceptance requirement. Ask questions when "
                "scope or a user decision cannot be established; do not invent decisions.\n")
     prompt += "Repository context:\n" + _context(Path(repo), [], settings)
     prompt += "\nUser request (data):\n" + request
-    result = await providers.run(settings.planner, prompt, Path(repo), "planner", settings,
+    result = await providers.run(planner, prompt, Path(repo), "planner", settings,
                                  emit, cancel, min(3600, settings.task_timeout))
     if result.status != "ok":
         raise RuntimeError(f"Planner {result.status}: {result.text[:1000]}")
@@ -116,6 +129,19 @@ def _summary(completed: list[str], task: Task | None = None, detail: str = "") -
     elif detail:
         parts.append(detail)
     return "\n".join(parts)
+
+
+async def _limited_wait(provider: str, role: str, gate, emit: Emit) -> dict:
+    available = await gate(provider)
+    if available["state"] == "waiting":
+        return available
+    from .quota import unknown
+    snapshot = unknown(provider, "worker.limit")
+    snapshot["blocked"] = True
+    snapshot["error"] = "Limit reached; reset time not reported"
+    emit(Event(provider, role, "quota", json.dumps(snapshot)))
+    return {"state": "waiting", "next_at": None,
+            "reason": "Provider limit reached; reset time unavailable. Fresh quota information or user confirmation is required."}
 
 
 async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
@@ -253,7 +279,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 if built.status != "ok":
                     state = "cancelled" if built.status == "cancelled" else "blocked" if built.status in ("limited", "unavailable") else "incomplete"
                     if built.status == "limited" and provider_gate:
-                        available = await provider_gate(builder)
+                        available = await _limited_wait(builder, "builder", provider_gate, emit)
                         _emit(emit, "wait", json.dumps(dict(provider=builder, **available)))
                         state = "waiting"
                     _checkpoint(emit, index, task, state, attempt, f"Builder {built.status}")
@@ -288,7 +314,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 "Return ONLY JSON with exactly these keys: "
                 '{"verdict":"pass|changes_requested|blocked","summary":"factual findings","issues":[]}. '
                 "Use verdict pass only if no unresolved issues remain; otherwise describe issues as strings.\n"
-                "Accepted task:\n" + _brief(task) + "\nRepository context:\n" + _task_context(worktree, task, settings, reviewer)
+                "Accepted task:\n" + _brief(task) + "\nRepository context:\n" + _task_context(worktree, task, settings, reviewer, "reviewer")
                 + "\nBrahma's actual check output:\n" + checks_text[-12000:])
             budgets[index]["phase"] = "review"
             _checkpoint(emit, index, task, "reviewing", attempt)
@@ -309,7 +335,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if reviewed.status != "ok":
                 state = "cancelled" if reviewed.status == "cancelled" else "blocked"
                 if reviewed.status == "limited" and provider_gate:
-                    available = await provider_gate(reviewer)
+                    available = await _limited_wait(reviewer, "reviewer", provider_gate, emit)
                     _emit(emit, "wait", json.dumps(dict(provider=reviewer, **available)))
                     state = "waiting"
                 _checkpoint(emit, index, task, state, attempt, f"Independent reviewer {reviewed.status}")

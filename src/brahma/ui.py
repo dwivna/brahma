@@ -21,6 +21,8 @@ HELP = """Type your goal here. Brahma proposes a plan; /approve runs only that p
 /repo PATH   select a Git repository       /new   start a fresh conversation
 /doctor      check signed-in CLIs           /status   checkpoint and reported usage
 /approve     execute the displayed plan     /stop or Escape   stop the active process group
+/capacity claude|codex   confirm you checked capacity when no reset was reported
+/skills or /agents   inspect available definitions
 /sessions    show saved conversations       /resume ID   reopen a checkpoint
 /publish     push the completed branch and create a draft PR (requires gh)
 No automatic merges, releases or paid API fallback. Approved queues can continue through the local service after quit. /stop cancels future restarts.
@@ -220,7 +222,7 @@ class BrahmaApp(App):
                                   "Budget: 60 active minutes/task; at most 3 repairs; quota waiting excluded."))
             lines.append("/approve locks this complete contract and permits queued resumption. /stop cancels restarts.")
         if self.session:
-            lines.append("Approved checks: " + ("; ".join(" ".join(c) for c in self.session.settings.checks) or
+            lines.append("Approved checks: " + ("; ".join(" ".join(c) for c in (plan.checks or self.session.settings.checks)) or
                         "none configured — outcome cannot be marked ready"))
         self.write(Event(kind="plan", text="\n".join(lines)))
 
@@ -284,6 +286,13 @@ class BrahmaApp(App):
                         self.write(Event(text=f"{entry.id} [{entry.scope}; discovered, native loading disabled] {entry.description}"))
                 for warning in catalog.errors:
                     self.write(Event(kind="warning", text=warning))
+            elif value.startswith("/capacity "):
+                if self.demo:
+                    raise ValueError("Demo mode cannot change quota state or enqueue work")
+                if not self.session:
+                    raise ValueError("Select a waiting session first")
+                self.session.confirm_capacity(value.split(maxsplit=1)[1])
+                self.write(Event(text="Your capacity confirmation queued one bounded continuation of the existing contract."))
             elif value == "/sessions":
                 for row in self.store.recent():
                     self.write(Event(text=f"{row['id']}  {row['status']}  {row['repo']}"))

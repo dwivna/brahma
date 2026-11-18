@@ -151,6 +151,8 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                 entry = available.get(identifier)
                 if entry is None or entry.kind != kind:
                     raise ValueError(f"Selected {kind} is not in the current inventory: {identifier}")
+                if task.provider == "auto" or entry.provider != task.provider:
+                    raise ValueError("Provider-specific definitions require the task to pin their provider: " + identifier)
                 current = fingerprint(entry)
                 if current != entry.sha256:
                     raise ValueError(f"Definition changed since discovery: {identifier}")

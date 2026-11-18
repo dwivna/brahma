@@ -57,13 +57,15 @@ Codex quota polling was verified against its native read-only endpoint. Claude
 supplies stream limit events; a complete independently polled five-hour/weekly
 snapshot is not established for its headless mode. Missing capacity remains
 unknown, with one bounded approved attempt; a known rejection without a reset
-stays waiting for fresh information. Brahma cannot alter provider quotas or buy
+stays waiting for fresh information. If you personally check capacity,
+`/capacity claude` or `/capacity codex` queues one bounded continuation of the
+existing approved waiting session. It cannot reactivate a stopped session. Brahma cannot alter provider quotas or buy
 reset/usage credits. Read the [provider evidence](docs/provider-capabilities.md).
 
 Native continuation is for Brahma-managed worker sessions. Arbitrary external
 CLI/desktop/cloud session takeover is not implemented. Automatic conversation
-compaction and cost savings have not been benchmarked. Global installation and
-GitHub source publication are being finalized after independent review.
+compaction and cost savings have not been benchmarked. This remains a development
+prototype; review findings and verification are recorded in docs/.
 
 For a local editable installation exposing the terminal command:
 

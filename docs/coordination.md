@@ -66,3 +66,24 @@ Codex read-only quota adapter returned real five-hour and weekly windows. Raw
 account usage, native session identifiers and transcripts are not published.
 Claude is reviewing the coordinator integration read-only; findings remain to
 be addressed before release readiness. No source commit, push or merge yet.
+
+## Current checkpoint after review fixes
+
+All implementation work now lives in this clone. The installed command is
+`brahma` (editable checkout). The local background service is registered with
+zero approved jobs. Full verification: 137 tests /26.232s, passed. See
+`build-review-20261118.md` for review findings, dispositions and limits. Source
+publication is a draft for review, not release or merge approval. Next work:
+exercise a real two-provider fixture through the installed planner/worker flow,
+resolve the external-session control design, and benchmark prompt compaction
+before claiming savings. Keep these outside Anvi's training state.
+
+## Concurrent-work reconciliation
+
+The clone received baseline and decision-round commits from another workstream
+while this build continued. Its active branch is `dev/brahma-prototype`; those
+commits and rounds 4–7 were read and preserved. The review-fix checkpoint builds
+on them. Those newer rounds add learned routing, repository memory, typed minimal
+handoffs, desktop/web parity, distinct interrupts and stronger enforcement/kill
+switch requirements; they remain pending implementation and examination. Do not
+present this prototype or 137 passing current tests as their completion.

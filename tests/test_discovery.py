@@ -71,7 +71,9 @@ class Discovery(unittest.TestCase):
             write(repo / ".claude/agents/reviewer.md", "---\nname: reviewer\n---\nCLAUDE_ONLY\n")
             catalog = discover(repo, home)
             ids = ["codex/skill/example", "claude/agent/reviewer"]
-            loaded = selected_instructions(catalog.entries, ids, "codex")
+            with self.assertRaisesRegex(ValueError, "cannot load"):
+                selected_instructions(catalog.entries, ids, "codex")
+            loaded = selected_instructions(catalog.entries, [ids[0]], "codex")
             self.assertIn("instruction-loaded", loaded)
             self.assertIn("referenced.md", loaded)
             self.assertNotIn("CLAUDE_ONLY", loaded)

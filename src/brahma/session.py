@@ -75,7 +75,9 @@ class Session:
             raise ValueError("Conversation brief is too large; use /new with a concise goal. History is preserved")
         with self.lock():
             active = Path(saved["worktree"]) if saved["worktree"] else self.repo
-            plan = await engine.plan(brief, active, self.settings, self.emit, self.cancel)
+            from .scheduler import Capacity
+            plan = await engine.plan(brief, active, self.settings, self.emit, self.cancel,
+                                     provider_gate=Capacity(self.store, self.cancel))
         self.set_plan(plan)
         self.emit(Event(kind="plan", text=json.dumps(self.plan.to_dict(), ensure_ascii=False)))
         return self.plan
@@ -83,17 +85,33 @@ class Session:
     def set_plan(self, plan: Plan):
         from .contracts import prepare_contract, write_contract
         from .discovery import discover
-        self.settings = Settings.load(self.repo)
-        self.plan = plan
-        self.generation = uuid.uuid4().hex
+        settings = Settings.load(self.repo)
+        catalog = discover(self.repo)
         contract = None
         if not plan.questions:
-            checks = plan.checks or self.settings.checks
-            candidate = prepare_contract(plan, self.repo, checks, task_timeout=self.settings.task_timeout,
-                                         repair_cycles=self.settings.repair_cycles,
-                                         definitions=discover(self.repo).entries,
-                                         model_profiles=asdict(self.settings))
+            checks = plan.checks or settings.checks
+            candidate = prepare_contract(plan, self.repo, checks, task_timeout=settings.task_timeout,
+                                         repair_cycles=settings.repair_cycles,
+                                         definitions=catalog.entries,
+                                         model_profiles=asdict(settings),
+                                         base_revision=(gittools.git(Path(self.store.session(self.key)["worktree"]), "rev-parse", "HEAD")
+                                                        if self.store.session(self.key)["worktree"] else None))
+            # Check required context before asking for approval; never silently truncate it.
+            from .engine import _task_context, _brief, _BOUNDARIES
+            settings._definition_catalog = catalog.entries
+            settings._shared_contract = candidate
+            for task in plan.tasks:
+                builders = ("codex", "claude") if task.provider == "auto" else (task.provider,)
+                for builder in builders:
+                    reviewer = "claude" if builder == "codex" else "codex"
+                    for provider, role in ((builder, "builder"), (reviewer, "reviewer")):
+                        required = _BOUNDARIES + _brief(task) + _task_context(self.repo, task, settings, provider, role)
+                        if len(required) > settings.context_chars:
+                            raise ValueError("Required contract context exceeds budget before approval; split this plan")
             contract = str(write_contract(self.store.home / "contracts" / self.key, candidate))
+        self.settings = settings
+        self.plan = plan
+        self.generation = uuid.uuid4().hex
         self.store.finish_job(self.key, "cancelled")
         self.store.set(self.key, plan=json.dumps(plan.to_dict()), status="awaiting_approval", stopped=0,
                        contract=contract, approved_digest=None)
@@ -112,12 +130,29 @@ class Session:
         catalog = discover(self.repo)
         verify_contract(contract, self.plan, self.repo, checks, task_timeout=fresh.task_timeout,
                         repair_cycles=fresh.repair_cycles, definitions=catalog.entries,
-                        model_profiles=asdict(fresh))
+                        model_profiles=asdict(fresh), base_revision=contract["payload"]["base_revision"])
         return contract, replace(fresh, checks=checks), catalog
 
     def stop(self):
         self.store.stop(self.key)
         self.cancel.set()
+
+    def confirm_capacity(self, provider: str):
+        if provider not in ("claude", "codex"):
+            raise ValueError("Choose claude or codex")
+        from .quota import unknown
+        saved = self.store.session(self.key)
+        if saved["status"] != "waiting" or saved["stopped"]:
+            raise ValueError("Capacity confirmation only resumes an approved waiting session; stopped tasks require approval")
+        contract, _, _ = self.approved_contract()
+        if saved["approved_digest"] != contract["digest"]:
+            raise ValueError("This contract has no current approval")
+        waits = [json.loads(e["text"]) for e in self.store.events(self.key) if e["kind"] == "wait"]
+        if not waits or waits[-1].get("provider") != provider:
+            raise ValueError("This session is waiting for a different provider")
+        self.store.observe(unknown(provider, "user.confirmed"))
+        self.emit(Event(role="user", kind="capacity_confirmed", text="User confirms capacity to retry " + provider + "; remaining allowance still unmeasured"))
+        self.store.enqueue(self.key, self.generation, contract["digest"], time.time(), "User confirmed provider capacity; one bounded continuation")
 
     def queue_resume(self):
         saved = self.store.session(self.key)
@@ -149,7 +184,9 @@ class Session:
             self.store.set(self.key, stopped=0, approved_digest=contract["digest"])
         self.cancel.clear()
         with self.lock():
-            worktree = gittools.create_worktree(self.repo, self.store.home, self.key)
+            worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
+            if gittools.git(worktree, "rev-parse", "HEAD") != contract["payload"]["base_revision"]:
+                raise ValueError("Worktree base changed outside this approval; review a new plan")
             self.store.set(self.key, worktree=str(worktree), status="running")
             self.emit(Event(kind="approved", text="Approved contract " + contract["digest"] + " in branch brahma/" + self.key))
             # Only fully verified task checkpoints are skipped; interrupted work stays for re-review.

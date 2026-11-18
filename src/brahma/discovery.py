@@ -98,7 +98,7 @@ def selected_instructions(entries: Iterable[Definition], identifiers: Iterable[s
         seen.add(identifier)
         entry = available[identifier]
         if entry.provider != provider:
-            continue
+            raise ValueError("Approved definition cannot load for " + provider + ": " + identifier)
         content = _safe_file(Path(entry.path), Path(entry.root))
         digest = hashlib.sha256(content).hexdigest()
         if digest != entry.sha256:
