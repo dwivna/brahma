@@ -119,3 +119,20 @@ Abhinav: all four recommended options.
    reviewer still disagrees, Brahma stops, shows both positions and waits for Abhinav.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 6 — 18 November 2026 (interface)
+
+Abhinav: Q1 B, Q2 A, Q3 A, Q4 A.
+
+1. **Doors:** the terminal conversation plus a desktop/web view. Every door must lead to the same session
+   and memory; the second interface may not hold separate state or approvals. Voice is not in this round.
+2. **Status:** a plain-language live board per task: who is working, phase, active time of sixty minutes,
+   repair cycles, provider capacity (known / unknown / waiting with reset), next step and anything needing
+   Abhinav. Measured usage is shown separately from estimates; raw transcripts are not shown.
+3. **Interrupts:** Stop cancels and checkpoints; Pause keeps the task for a later resume; a note is applied at
+   the next checkpoint. Any change of scope, files or permissions needs a new approval. No live injection
+   into a running worker.
+4. **Attention:** notify only for decisions and blocks: approval needed, escalated disagreement, checks
+   failing after repairs, lost sign-in, work ready for review. Routine progress stays on the board.
+
+These are required capabilities, not a report that they exist in the prototype.
