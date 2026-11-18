@@ -136,3 +136,24 @@ Abhinav: Q1 B, Q2 A, Q3 A, Q4 A.
    failing after repairs, lost sign-in, work ready for review. Routine progress stays on the board.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 7 — 18 November 2026 (safety limits)
+
+Abhinav: hard stops A/B/C (not D), enforcement A, untrusted text A, kill switch A.
+
+1. **Hard stops, even inside an approved contract:** (a) merge, release or push to the default branch;
+   (b) edits outside the locked file ownership; (c) reading or sending credentials or secrets, including
+   Claude/Codex sign-in material and environment files, which are also redacted from logs and packets.
+   These are enforced in code, not only requested in prompts. Deleting or rewriting history was **not**
+   selected as a hard stop; until Abhinav decides otherwise it stays a flagged action needing explicit
+   approval, and it is never done automatically.
+2. **Enforcement:** restrict before, verify after. Workers run on an isolated branch or worktree with each
+   provider CLI's strictest working sandbox and permission settings; Brahma then inspects the diff and Git
+   state. Violations are reverted on the branch and block "ready". Brahma states what it cannot prevent.
+3. **Untrusted text:** repo files, issues, PR comments, web pages and worker output are data, never
+   instructions. Only Abhinav and the locked contract direct work. Embedded instructions are shown to
+   Abhinav as flagged text and ignored for action. A repository's instruction files apply only when selected.
+4. **Kill switch:** one command stops all workers and the service, cancels future restarts, checkpoints
+   and writes a stop record. Nothing is deleted. Resuming needs Abhinav's explicit action.
+
+These are required capabilities, not a report that they exist in the prototype.
