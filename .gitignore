@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.py[cod]
+.brahma/
+.env
+.env.*
+*.sqlite*
+*.db
+dist/
+*.egg-info/
+.DS_Store
+output/

@@ -1,0 +1,18 @@
+[build-system]
+requires = ["hatchling>=1.26"]
+build-backend = "hatchling.build"
+
+[project]
+name = "brahma-orchestrator"
+version = "0.1.0"
+description = "One terminal for supervised Claude Code and Codex development"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+dependencies = ["textual>=3.0,<8"]
+
+[project.scripts]
+brahma = "brahma.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/brahma"]
