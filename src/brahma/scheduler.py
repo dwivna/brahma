@@ -122,8 +122,13 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
         _requeue_interrupted(store, session, job)
         return True
     if error is None and result is not None:
+        held = store.killed or store.session(key)["paused"]
+        if result.status == "cancelled" and held and not store.session(key)["stopped"]:
+            # A pause or the kill switch holds the work; it is not a stop, so the approved job stays queued.
+            _requeue_interrupted(store, session, job)
+            return True
         if result.status != "waiting":
-            store.finish_job(key)
+            store.finish_job(key, "cancelled" if store.session(key)["stopped"] else "done")
         return True
     if isinstance(error, ValueError) and "Another Brahma worker" in str(error):
         store.enqueue(key, session.generation, job["digest"], time.time() + RETRY_SECONDS,

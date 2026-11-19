@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.2.0.** This README describes the
+**Status: early development prototype, version 0.3.0.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
@@ -188,14 +188,21 @@ execution permission.
 | `/approve` | Approve and execute the displayed contract, or explicitly continue it. |
 | `/skills`, `/agents` | Inventory user/project definitions; discovery is not activation. |
 | `/sessions`, `/resume ID` | List sessions or open a checkpoint without executing it. |
-| `/stop`, `/pause`, Escape | Stop this session and prevent its queued automatic restarts. |
+| `/stop`, Escape | Stop this session for good: cancels its queue; running again needs a new approval. |
+| `/pause` | Hold this session: approval and queue are kept; `brahma resume ID` releases it. |
+| `/kill` | Global kill switch: halt every worker and refuse new work until `brahma kill --release`. |
 | `/capacity codex`, `/capacity claude` | Record your capacity confirmation and queue one approved waiting continuation. |
 | `/publish` | Push a ready Brahma branch and create a draft PR using `gh`. |
 | `/quit`, Ctrl+Q | Close the UI; approved queued work can continue via the service. |
 
-Ctrl+N starts a fresh conversation. Currently, `/pause` and `/stop` share durable
-cancellation behavior. Distinct Pause controls and a global kill switch are
-planned; the current session controls do not stop every session/service.
+Ctrl+N starts a fresh conversation. The same controls exist in the shell:
+`brahma pause|resume|stop SESSION` and `brahma kill [--release]`. The kill switch
+is a `KILL` file in the state directory; while it exists no worker starts, running
+workers stop within seconds, and coordinator Git writes are refused. Releasing it
+never restarts anything by itself.
+
+Brahma's Git guard blocks, in code, every merge, rebase, reset, amend, pull, tag,
+branch deletion, force or delete push, and any push that is not a `brahma/*` branch.
 
 ### From your shell
 

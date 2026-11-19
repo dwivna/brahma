@@ -54,6 +54,8 @@ class Parsing(unittest.TestCase):
         for action in ("install", "status", "stop"):
             self.assertEqual(p.parse_args(["service", action]).action, action)
         self.assertEqual(p.parse_args(["pause", "abc"]).session, "abc")
+        self.assertEqual(p.parse_args(["resume", "abc"]).session, "abc")
+        self.assertTrue(p.parse_args(["kill", "--release"]).release)
         self.assertTrue(p.parse_args(["--demo"]).demo)
         self.assertEqual(p.parse_args(["--resume", "abc"]).resume, "abc")
         self.assertTrue(p.parse_args(["run", "plan.json", "--approve"]).approve)
@@ -136,20 +138,41 @@ class Commands(unittest.TestCase):
             self.assertIn("Queued approved jobs: 1", out)
             self.assertIn("unknown quota permits one bounded approved attempt", out)
 
-    def test_pause_is_durable_and_blocks_automatic_resume(self):
+    def test_pause_holds_without_losing_the_queue_and_resume_releases_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             store, session = repo_session(tmp)
             store.enqueue(session.key, session.generation, "d" * 64, 0.0, "due")
             store.close()
             code, out, _ = run_cli("pause", session.key, state=Path(tmp) / "state")
             self.assertEqual(code, 0)
-            self.assertIn("no automatic resume", out)
+            self.assertIn("nothing runs until", out)
+            check = Store(Path(tmp) / "state")
+            self.assertEqual(check.session(session.key)["paused"], 1)
+            self.assertEqual(check.session(session.key)["stopped"], 0)
+            self.assertIsNone(check.claim(time.time()))           # held
+            self.assertEqual(len(check.pending()), 1)              # but the approved job is kept
+            check.enqueue(session.key, session.generation, "d" * 64, 0.0, "provider reset")
+            self.assertIsNone(check.claim(time.time()))           # a reset cannot revive a paused session
+            check.close()
+            code, out, _ = run_cli("resume", session.key, state=Path(tmp) / "state")
+            self.assertEqual(code, 0)
+            check = Store(Path(tmp) / "state")
+            self.assertIsNotNone(check.claim(time.time()))        # runs again under the existing approval
+            check.close()
+
+    def test_stop_cancels_the_queue_and_needs_a_new_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session = repo_session(tmp)
+            store.enqueue(session.key, session.generation, "d" * 64, 0.0, "due")
+            store.close()
+            code, out, _ = run_cli("stop", session.key, state=Path(tmp) / "state")
+            self.assertEqual(code, 0)
+            self.assertIn("needs a new approval", out)
             check = Store(Path(tmp) / "state")
             self.assertEqual(check.session(session.key)["stopped"], 1)
-            self.assertIsNone(check.claim(time.time()))
             self.assertEqual(check.pending(), [])
-            check.enqueue(session.key, session.generation, "d" * 64, 0.0, "provider reset")
-            self.assertEqual(check.pending(), [])  # a reset cannot revive a paused session
+            run_cli("resume", session.key, state=Path(tmp) / "state")   # resume must not undo a stop
+            self.assertIsNone(check.claim(time.time()))
             check.close()
 
     def test_pause_unknown_session_fails_cleanly(self):

@@ -173,6 +173,22 @@ class Session:
         self.store.stop(self.key)
         self.cancel.set()
 
+    def pause(self):
+        """Distinct from stop: the approval and queued job survive; `resume` lets them run again."""
+        self.store.pause(self.key)
+        self.cancel.set()
+
+    def halted(self) -> str | None:
+        """Why work must not continue right now, or None."""
+        if self.store.killed:
+            return "Kill switch engaged"
+        saved = self.store.session(self.key)
+        if saved["stopped"]:
+            return "Stopped by user"
+        if saved["paused"]:
+            return "Paused by user"
+        return None
+
     def confirm_capacity(self, provider: str):
         if provider not in ("claude", "codex"):
             raise ValueError("Choose claude or codex")
@@ -192,7 +208,7 @@ class Session:
 
     def queue_resume(self):
         saved = self.store.session(self.key)
-        if (saved["stopped"] or not saved["approved_digest"] or
+        if (saved["stopped"] or saved["paused"] or not saved["approved_digest"] or
                 saved["status"] not in ("cancelled", "interrupted")):
             return
         contract, _, _ = self.approved_contract()
@@ -204,6 +220,8 @@ class Session:
     async def execute(self, *, scheduled: bool = False) -> Result:
         from . import engine
         from .scheduler import Capacity
+        if self.store.killed:
+            raise ValueError("Kill switch engaged: no work starts. Release it with `brahma kill --release`")
         if self.plan is None or self.plan.questions:
             raise ValueError("Resolve plan questions before approval")
         if self.store.session(self.key)["status"] == "ready":
@@ -214,10 +232,10 @@ class Session:
         self.settings = settings
         if scheduled:
             saved = self.store.session(self.key)
-            if saved["stopped"] or saved["approved_digest"] != contract["digest"]:
+            if saved["stopped"] or saved["paused"] or saved["approved_digest"] != contract["digest"]:
                 raise ValueError("Scheduled approval is no longer valid")
         else:
-            self.store.set(self.key, stopped=0, approved_digest=contract["digest"])
+            self.store.set(self.key, stopped=0, paused=0, approved_digest=contract["digest"])
         self.cancel.clear()
         with self.lock():
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
@@ -261,7 +279,7 @@ class Session:
                             completed.discard(index)
             async def monitor_stop():
                 while True:
-                    if self.store.session(self.key)["stopped"]:
+                    if self.halted():
                         self.cancel.set()
                         return
                     await asyncio.sleep(.2)
@@ -269,9 +287,10 @@ class Session:
             capacity = Capacity(self.store, self.cancel)
             async def gate(provider):
                 self.approved_contract()
-                if self.store.session(self.key)["stopped"]:
+                reason = self.halted()
+                if reason:
                     self.cancel.set()
-                    return {"state": "unavailable", "next_at": None, "reason": "Stopped by user"}
+                    return {"state": "unavailable", "next_at": None, "reason": reason}
                 return await capacity(provider)
             try:
                 result = await engine.execute(self.plan, worktree, self.settings, self.emit, self.cancel,
@@ -289,8 +308,9 @@ class Session:
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                 # A durable stop takes precedence over an automatic restart.
-                if self.store.session(self.key)["stopped"]:
-                    result = Result("brahma", "cancelled", "Stopped by user; checkpoint retained", result.usage)
+                reason = self.halted()
+                if reason:
+                    result = Result("brahma", "cancelled", reason + "; checkpoint retained", result.usage)
                 self.store.set(self.key, status=result.status)
                 if result.status == "waiting":
                     waits = [json.loads(e["text"]) for e in self.store.events(self.key) if e["kind"] == "wait"]

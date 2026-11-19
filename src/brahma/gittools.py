@@ -13,7 +13,50 @@ from . import ownership
 from .models import Event
 
 
+DEFAULT_BRANCHES = ("main", "master", "develop", "trunk", "production", "release")
+_FORBIDDEN_COMMANDS = ("merge", "rebase", "reset", "cherry-pick", "revert", "filter-branch", "filter-repo",
+                       "update-ref", "replace", "gc", "prune", "reflog", "am", "pull")
+_FORCE_FLAGS = ("--force", "-f", "--force-with-lease", "--force-if-includes", "--delete", "-d", "--mirror",
+                "--prune", "--all", "--tags", "--follow-tags", "--no-verify")
+
+
+def refuse(args: tuple[str, ...]) -> str | None:
+    """Hard blocks (Round 7/11): history rewriting, default-branch writes, merges and force pushes.
+
+    Brahma only ever commits to its own `brahma/*` branch and pushes that branch. Anything else is
+    refused here, in code, whatever a plan or a model asks for. Returns the reason, or None if allowed.
+    """
+    words = [a for a in args if not a.startswith("-")]
+    command = words[0] if words else ""
+    if command in _FORBIDDEN_COMMANDS:
+        return f"git {command} is blocked: Brahma never rewrites history or merges"
+    if command == "commit" and any(a.startswith("--amend") for a in args):
+        return "git commit --amend is blocked: Brahma never rewrites history"
+    if command == "branch" and any(a in ("-d", "-D", "-m", "-M", "-f", "--delete", "--move", "--force") for a in args):
+        return "Deleting, renaming or forcing branches is blocked"
+    if command == "tag" and len(args) > 1:
+        return "Creating or deleting tags is blocked: releases are Abhinav's decision"
+    if command == "push":
+        if any(a in _FORCE_FLAGS or (a.startswith("--force")) or a.startswith("--delete") for a in args):
+            return "Force, delete, mirror or bulk pushes are blocked"
+        refs = words[1:]
+        targets = refs[1:] if refs else []  # first word is the remote
+        if not targets:
+            return "Push needs an explicit brahma/* branch"
+        for ref in targets:
+            source, _, destination = ref.partition(":")
+            if ref.startswith(("+", ":")) or not source.startswith("brahma/") or (
+                    destination and not destination.startswith("brahma/")):
+                return "Only brahma/* branches may be pushed; default branches are never written"
+    if command == "checkout" and any(a in ("-B", "--force", "-f") for a in args):
+        return "Forced checkout is blocked"
+    return None
+
+
 def git(repo: Path, *args: str) -> str:
+    reason = refuse(args)
+    if reason:
+        raise ValueError(reason)
     result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
                             text=True, capture_output=True, timeout=60)
     if result.returncode:

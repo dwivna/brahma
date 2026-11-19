@@ -16,7 +16,8 @@ class Store:
         self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, repo TEXT, created TEXT, status TEXT, plan TEXT, worktree TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, session TEXT, created TEXT, provider TEXT, role TEXT, kind TEXT, text TEXT, usage TEXT)")
         columns = {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}
-        for name, kind in (("stopped", "INTEGER DEFAULT 0"), ("contract", "TEXT"), ("approved_digest", "TEXT")):
+        for name, kind in (("stopped", "INTEGER DEFAULT 0"), ("contract", "TEXT"), ("approved_digest", "TEXT"),
+                           ("paused", "INTEGER DEFAULT 0")):
             if name not in columns:
                 self.db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs (session TEXT PRIMARY KEY, generation TEXT NOT NULL, digest TEXT NOT NULL, next_at REAL, state TEXT NOT NULL, reason TEXT)")
@@ -40,17 +41,18 @@ class Store:
         self.db.commit()
 
     def set(self, session: str, **values) -> None:
-        if not values or set(values) - {"status", "plan", "worktree", "stopped", "contract", "approved_digest"}:
+        if not values or set(values) - {"status", "plan", "worktree", "stopped", "paused", "contract", "approved_digest"}:
             raise ValueError("Invalid session fields")
         self.db.execute("UPDATE sessions SET " + ",".join(k + "=?" for k in values) + " WHERE id=?",
                         (*values.values(), session))
         self.db.commit()
 
     def session(self, key: str) -> dict:
-        row = self.db.execute("SELECT id,repo,created,status,plan,worktree,stopped,contract,approved_digest FROM sessions WHERE id=?", (key,)).fetchone()
+        row = self.db.execute("SELECT id,repo,created,status,plan,worktree,stopped,contract,approved_digest,paused FROM sessions WHERE id=?", (key,)).fetchone()
         if row is None:
             raise ValueError("Unknown session")
-        return dict(zip(("id", "repo", "created", "status", "plan", "worktree", "stopped", "contract", "approved_digest"), row))
+        return dict(zip(("id", "repo", "created", "status", "plan", "worktree", "stopped", "contract", "approved_digest",
+                         "paused"), row))
 
     def observe(self, snapshot: dict) -> None:
         if snapshot.get("provider") not in ("codex", "claude"):
@@ -75,6 +77,22 @@ class Store:
         self.db.execute("UPDATE jobs SET state='cancelled' WHERE session=?", (session,))
         self.db.commit()
 
+    def pause(self, session: str) -> None:
+        """Hold a session: its approval and queued job are kept, but nothing runs until resume()."""
+        self.session(session)
+        self.db.execute("UPDATE sessions SET paused=1 WHERE id=?", (session,))
+        self.db.commit()
+
+    def resume(self, session: str) -> None:
+        self.session(session)
+        self.db.execute("UPDATE sessions SET paused=0 WHERE id=?", (session,))
+        self.db.commit()
+
+    @property
+    def killed(self) -> bool:
+        from . import halt
+        return halt.engaged(self.home)
+
     def finish_job(self, session: str, state: str = "done") -> None:
         self.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session))
         self.db.commit()
@@ -84,9 +102,11 @@ class Store:
                 self.db.execute("SELECT session,generation,digest,next_at,state,reason FROM jobs WHERE state IN ('queued','running') ORDER BY next_at")]
 
     def claim(self, now: float) -> dict | None:
+        if self.killed:
+            return None
         with self.db:
             self.db.execute("BEGIN IMMEDIATE")
-            row = self.db.execute("SELECT session,generation,digest,next_at,state,reason FROM jobs WHERE state='queued' AND next_at IS NOT NULL AND next_at<=? AND session IN (SELECT id FROM sessions WHERE stopped=0) ORDER BY next_at LIMIT 1", (now,)).fetchone()
+            row = self.db.execute("SELECT session,generation,digest,next_at,state,reason FROM jobs WHERE state='queued' AND next_at IS NOT NULL AND next_at<=? AND session IN (SELECT id FROM sessions WHERE stopped=0 AND COALESCE(paused,0)=0) ORDER BY next_at LIMIT 1", (now,)).fetchone()
             if row:
                 self.db.execute("UPDATE jobs SET state='running' WHERE session=? AND state='queued'", (row[0],))
         return dict(zip(("session", "generation", "digest", "next_at", "state", "reason"), row)) if row else None

@@ -4,6 +4,28 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.3.0
+
+Kill switch, distinct Pause/Stop, and Git hard blocks (decisions Rounds 6, 7 and 11).
+
+**Added**
+- `brahma kill` engages a global kill switch (a `KILL` file in the state directory, so it works even if the
+  database is locked). Running workers are cancelled within seconds, no worker starts, and coordinator Git
+  writes are refused. Approvals and queued jobs are kept. `brahma kill --release` lifts it; nothing restarts
+  by itself. In the terminal: `/kill`.
+- **Pause is now different from Stop.** `brahma pause SESSION` (terminal `/pause`) holds a session: its
+  approval and queued job are kept and a running worker stops at its checkpoint. `brahma resume SESSION`
+  releases it under the existing approval. `brahma stop SESSION` (terminal `/stop`) cancels the queue and
+  running again needs a new approval; `resume` cannot undo a stop.
+- Git hard blocks in code, whatever a plan or model asks: no merge, rebase, reset, cherry-pick, amend, pull,
+  tag, branch delete/rename, force or delete push, and no push of anything but `brahma/*` branches (default
+  branches such as `master`, `main`, `develop` are never written).
+
+**Changed**
+- The state schema gains a `paused` column (added automatically; existing state keeps working).
+- A pause or kill during a scheduled run keeps the approved job queued instead of marking it done; a stop
+  marks it cancelled.
+
 ## 0.2.0
 
 Hardening patch (decision Round 13, from the independent review recorded in Round 11).

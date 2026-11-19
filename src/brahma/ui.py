@@ -24,6 +24,7 @@ HELP = """Type your goal here. Brahma proposes a plan; /approve runs only that p
 /usage [codex|claude]   inspect reported quota and resets without a model request
 /models [codex|claude]  discover advertised models and task profiles without generation
 /approve     execute the displayed plan     /stop or Escape   stop the active process group
+/pause   hold (resume later)   /kill   global kill switch
 /capacity claude|codex   confirm you checked capacity when no reset was reported
 /skills or /agents   inspect available definitions
 /sessions    show saved conversations       /resume ID   reopen a checkpoint
@@ -283,10 +284,14 @@ class BrahmaApp(App):
         value = event.value.strip()
         if not value:
             return
-        if value in ("/stop", "/pause", "/quit"):
+        if value in ("/stop", "/pause", "/quit", "/kill"):
             event.input.value = ""
             if value == "/quit":
                 await self.action_quit()
+            elif value == "/pause":
+                self.action_pause()
+            elif value == "/kill":
+                self.action_kill()
             else:
                 self.action_stop()
             return
@@ -419,6 +424,22 @@ class BrahmaApp(App):
         elif not self.job or self.job.done():
             self.job = asyncio.create_task(self.handle("/approve"))
             self.refresh_status()
+
+    def action_pause(self):
+        self.usage_cancel.set()
+        if self.session and not self.demo:
+            self.session.pause()
+        self.write(Event(text="Paused: the approval and queue are kept and nothing runs until `brahma resume "
+                         + (self.session.key if self.session else "SESSION") + "`. An active worker stops at its checkpoint."))
+
+    def action_kill(self):
+        from . import halt
+        self.usage_cancel.set()
+        halt.engage(self.store.home)
+        if self.session and not self.demo:
+            self.session.cancel.set()
+        self.write(Event(text="Kill switch engaged: all workers stop, no new work starts, Git writes are refused. "
+                         "Lift it with `brahma kill --release`."))
 
     def action_stop(self):
         self.usage_cancel.set()

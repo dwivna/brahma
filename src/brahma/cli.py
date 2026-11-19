@@ -43,8 +43,14 @@ def parser():
     p.add_argument("--once", action="store_true", help="Run at most one due job, then exit")
     p = sub.add_parser("service", help="Manage the local background scheduler (macOS launchd)")
     p.add_argument("action", choices=("install", "status", "stop"))
-    p = sub.add_parser("pause", help="Durably pause a session; it will not resume automatically")
+    p = sub.add_parser("pause", help="Hold a session: approval and queue are kept but nothing runs until `resume`")
     p.add_argument("session")
+    p = sub.add_parser("resume", help="Release a paused session; it still needs its existing approval to run")
+    p.add_argument("session")
+    p = sub.add_parser("stop", help="Stop a session for good: cancels its queue; running again needs a new approval")
+    p.add_argument("session")
+    p = sub.add_parser("kill", help="Kill switch: halt every worker now and refuse new work (--release to lift)")
+    p.add_argument("--release", action="store_true", help="Lift the kill switch; approvals are untouched")
     return result
 
 
@@ -136,13 +142,26 @@ def main(argv=None):
             print(f"brahma: {error}", file=sys.stderr)
             return 2
     home = state_home()
-    if args.command == "pause":
+    if args.command == "kill":
+        from . import halt
+        if args.release:
+            print("Kill switch released. Nothing restarts by itself: use `brahma resume`/`run` as before."
+                  if halt.release(home) else "Kill switch was not engaged.")
+        else:
+            halt.engage(home)
+            print("Kill switch engaged: running workers stop at their next check (within seconds), "
+                  "no new work starts, and Git writes are refused. Approvals are kept.")
+        return 0
+    if args.command in ("pause", "resume", "stop"):
         store = Store(home)
         try:
+            action = {"pause": store.pause, "resume": store.resume, "stop": store.stop}[args.command]
             store.session(args.session)
-            store.stop(args.session)
-            print(f"Paused {args.session}: no automatic resume. A running worker stops at its checkpoint; "
-                  "resume only by explicit approved run.")
+            action(args.session)
+            print({"pause": f"Paused {args.session}: its approval and queue are kept, nothing runs until `brahma resume`. "
+                            "A running worker stops at its checkpoint.",
+                   "resume": f"Resumed {args.session}: it runs again only under its existing approval.",
+                   "stop": f"Stopped {args.session}: its queue is cancelled and running it again needs a new approval."}[args.command])
             return 0
         except ValueError as error:
             print(f"brahma: {error}", file=sys.stderr)
