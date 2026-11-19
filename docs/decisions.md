@@ -216,3 +216,31 @@ Abhinav: scheme A, bump B, gate A + B + C (not D), breaking changes B.
   breaking JSON changes to be visible by version.
 
 The Rounds 4-7 plan referenced in the Round 7 addendum is `docs/plans/rounds-4-7.plan.json`.
+
+## Round 11 — 19 November 2026 (independent review, priorities and approval)
+
+Abhinav: fix first A, approval C, exit codes A, versioning A.
+
+An independent read-only review and checks run on `master` (a75917e) found, among others: checks run with the
+owner's full environment; git-ignored files such as `.env` are invisible to the ownership gate (verified);
+`src/*.py` accepts nested files; read-side secret protection is prompt-only; a transient "overloaded" reply is
+classified as a quota limit; the Round 7 hard stops and kill switch are not implemented.
+
+1. **Order of work:** close the enforcement holes before new features: a patch-level change that fixes the
+   checks environment, ignored-file detection, ownership glob semantics and the "overloaded" misclassification,
+   each with a test. Rounds 4-7 task work waits for it.
+2. **Approval for AI callers:** a human-signed policy approval. A human signs a policy once (paths, checks,
+   budget, risk class); contracts that match it may be approved without a fresh prompt. This amends AGENTS.md
+   "Plans need user approval" and refines Round 9 item 3: the AI caller still cannot approve for itself, because
+   only the human-signed policy can authorize. **Not yet designed; no code may implement it until settled:**
+   who signs and how the AI is prevented from signing or editing the policy (for example a TTY-only step or a
+   key the agent cannot read); what a policy may never cover (the Round 7 hard stops, merge, release, scope or
+   permission expansion); expiry and revocation; the digest bound to each approval; and an audit record.
+3. **Exit codes:** a distinct code per outcome, documented and versioned; changing one is a MINOR bump.
+   Proposed starting table: 0 ready, 10 waiting/queued, 11 needs approval, 12 needs checks, 13 blocked,
+   14 cancelled, 20 usage error, 30 sign-in or CLI missing. Final table to be confirmed.
+4. **Versioning (resolves the Round 10 tensions):** each PR bumps the version; a tag is a separate release
+   decided by Abhinav and subject to the Round 10 gate. State and contracts carry a schema version; Brahma
+   refuses to run an approved contract of an unknown format and never reinterprets it; otherwise best effort.
+
+These are required capabilities, not a report that they exist in the prototype.
