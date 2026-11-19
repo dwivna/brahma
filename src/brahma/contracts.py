@@ -10,12 +10,12 @@ import subprocess
 from typing import Iterable
 
 from .discovery import Definition, fingerprint
-from . import ownership
+from . import ownership, toolchain
 from .models import Plan
 
 MAX_CONTRACT_BYTES = 512 * 1024
 # 2: gitignore-style ownership patterns, ignored-file detection, ignored_allowlist in models (0.2.0).
-CONTRACT_VERSION = 2
+CONTRACT_VERSION = 3          # 3: the payload binds the toolchain that runs the checks
 
 
 def _canonical(value: object) -> bytes:
@@ -148,7 +148,8 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                "base_revision": base_revision if base_revision is not None else _revision(repo),
                "instructions": _instructions(repo, plan), "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,
-                               "quota_wait_counts": False}, "models": model_profiles or {}}
+                               "quota_wait_counts": False}, "models": model_profiles or {},
+               "toolchain": toolchain.probe(selected_checks, repo)}
     content = _canonical(payload)
     if len(content) + 512 > MAX_CONTRACT_BYTES:
         raise ValueError("Contract exceeds size limit")
@@ -175,6 +176,12 @@ def verify_contract(contract: dict, plan: Plan, repo: Path, checks: list[list[st
     _validate(contract)
     fresh = prepare_contract(plan, repo, checks, **kwargs)
     if fresh != contract:
+        # Only blame the toolchain when everything else in the approval is unchanged.
+        same = {k: v for k, v in contract["payload"].items() if k != "toolchain"} == {k: v for k, v in fresh["payload"].items() if k != "toolchain"}
+        moved = toolchain.differences(contract["payload"].get("toolchain", {}), fresh["payload"]["toolchain"]) if same else []
+        if moved:
+            raise ValueError("Toolchain changed since approval, so the approval is not honoured: " + "; ".join(moved)
+                             + ". Fix the environment or review and approve a new contract")
         raise ValueError("Contract changed; review and approve the new contract")
 
 

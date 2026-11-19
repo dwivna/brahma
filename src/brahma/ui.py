@@ -15,6 +15,7 @@ from .gittools import repository
 from .models import Event, Plan, Task
 from .session import CONTROL, Session
 from .store import Store
+from . import toolchain
 from .usage import format_usage, read_usage, usage_request
 
 
@@ -285,6 +286,7 @@ class BrahmaApp(App):
                     lines.extend(("Contract: " + contract["digest"], "Feature file: " + str(Path(saved["contract"]).with_suffix(".feature")),
                                   contract["payload"]["feature"],
                                   "Checks: " + json.dumps(contract["payload"]["checks"]),
+                                  *toolchain.describe(contract["payload"].get("toolchain", {})),
                                   "Budget: 60 active minutes/task; at most 3 repairs; quota waiting excluded."))
                     models = contract["payload"]["models"]
                     # Locked settings that widen what a run does must be visible at approval, not only inside the digest.

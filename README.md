@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.12.3.** This README describes the
+**Status: early development prototype, version 0.13.0.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
@@ -101,7 +101,8 @@ uv run brahma --demo
    important behavior is undecided.
 3. **Answer the questions** in the shared input. Recommendations and answers do
    not authorize an unseen implementation contract.
-4. **Inspect the contract:** Gherkin, separate owned paths, actual checks, selected
+4. **Inspect the contract:** Gherkin, separate owned paths, actual checks, the toolchain
+   they will run on (program path, hash, version, `JAVA_HOME`), selected
    definitions and model/budget settings. The UI shows its hash and `.feature` path.
 5. **Use `/approve`.** Brahma works in its own `brahma/SESSION` branch/worktree,
    runs checks and requests the other provider's review. By default, readiness

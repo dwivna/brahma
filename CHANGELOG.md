@@ -4,6 +4,19 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.13.0
+
+**Added**
+- **Toolchain binding.** The approved contract now records, for every program the checks run, the file it resolves to, that
+  file's SHA-256, what it reports as its version (for Maven this includes the JDK it runs on) and the toolchain variables
+  (`JAVA_HOME`, `MAVEN_HOME`, `M2_HOME`, `GRADLE_HOME`, `VIRTUAL_ENV`, `GOROOT`, `NODE_VERSION`). Execution re-probes and refuses to run
+  if anything moved, naming what changed ("mvn: approved 'Java version: 21', now 'Java version: 26'"). This closes the gap that let a
+  service-run `mvn` use a different JDK than the one approved (live run 3). A program inside the repository (`./mvnw`) is hashed
+  and never executed to probe it. The approval screen shows the toolchain lines.
+
+**Changed**
+- Contract format is now 3. Contracts approved under format 2 are not honoured; approve a new plan.
+
 ## 0.12.3
 
 **Fixed** (found by live run 5)
