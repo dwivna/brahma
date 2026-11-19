@@ -150,7 +150,7 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                "instructions": _instructions(repo, plan), "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,
                                "quota_wait_counts": False}, "models": model_profiles or {},
-               "toolchain": {**toolchain.probe(selected_checks, toolchain_directory or repo), "basis": toolchain_basis}}
+               "toolchain": {**toolchain.probe([["git"], *selected_checks], toolchain_directory or repo), "basis": toolchain_basis}}
     content = _canonical(payload)
     if len(content) + 512 > MAX_CONTRACT_BYTES:
         raise ValueError("Contract exceeds size limit")

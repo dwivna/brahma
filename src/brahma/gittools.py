@@ -356,12 +356,12 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
     deadline = time.monotonic() + timeout
     commands = [["git", "-c", "core.hooksPath=/dev/null", "diff", "--check"], *checks]
     summaries = []
-    for position, command in enumerate(commands):
+    for command in commands:
         if cancel.is_set() or time.monotonic() >= deadline:
             return False, "Checks cancelled or time budget exhausted"
         emit(Event(kind="check", text="Running approved check: " + " ".join(command)))
         environment = check_env()
-        argv, problem = (command, None) if position == 0 else toolchain.verify_before_run(command, worktree, bound, environment)
+        argv, problem = toolchain.verify_before_run(command, worktree, bound, environment)       # includes the implicit git diff --check
         if problem:
             emit(Event(kind="check", text=problem))
             if results is not None:

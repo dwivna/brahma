@@ -24,6 +24,11 @@ decided by Abhinav. See `docs/decisions.md`.
   through the content they resolve to and their link target; creating or retargeting one is a change. Plain `java` is not bound to
   them. Not walked: pruned directories (`target`, `build`, `node_modules`, `.venv`, ...). This is defence in depth: a worker's edit to
   any file it does not own is already restored and blocks readiness through ownership verification.
+- The implicit `git diff --check` that runs before every check is bound and verified like any other program (every contract binds `git`).
+- JVM and build-tool startup variables are bound by value: `JAVA_TOOL_OPTIONS`, `_JAVA_OPTIONS`, `JDK_JAVA_OPTIONS`, `JAVA_OPTS`,
+  `MAVEN_OPTS`, `MAVEN_ARGS`, `GRADLE_OPTS` (a `-javaagent:` in any of them changes what runs, and they survive the environment scrub).
+  A secret-shaped value is stored as a digest, never as text. Symlinked directories are followed during the startup-file walk (cycle
+  safe, bounded). A Gradle project whose `gradle.properties` sets `org.gradle.java.home` is reported as having an unbound JDK.
 - A `java` that is not inside a real JDK (the macOS `/usr/bin/java` stub, a version-manager shim that reads `.java-version`) is a
   selector and is always reported as not bound. A Java build tool run without `JAVA_HOME` chooses its own
   JDK, which Brahma cannot know without running it, so the approval says the JDK is not bound; set `JAVA_HOME` to bind it.

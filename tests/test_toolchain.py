@@ -232,7 +232,7 @@ class BeforeEveryCheck(unittest.TestCase):
             subprocess.run(["git", "-C", str(worktree), "init", "-q"], check=True)
             tool = script(root / "bin", "mytool", "echo hello")
             with patch.dict(os.environ, {"PATH": str(root / "bin") + ":" + os.environ["PATH"]}):
-                bound = toolchain.probe([["mytool"]], worktree, gittools.check_env())
+                bound = toolchain.probe([["git"], ["mytool"]], worktree, gittools.check_env())
                 ok, text = await gittools.run_checks(worktree, [["mytool"]], stop, 20, events.append, results, bound)
                 self.assertTrue(ok, text)
                 self.assertIn("hello", text)
@@ -426,6 +426,79 @@ class FourthReview(unittest.TestCase):
             script(Path(tmp) / "bin", "gradle")
             bound = toolchain.probe([["gradle", "build"]], repo, {"PATH": str(Path(tmp) / "bin")})
         self.assertIn("app/gradle.properties", bound["programs"]["gradle"]["project_files"])
+
+
+class FifthReview(unittest.TestCase):
+    def test_the_implicit_git_check_is_bound_and_a_replacement_git_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            git = script(root / "bin", "git", "echo real")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["git"]], root / "wt", env)
+            command = ["git", "-c", "core.hooksPath=/dev/null", "diff", "--check"]
+            self.assertIsNone(toolchain.verify_before_run(command, root / "wt", bound, env)[1])
+            git.write_text("#!/bin/sh\necho evil\n")
+            self.assertIn("Toolchain changed", toolchain.verify_before_run(command, root / "wt", bound, env)[1])
+
+    def test_every_contract_binds_git(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = repo_with_commit(Path(tmp))
+            contract = contracts.prepare_contract(plan(), repo, [])
+        self.assertIn("git", contract["payload"]["toolchain"]["programs"])
+
+    def test_jvm_startup_variables_are_bound_by_value_and_a_javaagent_is_a_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = jdk(root, "21")
+            env = {"PATH": str(home / "bin")}
+            bound = toolchain.probe([["java"]], root / "wt", env)
+            self.assertIsNone(toolchain.verify_before_run(["java"], root / "wt", bound, env)[1])
+            env["JAVA_TOOL_OPTIONS"] = "-javaagent:/external/unapproved.jar"
+            problem = toolchain.verify_before_run(["java"], root / "wt", bound, env)[1]
+        self.assertIn("Toolchain changed", problem)
+        self.assertIn("JAVA_TOOL_OPTIONS", problem)
+
+    def test_a_secret_shaped_startup_variable_is_stored_as_a_digest_not_text(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin"), "MAVEN_OPTS": "-Dpassword=hunter2hunter2 -Xmx1g"}
+            result = toolchain.probe([["mvn"]], root / "r", env)
+        value = result["programs"]["mvn"]["variables"]["MAVEN_OPTS"]
+        self.assertTrue(value.startswith("sha256:"))
+        self.assertNotIn("hunter2", repr(result))
+
+    def test_gradle_that_selects_its_own_jdk_is_reported_unbound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "gradle.properties").write_text("org.gradle.java.home=/opt/other-jdk\n")
+            script(root / "bin", "gradle")
+            home = jdk(root, "21")
+            result = toolchain.probe([["gradle", "build"]], repo, {"PATH": str(root / "bin"), "JAVA_HOME": str(home)})
+        self.assertTrue(result["programs"]["gradle"]["runtime_unbound"])
+        self.assertTrue(any("gradle.properties (org.gradle.java.home)" in line for line in toolchain.describe(result)))
+
+    def test_gradle_properties_under_a_symlinked_directory_is_bound_and_cycles_terminate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = root / "external"
+            external.mkdir()
+            (external / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx1g\n")
+            repo = root / "repo"
+            repo.mkdir()
+            (repo / "gradle").symlink_to(external)
+            (repo / "loop").symlink_to(repo)                                # a cycle
+            script(root / "bin", "gradle")
+            done = []
+            worker = threading.Thread(target=lambda: done.append(toolchain.probe([["gradle", "-p", "gradle", "test"]], repo, {"PATH": str(root / "bin")})))
+            worker.start()
+            worker.join(15)
+            self.assertFalse(worker.is_alive(), "a symlink cycle must not hang the walk")
+        files = done[0]["programs"]["gradle"]["project_files"]
+        self.assertIn("gradle/gradle.properties", files)
+        self.assertTrue(files["gradle"].startswith("<symlinked-dir>@"))
 
 
 if __name__ == "__main__":

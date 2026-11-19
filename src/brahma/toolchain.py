@@ -26,12 +26,17 @@ import shutil
 import stat
 from pathlib import Path
 
+from .safety import looks_secret
+
 MAX_HASH_BYTES = 128 * 1024 * 1024
 _JAVA_FAMILY = {"java", "javac", "mvn", "mvnw", "gradle", "gradlew", "ant", "sbt", "kotlinc"}
 _LAUNCHERS = {"uv", "uvx", "npx", "pipx", "poetry", "env", "sh", "bash", "zsh", "dash", "xargs", "docker", "podman",
               "nix", "nix-shell", "make", "time", "timeout", "nohup", "sudo"}
 # Variables that decide which toolchain a program picks up, and only for the programs they steer.
-_JAVA_VARIABLES = ("JAVA_HOME", "MAVEN_HOME", "M2_HOME", "GRADLE_HOME")
+_JAVA_VARIABLES = ("JAVA_HOME", "MAVEN_HOME", "M2_HOME", "GRADLE_HOME", "GRADLE_USER_HOME")
+# Variables the JVM and the build tools read at startup; `-javaagent:` or a changed heap in any of them changes what runs, and they
+# survive the environment scrub, so their values are bound. A secret-shaped value is stored as a digest, never as text.
+_JAVA_STARTUP_VARIABLES = ("JAVA_TOOL_OPTIONS", "_JAVA_OPTIONS", "JDK_JAVA_OPTIONS", "JAVA_OPTS", "MAVEN_OPTS", "MAVEN_ARGS", "GRADLE_OPTS")
 # Files a Java build tool reads from the project before it does anything else. A worker can edit them (a jvm.config line can load a
 # Java agent; a wrapper properties file chooses what gets downloaded and run), so for build tools they are bound like the program.
 # They are looked for anywhere under the checkout, not only beside the command: `mvn -f service/pom.xml` reads `service/.mvn/`.
@@ -139,40 +144,59 @@ def _bind_file(found: dict[str, str], path: Path, directory: Path) -> None:
     found[key] = digest + link
 
 
+def _selects_own_jdk(directory: Path, project_files: dict[str, str]) -> bool:
+    """True if a bound gradle.properties names its own JDK (`org.gradle.java.home`), so JAVA_HOME is not what Gradle uses."""
+    for key in project_files:
+        if key.endswith("gradle.properties"):
+            try:
+                path = directory / key
+                if path.stat().st_size < 65536 and "org.gradle.java.home" in path.read_text(errors="replace"):
+                    return True
+            except OSError:
+                return True       # unreadable: assume it might
+    return False
+
+
 def startup_files(directory: Path) -> dict[str, str]:
     """Fingerprint the build-tool startup files in a bounded walk of `directory` (defence in depth: a worker's edit to any file it does
-    not own is already restored and blocks readiness through ownership verification). Directories named `.mvn` or `gradle` that are
-    symlinks are followed by name, so their files are still seen. Not walked: pruned directories (`target`, `build`, `node_modules`,
-    ...) and anything past the walk limit, which is recorded. Unreadable files are recorded as such, never dropped."""
+    not own is already restored and blocks readiness through ownership verification). Symlinked directories are followed, with cycle
+    protection, and each is recorded with its link target, so retargeting one is a change. Not walked: pruned directories (`target`,
+    `build`, `node_modules`, `.venv`, ...) and anything past the walk limit, which is recorded. Unreadable files are recorded as such,
+    never dropped."""
     directory = Path(directory).resolve()
     found: dict[str, str] = {}
+    seen: set[str] = {str(directory)}
     visited = 0
-    for root, dirs, files in os.walk(directory):
-        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+    for root, dirs, files in os.walk(directory, followlinks=True):
         visited += 1
         if visited > _MAX_WALK:
             found["<walk-limit>"] = "more than %d directories; startup files beyond the limit are not bound" % _MAX_WALK
             break
         here = Path(root)
+        kept = []
+        for d in sorted(dirs):
+            if d in _SKIP_DIRS:
+                continue
+            logical = here / d
+            try:
+                real = os.path.realpath(logical)
+                if logical.is_symlink():
+                    inside = Path(real).is_relative_to(directory)
+                    found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@" + (
+                        Path(real).relative_to(directory).as_posix() if inside else real)
+            except OSError:
+                found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@<unresolvable>"
+                continue
+            if real in seen:
+                continue                      # a cycle or a second route to a directory already walked
+            seen.add(real)
+            kept.append(d)
+        dirs[:] = kept
         names = set(_STARTUP_NAMES.get(here.name, ())) | _STARTUP_TOP
         if here.name == "wrapper" and here.parent.name not in (".mvn", "gradle"):
-            names = _STARTUP_TOP
+            names = set(_STARTUP_TOP)
         for name in sorted(names & set(files)):
             _bind_file(found, here / name, directory)
-        for d in dirs:
-            logical = here / d
-            if d in (".mvn", "gradle") and logical.is_symlink():
-                try:
-                    where = logical.resolve()
-                    found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@" + (
-                        where.relative_to(directory).as_posix() if where.is_relative_to(directory) else str(where))
-                except OSError:
-                    found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@<unresolvable>"
-                for sub, wanted in ((logical, _STARTUP_NAMES[".mvn"] if d == ".mvn" else set()),
-                                    (logical / "wrapper", _STARTUP_NAMES["wrapper"])):
-                    for name in sorted(wanted):
-                        if (sub / name).is_file():
-                            _bind_file(found, sub / name, directory)
     return found
 
 
@@ -201,8 +225,14 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> d
         info["runtime"] = _java_runtime(env, program, target)
         info["runtime_unbound"] = info["runtime"] is None
         info["variables"] = {key: env[key] for key in _JAVA_VARIABLES if key in env}
+        for key in _JAVA_STARTUP_VARIABLES:
+            if key in env:
+                value = env[key]
+                info["variables"][key] = ("sha256:" + hashlib.sha256(value.encode(errors="replace")).hexdigest()[:16]) if looks_secret(value) else value
         if name in _BUILD_TOOLS:
             info["project_files"] = startup_files(directory)
+            if name.startswith("gradle") and _selects_own_jdk(directory, info["project_files"]):
+                info["runtime"], info["runtime_unbound"] = None, True      # org.gradle.java.home picks a different JDK
     elif name == "go" and "GOROOT" in env:
         info["variables"] = {"GOROOT": env["GOROOT"]}
     return info
@@ -238,7 +268,12 @@ def describe(toolchain: dict) -> list[str]:
                 lines.append(f"WARNING: some startup files of {program} could not be fingerprinted; they are not bound.")
         lines.append(line)
         if info.get("runtime_unbound"):
-            lines.append(f"WARNING: {program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.")
+            if Path(program).name in ("java", "javac"):
+                lines.append(f"WARNING: {program} is a selector or shim; which JDK it runs is not visible to Brahma and is not bound. Use the JDK's own bin/java to bind it.")
+            elif Path(program).name.startswith("gradle") and info.get("project_files") and any(k.endswith("gradle.properties") for k in info["project_files"]) and (info.get("variables") or {}).get("JAVA_HOME"):
+                lines.append(f"WARNING: {program} may use a JDK chosen in gradle.properties (org.gradle.java.home); the JDK is not bound.")
+            else:
+                lines.append(f"WARNING: {program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.")
         if info.get("launcher"):
             lines.append(f"WARNING: {program} launches other programs; the runtime it delegates to is not bound by this approval.")
         if info.get("path") and not info.get("sha256"):
