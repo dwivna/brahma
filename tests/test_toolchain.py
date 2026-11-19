@@ -478,7 +478,30 @@ class FifthReview(unittest.TestCase):
             home = jdk(root, "21")
             result = toolchain.probe([["gradle", "build"]], repo, {"PATH": str(root / "bin"), "JAVA_HOME": str(home)})
         self.assertTrue(result["programs"]["gradle"]["runtime_unbound"])
-        self.assertTrue(any("gradle.properties (org.gradle.java.home)" in line for line in toolchain.describe(result)))
+        self.assertTrue(any("gradle.properties file (org.gradle.java.home" in line for line in toolchain.describe(result)))
+
+    def test_the_unbound_warning_names_the_real_reason_not_a_missing_java_home(self):
+        # Review round 7, finding 5: user-level gradle.properties chose the JDK while JAVA_HOME was set,
+        # yet the warning claimed JAVA_HOME was unset.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo = root / "repo"
+            repo.mkdir()
+            user_home = root / "gradle-home"
+            user_home.mkdir()
+            (user_home / "gradle.properties").write_text("org.gradle.java.home=/opt/other-jdk\n")
+            script(root / "bin", "gradle")
+            home = jdk(root, "21")
+            env = {"PATH": str(root / "bin"), "JAVA_HOME": str(home), "GRADLE_USER_HOME": str(user_home)}
+            result = toolchain.probe([["gradle", "build"]], repo, env)
+            for args, reason in ((["build"], "gradle-properties"), (["-g", "/x", "build"], "gradle-arguments")):
+                with self.subTest(args=args):
+                    info = toolchain.probe([["gradle", *args]], repo, env)["programs"]["gradle"]
+                    self.assertEqual(info["unbound_reason"], reason)
+        lines = toolchain.describe(result)
+        self.assertTrue(result["programs"]["gradle"]["runtime_unbound"])
+        self.assertFalse(any("JAVA_HOME is not set" in line for line in lines))
+        self.assertTrue(any("gradle.properties file" in line for line in lines))
 
     def test_gradle_properties_under_a_symlinked_directory_is_bound_and_cycles_terminate(self):
         with tempfile.TemporaryDirectory() as tmp:

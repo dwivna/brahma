@@ -259,6 +259,8 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str], args
     if name in _JAVA_FAMILY:
         info["runtime"] = _java_runtime(env, program, target)
         info["runtime_unbound"] = info["runtime"] is None
+        if info["runtime_unbound"]:
+            info["unbound_reason"] = ("selector" if name in ("java", "javac") else "no-java-home")
         info["variables"] = {key: env[key] for key in _JAVA_VARIABLES if key in env}
         for key in _JAVA_STARTUP_VARIABLES:
             if key in env:
@@ -270,15 +272,19 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str], args
             present = [path for path, digest in info["external_files"].items() if digest != "<absent>"]
             if any(digest == "<unhashed>" for digest in info["external_files"].values()):
                 info["runtime"], info["runtime_unbound"] = None, True      # fail closed: an external startup file we cannot read is not bound
+                info["unbound_reason"] = "unreadable-startup-file"
             if name.startswith("gradle") and (_selects_own_jdk(directory, info["project_files"])
                                               or _selects_own_jdk(Path("/"), {path: "" for path in present if path.endswith("gradle.properties")})):
                 info["runtime"], info["runtime_unbound"] = None, True      # org.gradle.java.home picks a different JDK
+                info["unbound_reason"] = "gradle-properties"
             if name.startswith("gradle"):
                 info["redirected_by_args"] = _redirects_gradle(args or [])
                 if info["redirected_by_args"] or not (env.get("GRADLE_USER_HOME") or "/").startswith("/"):
                     info["runtime"], info["runtime_unbound"] = None, True  # -g / -Dorg.gradle.java.home / relative GRADLE_USER_HOME
+                    info["unbound_reason"] = "gradle-arguments" if info["redirected_by_args"] else "relative-gradle-user-home"
             if name in ("mvn", "mvnw") and any(path.endswith("mavenrc") for path in present):
                 info["runtime"], info["runtime_unbound"] = None, True      # a mavenrc is shell code that may override JAVA_HOME
+                info["unbound_reason"] = "mavenrc"
     elif name == "go" and "GOROOT" in env:
         info["variables"] = {"GOROOT": env["GOROOT"]}
     return info
@@ -297,6 +303,18 @@ def probe(checks: list[list[str]], directory: Path, env: dict[str, str] | None =
     for program, args in arguments.items():
         programs[program] = fingerprint_program(program, directory, env, args)
     return {"programs": programs}
+
+
+_UNBOUND_REASONS = {
+    "selector": "{program} is a selector or shim; which JDK it runs is not visible to Brahma and is not bound. Use the JDK's own bin/java to bind it.",
+    "no-java-home": "{program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.",
+    "unreadable-startup-file": "an external startup file of {program} could not be read, so the JDK it selects is not bound.",
+    "gradle-properties": "{program} may use a JDK chosen in a gradle.properties file (org.gradle.java.home, or content Brahma cannot parse safely); the JDK is not bound.",
+    "gradle-arguments": "{program} is given options that can redirect its JDK or user home; the JDK is not bound.",
+    "relative-gradle-user-home": "GRADLE_USER_HOME is relative, so {program}'s user home and JDK are not bound.",
+    "mavenrc": "a mavenrc file is present and can override JAVA_HOME for {program}; the JDK is not bound.",
+    "unknown": "the JDK used by {program} is not bound.",
+}
 
 
 def describe(toolchain: dict) -> list[str]:
@@ -326,14 +344,7 @@ def describe(toolchain: dict) -> list[str]:
         lines.append(line)
         lines.extend(lines_after)
         if info.get("runtime_unbound"):
-            if Path(program).name in ("java", "javac"):
-                lines.append(f"WARNING: {program} is a selector or shim; which JDK it runs is not visible to Brahma and is not bound. Use the JDK's own bin/java to bind it.")
-            elif Path(program).name.startswith("gradle") and info.get("project_files") and any(k.endswith("gradle.properties") for k in info["project_files"]) and (info.get("variables") or {}).get("JAVA_HOME"):
-                lines.append(f"WARNING: {program} may use a JDK chosen in gradle.properties (org.gradle.java.home); the JDK is not bound.")
-            elif any(path.endswith("mavenrc") and digest != "<absent>" for path, digest in (info.get("external_files") or {}).items()):
-                lines.append(f"WARNING: a mavenrc file is present and can override JAVA_HOME for {program}; the JDK is not bound.")
-            else:
-                lines.append(f"WARNING: {program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.")
+            lines.append("WARNING: " + _UNBOUND_REASONS.get(info.get("unbound_reason"), _UNBOUND_REASONS["unknown"]).format(program=program))
         if info.get("launcher"):
             lines.append(f"WARNING: {program} launches other programs; the runtime it delegates to is not bound by this approval.")
         if info.get("path") and not info.get("sha256"):
@@ -377,7 +388,7 @@ def verify_before_run(command: list[str], directory: Path, bound: dict | None, e
     if expected.get("redirected_by_args"):
         # The approval already recorded that some command line redirects this tool; carry its outcome over so a second command with
         # plain arguments does not read as a change.
-        for key in ("runtime", "runtime_unbound", "redirected_by_args"):
+        for key in ("runtime", "runtime_unbound", "redirected_by_args", "unbound_reason"):
             if key in expected:
                 actual[key] = expected[key]
     elif Path(command[0]).name.startswith("gradle") and _redirects_gradle(command[1:]):
