@@ -7,8 +7,8 @@ decided by Abhinav. See `docs/decisions.md`.
 ## 0.13.0
 
 **Added**
-- **Toolchain binding.** The approved contract now records, for every program the checks run, the regular file it resolves to
-  and that file's SHA-256; for Java-family programs (`mvn`, `gradle`, `java`, ...) also the JDK's `java` binary hash and the
+- **Toolchain binding.** The approved contract now records, for every configured check program, where it is invoked from, the
+  regular file it resolves to and that file's SHA-256; for Java-family programs (`mvn`, `gradle`, `java`, ...) also the JDK's `java` binary hash and the
   version from its `release` file, plus `JAVA_HOME`/`MAVEN_HOME`/`M2_HOME`/`GRADLE_HOME`. **Nothing is executed to learn this**
   (probing by running `--version` would run unapproved programs at plan time and `mvn --version` reads repository
   `.mvn/jvm.config`). Execution refuses to start if anything moved, naming what changed.
@@ -18,6 +18,14 @@ decided by Abhinav. See `docs/decisions.md`.
   `.venv/bin` shim cannot take over a command).
 - Launchers that delegate to another runtime (`uv`, `npx`, `sh`, `docker`, `make`, ...) are flagged on the approval screen: their
   delegated runtime is not bound. Fingerprints cover the launched file, not everything it loads (Maven's jars, Python packages).
+- Java build tools also bind the project files they read first (`.mvn/jvm.config`, `.mvn/maven.config`, `.mvn/extensions.xml`, the
+  Maven and Gradle wrapper files, `gradle.properties`). A Java build tool run without `JAVA_HOME` chooses its own JDK, which Brahma
+  cannot know without running it, so the approval says the JDK is not bound; set `JAVA_HOME` to bind it.
+- A toolchain change found after approval blocks the session at once (no repair attempt is spent) and asks for a new approval.
+- The programs are executed by their invocation path, never the resolved symlink target, so virtualenv and version-manager shims keep
+  working. A follow-on plan made against an existing worktree is fingerprinted in that worktree.
+- Stated limit: hashing and executing are two steps, not one atomic step; a process a worker leaves running could change a file in
+  between. Checks are not sandboxed and this is accepted for 1.0.0.
 - The approval screen shows each program's path and short hash, and the JDK.
 
 **Fixed**

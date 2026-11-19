@@ -365,8 +365,8 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
         if problem:
             emit(Event(kind="check", text=problem))
             if results is not None:
-                results.append((tuple(command), "failed", None))
-            return False, problem
+                results.append((tuple(command), "not_run", None))
+            raise toolchain.ToolchainChanged(problem)       # an environment change, not a test failure: no repair is spent
         try:
             process = await asyncio.create_subprocess_exec(*argv, cwd=worktree, env=environment,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)

@@ -8,9 +8,14 @@ file's SHA-256, plus for Java-family programs the JDK's `java` binary hash and i
 entries are never searched, so a worker-created `.venv/bin` shim cannot take over a command.
 
 The same fingerprint is re-taken immediately before each check runs, against the directory the check will actually run in,
-and the verified absolute path is what gets executed. Limits, stated plainly: the hash covers the launched file, not
-everything it loads (Maven's jars, a Python environment's packages); programs that delegate to another runtime
-(`uv run`, `npx`, `sh -c`, `docker`) are recorded as launchers whose delegated runtime is NOT bound, and the approval screen warns.
+and the verified invocation path is what gets executed (never its resolved target, so virtualenv and version-manager shims keep
+their identity). Limits, stated plainly:
+- the hash covers the launched file, not everything it loads (Maven's jars, a Python environment's packages);
+- programs that delegate to another runtime (`uv run`, `npx`, `sh -c`, `docker`) and programs shipped in the repository are
+  recorded as launchers whose delegated runtime is NOT bound, and the approval screen warns;
+- a Java build tool run without `JAVA_HOME` chooses its own JDK, so the JDK is reported as not bound (set `JAVA_HOME` to bind it);
+- verification and execution are two steps, not one atomic one: a process a worker or a check leaves running could change a file
+  between them. Checks are not sandboxed (README), and this is accepted for 1.0.0 and documented.
 """
 from __future__ import annotations
 
@@ -27,7 +32,16 @@ _LAUNCHERS = {"uv", "uvx", "npx", "pipx", "poetry", "env", "sh", "bash", "zsh", 
               "nix", "nix-shell", "make", "time", "timeout", "nohup", "sudo"}
 # Variables that decide which toolchain a program picks up, and only for the programs they steer.
 _JAVA_VARIABLES = ("JAVA_HOME", "MAVEN_HOME", "M2_HOME", "GRADLE_HOME")
-_VERSION_TEXT = re.compile(r"[0-9A-Za-z._+-]{1,40}")
+# Files a Java build tool reads from the project before it does anything else. A worker can edit them (a jvm.config line can
+# load a Java agent; a wrapper properties file chooses what gets downloaded and run), so they are bound like the program.
+_JAVA_PROJECT_FILES = (".mvn/jvm.config", ".mvn/maven.config", ".mvn/extensions.xml", ".mvn/wrapper/maven-wrapper.properties",
+                       ".mvn/wrapper/maven-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties",
+                       "gradle/wrapper/gradle-wrapper.jar", "gradle.properties", ".sdkmanrc")
+_VERSION_TEXT = re.compile(r"[0-9]+(?:\.[0-9]+){0,3}(?:[_+-][0-9A-Za-z]{1,8}){0,2}")   # a Java version, nothing free-form
+
+
+class ToolchainChanged(Exception):
+    """The machine no longer matches the approved toolchain. Not a test failure: it must not spend a repair attempt."""
 
 
 def _fingerprint(path: Path) -> str | None:
@@ -51,67 +65,82 @@ def trusted_path(env: dict[str, str]) -> str:
     return os.pathsep.join(entry for entry in env.get("PATH", os.defpath).split(os.pathsep) if entry and os.path.isabs(entry))
 
 
-def resolve(program: str, directory: Path, env: dict[str, str]) -> tuple[Path | None, bool]:
-    """(absolute file, lives_in_directory). A program written with a slash is relative to `directory`; a bare name is found only
-    on the absolute entries of PATH."""
+def resolve(program: str, directory: Path, env: dict[str, str]) -> tuple[Path | None, Path | None, bool]:
+    """(invocation path, resolved target, relative). The invocation path is what gets executed and keeps symlink identity (a
+    virtualenv's python is a symlink whose location matters); the target is what gets hashed. `relative` is true only for a program
+    written with a relative slash path, which is located in `directory`. A bare name is found only on the absolute entries of PATH."""
     directory = Path(directory).resolve()
+    relative = "/" in program and not os.path.isabs(program)
     if "/" in program:
-        candidate = Path(program) if os.path.isabs(program) else directory / program
+        candidate = Path(os.path.normpath(directory / program)) if relative else Path(program)
     else:
         found = shutil.which(program, path=trusted_path(env))
         if not found:
-            return None, False
+            return None, None, False
         candidate = Path(found)
     try:
-        candidate = candidate.resolve(strict=True)
+        return candidate, candidate.resolve(strict=True), relative
     except OSError:
-        return None, False
-    return candidate, candidate.is_relative_to(directory)
+        return None, None, relative
 
 
-def _java_runtime(env: dict[str, str]) -> dict:
-    home = env.get("JAVA_HOME", "")
-    java = None
-    if home and os.path.isabs(home):
-        java = Path(home) / "bin" / "java"
+def _java_runtime(env: dict[str, str], program: str, target: Path) -> dict | None:
+    """The JDK a Java-family program will use, or None when it cannot be known without running something."""
+    name = Path(program).name
+    if name in ("java", "javac"):
+        java = target if name == "java" else target.parent / "java"      # the program is the runtime: derive it from the file itself
+        home = java.parent.parent
     else:
-        found = shutil.which("java", path=trusted_path(env))
-        java = Path(found) if found else None
-    if java is None:
-        return {"path": None, "sha256": None, "release": None}
+        home_text = env.get("JAVA_HOME", "")
+        if not home_text or not os.path.isabs(home_text):
+            return None                                                 # the tool picks its own JDK; reported as not bound
+        home = Path(home_text)
+        java = home / "bin" / "java"
     try:
         java = java.resolve(strict=True)
     except OSError:
         return {"path": str(java), "sha256": None, "release": None}
     release = None
-    for candidate in (java.parent.parent / "release", Path(home) / "release" if home else None):
-        if candidate is not None and candidate.is_file() and candidate.stat().st_size < 65536:
-            try:
-                for line in candidate.read_text(errors="replace").splitlines():
-                    if line.startswith("JAVA_VERSION="):
-                        value = line.split("=", 1)[1].strip().strip('"')
-                        release = value if _VERSION_TEXT.fullmatch(value) else "unrecognised"
-                        break
-            except OSError:
-                pass
-            if release:
-                break
+    marker = home / "release"
+    try:
+        if marker.is_file() and marker.stat().st_size < 65536:
+            for line in marker.read_text(errors="replace").splitlines():
+                if line.startswith("JAVA_VERSION="):
+                    value = line.split("=", 1)[1].strip().strip('"')
+                    release = value if len(value) <= 32 and _VERSION_TEXT.fullmatch(value) else "unrecognised"
+                    break
+    except OSError:
+        pass
     return {"path": str(java), "sha256": _fingerprint(java), "release": release}
+
+
+def _relative_or_absolute(path: Path, directory: Path, relative: bool) -> str:
+    if relative:
+        try:
+            return path.relative_to(directory).as_posix()
+        except ValueError:
+            pass
+    return str(path)
 
 
 def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> dict:
     """Describe one program as it would run from `directory`. Pure reads: nothing is executed."""
     directory = Path(directory).resolve()
-    resolved, in_repo = resolve(program, directory, env)
+    invocation, target, relative = resolve(program, directory, env)
     name = Path(program).name
-    if resolved is None:
-        return {"path": None, "sha256": None, "launcher": name in _LAUNCHERS, "runtime": None, "variables": {}}
-    path = resolved.relative_to(directory).as_posix() if in_repo else str(resolved)
-    info = {"path": path, "in_repo": in_repo, "sha256": _fingerprint(resolved), "launcher": name in _LAUNCHERS,
-            "runtime": None, "variables": {}}
+    if invocation is None:
+        return {"path": None, "sha256": None, "launcher": name in _LAUNCHERS or relative, "runtime": None, "variables": {}}
+    info = {"path": _relative_or_absolute(invocation, directory, relative),
+            "target": _relative_or_absolute(target, directory, relative),
+            "sha256": _fingerprint(target),
+            # a program shipped in the repository fetches or runs things this fingerprint does not cover
+            "launcher": name in _LAUNCHERS or relative, "runtime": None, "variables": {}}
     if name in _JAVA_FAMILY:
-        info["runtime"] = _java_runtime(env)
+        info["runtime"] = _java_runtime(env, program, target)
+        info["runtime_unbound"] = info["runtime"] is None
         info["variables"] = {key: env[key] for key in _JAVA_VARIABLES if key in env}
+        info["project_files"] = {relative_file: _fingerprint(directory / relative_file) for relative_file in _JAVA_PROJECT_FILES
+                                 if (directory / relative_file).is_file() and (directory / relative_file).resolve().is_relative_to(directory)}
     elif name == "go" and "GOROOT" in env:
         info["variables"] = {"GOROOT": env["GOROOT"]}
     return info
@@ -141,7 +170,11 @@ def describe(toolchain: dict) -> list[str]:
             line += f"; JDK {runtime.get('release') or 'version unknown'} at {runtime.get('path') or 'none found'} sha256:{(runtime.get('sha256') or 'unhashed')[:12]}"
         for name, value in sorted(info.get("variables", {}).items()):
             line += f"; {name}={value}"
+        if info.get("project_files"):
+            line += "; bound project files: " + ", ".join(sorted(info["project_files"]))
         lines.append(line)
+        if info.get("runtime_unbound"):
+            lines.append(f"WARNING: {program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.")
         if info.get("launcher"):
             lines.append(f"WARNING: {program} launches other programs; the runtime it delegates to is not bound by this approval.")
         if info.get("path") and not info.get("sha256"):
@@ -160,6 +193,8 @@ def differences(approved: dict, current: dict) -> list[str]:
             text += f"; JDK {runtime.get('release') or '?'} {runtime.get('path')} sha256:{(runtime.get('sha256') or 'unhashed')[:12]}"
         for name, value in sorted(info.get("variables", {}).items()):
             text += f"; {name}={value}"
+        for relative, digest in sorted((info.get("project_files") or {}).items()):
+            text += f"; {relative} sha256:{(digest or 'unhashed')[:12]}"
         return text
     moved = []
     before_all, after_all = approved.get("programs", {}), current.get("programs", {})
@@ -171,15 +206,17 @@ def differences(approved: dict, current: dict) -> list[str]:
 
 def verify_before_run(command: list[str], directory: Path, bound: dict | None, env: dict[str, str]) -> tuple[list[str], str | None]:
     """Re-take the fingerprint where the check will really run. Returns (argv to execute, problem). The argv carries the verified
-    absolute path, so the program that was hashed is the one that runs. With nothing bound the command runs unchanged."""
+    invocation path, so the program that was hashed is the one that runs. With nothing bound the command runs unchanged."""
     if not bound:
         return command, None
     expected = bound.get("programs", {}).get(command[0])
     if expected is None:
         return command, f"Check program {command[0]} is not part of the approved toolchain"
     actual = fingerprint_program(command[0], directory, env)
+    if actual["path"] is None:
+        return command, f"Check program {command[0]} was not found"
     if actual != expected:
         return command, "Toolchain changed since approval, so the check was not run: " + "; ".join(
             differences({"programs": {command[0]: expected}}, {"programs": {command[0]: actual}}))
-    resolved, _ = resolve(command[0], directory, env)
-    return [str(resolved), *command[1:]], None
+    invocation, _, _ = resolve(command[0], directory, env)
+    return [str(invocation), *command[1:]], None

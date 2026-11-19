@@ -111,7 +111,8 @@ def _revision(repo: Path) -> str:
 def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = None, *,
                      task_timeout: float = 3600, repair_cycles: int = 3,
                      definitions: Iterable[Definition] = (), model_profiles: dict | None = None,
-                     base_revision: str | None = None) -> dict:
+                     base_revision: str | None = None, toolchain_directory: Path | None = None,
+                     toolchain_basis: str = "repo") -> dict:
     # Revalidate objects built directly, not just planner JSON.
     plan = Plan.parse(json.dumps(plan.to_dict(), ensure_ascii=False))
     if plan.questions:
@@ -149,7 +150,7 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                "instructions": _instructions(repo, plan), "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,
                                "quota_wait_counts": False}, "models": model_profiles or {},
-               "toolchain": toolchain.probe(selected_checks, repo)}
+               "toolchain": {**toolchain.probe(selected_checks, toolchain_directory or repo), "basis": toolchain_basis}}
     content = _canonical(payload)
     if len(content) + 512 > MAX_CONTRACT_BYTES:
         raise ValueError("Contract exceeds size limit")

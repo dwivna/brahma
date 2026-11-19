@@ -55,7 +55,7 @@ class Probe(unittest.TestCase):
             env = {"PATH": str(root / "bin"), "JAVA_HOME": str(home), "VIRTUAL_ENV": "/v", "SECRET_TOKEN": "x"}
             result = toolchain.probe([["mvn", "clean"], ["mvn", "test"]], root / "elsewhere", env)
         info = result["programs"]["mvn"]
-        self.assertEqual(info["path"], str(mvn.resolve()))
+        self.assertEqual(info["path"], str(mvn))
         self.assertEqual(len(info["sha256"]), 64)
         self.assertEqual(info["runtime"]["release"], "21.0.8")
         self.assertEqual(len(info["runtime"]["sha256"]), 64)
@@ -109,7 +109,32 @@ class Probe(unittest.TestCase):
             env["PATH"] = ".venv/bin::" + str(root / "sys")
             self.assertEqual(toolchain.trusted_path(env), str(root / "sys"))
             result = toolchain.probe([["mvn"]], root / "repo", env)
-        self.assertEqual(result["programs"]["mvn"]["path"], str(real.resolve()))
+        self.assertEqual(result["programs"]["mvn"]["path"], str(real))
+
+    def test_java_project_files_are_bound_so_a_jvm_config_edit_is_refused(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree = root / "repo", root / "wt"
+            for base in (repo, worktree):
+                (base / ".mvn" / "wrapper").mkdir(parents=True)
+                (base / ".mvn" / "jvm.config").write_text("-Xmx512m\n")
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["mvn"]], repo, env)
+            self.assertIn(".mvn/jvm.config", bound["programs"]["mvn"]["project_files"])
+            self.assertIsNone(toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+            (worktree / ".mvn" / "jvm.config").write_text("-javaagent:/tmp/evil.jar\n")
+            problem = toolchain.verify_before_run(["mvn"], worktree, bound, env)[1]
+            self.assertIn("Toolchain changed", problem)
+            self.assertIn(".mvn/jvm.config", problem)
+
+    def test_a_program_shipped_in_the_repository_is_a_launcher_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            script(repo, "mvnw")
+            result = toolchain.probe([["./mvnw", "test"]], repo, {"PATH": "/usr/bin"})
+        self.assertTrue(result["programs"]["./mvnw"]["launcher"])
+        self.assertTrue(any("launches other programs" in line for line in toolchain.describe(result)))
 
     def test_launchers_are_flagged_as_not_binding_their_runtime(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -166,7 +191,7 @@ class BeforeEveryCheck(unittest.TestCase):
             bound = toolchain.probe([["mytool"]], root / "wt", env)
             argv, problem = toolchain.verify_before_run(["mytool", "-x"], root / "wt", bound, env)
         self.assertIsNone(problem)
-        self.assertEqual(argv, [str(tool.resolve()), "-x"])
+        self.assertEqual(argv, [str(tool), "-x"])
 
     def test_a_binary_swapped_after_approval_is_refused_before_it_runs(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -212,12 +237,76 @@ class BeforeEveryCheck(unittest.TestCase):
                 self.assertTrue(ok, text)
                 self.assertIn("hello", text)
                 tool.write_text("#!/bin/sh\necho evil\n")
-                ok, text = await gittools.run_checks(worktree, [["mytool"]], stop, 20, events.append, results, bound)
-                self.assertFalse(ok)
-                self.assertIn("Toolchain changed", text)
-                self.assertNotIn("evil", text)
+                with self.assertRaises(toolchain.ToolchainChanged) as caught:
+                    await gittools.run_checks(worktree, [["mytool"]], stop, 20, events.append, results, bound)
+                self.assertIn("Toolchain changed", str(caught.exception))
+                self.assertNotIn("evil", str(caught.exception))
         with tempfile.TemporaryDirectory() as tmp:
             asyncio.run(go(Path(tmp)))
+
+
+class ReviewRegressions(unittest.TestCase):
+    """Codex's re-review of the first toolchain fix."""
+
+    def test_a_symlinked_program_keeps_its_invocation_path_and_hashes_its_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = script(root / "real", "python3")
+            link_dir = root / "venv" / "bin"
+            link_dir.mkdir(parents=True)
+            (link_dir / "python").symlink_to(real)
+            env = {"PATH": str(link_dir)}
+            bound = toolchain.probe([["python"]], root / "wt", env)
+            argv, problem = toolchain.verify_before_run(["python", "-V"], root / "wt", bound, env)
+        self.assertIsNone(problem)
+        self.assertEqual(argv[0], str(link_dir / "python"))                  # the venv path, not the resolved target
+        self.assertEqual(bound["programs"]["python"]["target"], str(real.resolve()))
+
+    def test_a_java_build_tool_without_java_home_reports_an_unbound_jdk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "bin", "mvn")
+            script(root / "bin", "java")
+            result = toolchain.probe([["mvn"]], root / "r", {"PATH": str(root / "bin")})
+        self.assertTrue(result["programs"]["mvn"]["runtime_unbound"])
+        self.assertIsNone(result["programs"]["mvn"]["runtime"])
+        self.assertTrue(any("chooses its own JDK" in line for line in toolchain.describe(result)))
+
+    def test_the_java_program_itself_derives_its_runtime_from_its_own_file_not_java_home(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            mine, other = jdk(root, "17"), jdk(root, "26")
+            env = {"PATH": str(mine / "bin"), "JAVA_HOME": str(other)}
+            result = toolchain.probe([["java"]], root / "r", env)
+        self.assertEqual(result["programs"]["java"]["runtime"]["release"], "17")
+
+    def test_an_absolute_path_into_the_source_checkout_does_not_falsely_mismatch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, worktree = Path(tmp) / "repo", Path(tmp) / "wt"
+            tool = script(repo, "mvnw")
+            worktree.mkdir()
+            env = {"PATH": "/usr/bin"}
+            bound = toolchain.probe([[str(tool)]], repo, env)
+            self.assertIsNone(toolchain.verify_before_run([str(tool)], worktree, bound, env)[1])
+
+    def test_a_missing_program_is_refused_never_run_as_the_text_none(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "bin", "None")                                     # a program literally named None
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["ghost"]], root / "wt", env)
+            argv, problem = toolchain.verify_before_run(["ghost"], root / "wt", bound, env)
+        self.assertIn("was not found", problem)
+
+    def test_a_token_shaped_release_value_is_never_stored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "bin", "mvn")
+            home = jdk(root, "21")
+            (home / "release").write_text('JAVA_VERSION="ghp_0123456789abcdefghij0123456789abcdef"\n')
+            result = toolchain.probe([["mvn"]], root / "r", {"PATH": str(root / "bin"), "JAVA_HOME": str(home)})
+        self.assertEqual(result["programs"]["mvn"]["runtime"]["release"], "unrecognised")
+        self.assertNotIn("ghp_", repr(result))
 
 
 if __name__ == "__main__":

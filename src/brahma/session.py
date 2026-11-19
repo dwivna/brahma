@@ -186,7 +186,11 @@ class Session:
                                          definitions=catalog.entries,
                                          model_profiles=profiles,
                                          base_revision=(gittools.git(Path(self.store.session(self.key)["worktree"]), "rev-parse", "HEAD")
-                                                        if self.store.session(self.key)["worktree"] else None))
+                                                        if self.store.session(self.key)["worktree"] else None),
+                                         # A follow-on plan runs in the existing worktree, so its toolchain is read from there.
+                                         toolchain_directory=(Path(self.store.session(self.key)["worktree"])
+                                                              if self.store.session(self.key)["worktree"] else None),
+                                         toolchain_basis="worktree" if self.store.session(self.key)["worktree"] else "repo")
             # Check required context before asking for approval; never silently truncate it.
             from .engine import _task_context, _brief, _BOUNDARIES
             settings._definition_catalog = catalog.entries
@@ -226,9 +230,12 @@ class Session:
             profiles["selection"] = selection
         checks = self.plan.checks or fresh.checks
         catalog = discover(self.repo)
+        basis = (contract["payload"].get("toolchain") or {}).get("basis", "repo")
         verify_contract(contract, self.plan, self.repo, checks, task_timeout=fresh.task_timeout,
                         repair_cycles=fresh.repair_cycles, definitions=catalog.entries,
-                        model_profiles=profiles, base_revision=contract["payload"]["base_revision"])
+                        model_profiles=profiles, base_revision=contract["payload"]["base_revision"],
+                        toolchain_directory=Path(saved["worktree"]) if basis == "worktree" and saved["worktree"] else None,
+                        toolchain_basis=basis)
         selected.checks = checks
         selected.bound_toolchain = contract["payload"].get("toolchain")    # re-verified before every check
         return contract, selected, catalog

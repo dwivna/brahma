@@ -189,6 +189,20 @@ class PassWithNotes(Flow):
                 self.assertEqual([e for e in self.events if e.kind == "review_notes"], [])
 
 
+class ToolchainBlock(Flow):
+    """A toolchain change after approval is an environment problem, not a test failure: block at once, spend no repair."""
+
+    async def test_a_toolchain_change_blocks_immediately_and_spends_no_repair(self):
+        from brahma import toolchain
+        problem = "Toolchain changed since approval, so the check was not run: mvn: approved [a], now [b]"
+        with patch.object(gittools, "run_checks", AsyncMock(side_effect=toolchain.ToolchainChanged(problem))):
+            result = await self.run_flow([("b", Result("codex", "ok", "d"))])
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("Toolchain changed", result.text)
+        self.assertEqual(len(self.calls), 1)                                  # one builder run, no repair attempts
+        self.assertEqual(self.states()[-1]["state"], "blocked")
+
+
 class Session(unittest.TestCase):
     def test_decision_is_bound_to_the_exact_dispute_and_stale_attention_is_resolved_on_a_new_plan(self):
         from tests.test_cli import repo_session, run_cli
