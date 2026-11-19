@@ -183,6 +183,8 @@ execution permission.
 | `/help` | Show terminal commands. |
 | `/repo PATH`, `/new` | Select a repository or start a fresh conversation. |
 | `/doctor`, `/status` | Retry sign-in checks or inspect session/checkpoint status. |
+| `/models [codex\|claude]` | Inspect advertised models and routine/critical profiles without generation. |
+| `/usage [codex\|claude]` | Inspect provider-reported quota and resets without creating a plan. |
 | `/approve` | Approve and execute the displayed contract, or explicitly continue it. |
 | `/skills`, `/agents` | Inventory user/project definitions; discovery is not activation. |
 | `/sessions`, `/resume ID` | List sessions or open a checkpoint without executing it. |
@@ -200,6 +202,8 @@ planned; the current session controls do not stop every session/service.
 ```sh
 brahma --help
 brahma doctor
+brahma models
+brahma usage
 brahma sessions
 brahma --resume SESSION_ID
 
@@ -237,12 +241,15 @@ publish = false
 checks = []
 ```
 
-Choose models your CLI/account supports. The defaults are not guaranteed to be
-available to every account: if a provider rejects a model (for example a
-`model_not_found` error for the Codex critical profile on a ChatGPT account),
-the attempt fails as a "Builder error" and the task is left `incomplete`. Set
-supported names in `brahma.toml` before approving a plan. A `critical` task uses
-the critical-model profile. `task_timeout` allows 1–3600 active seconds per task; `repair_cycles`
+Use `brahma models` or `/models` to check your CLI's advertised models. Before
+approval, Brahma matches these preferences to available models in the same supported
+family and locks verified concrete model IDs into the contract. Critical work cannot
+downgrade to a routine profile; missing permitted models block generation. If native
+discovery or a concrete ID is unavailable, the choice stays explicitly unverified;
+a subsequent provider rejection checkpoints the attempt. See
+[model selection](docs/model-selection.md) for the rules and their limits.
+A `critical` task uses the critical-model profile.
+`task_timeout` allows 1–3600 active seconds per task; `repair_cycles`
 allows 0–3 repairs after the initial attempt. `context_chars` allows
 2,000–100,000 **characters**, not tokens.
 
@@ -261,6 +268,8 @@ the outcome stays `needs_checks` even after a positive model review.
 ## Usage limits and recovery
 
 Readiness, quota observations and reported token usage are separate facts.
+Use `brahma usage` or `/usage` for a readable report. Cached observations are
+labelled last reported; missing or stale current capacity stays unknown.
 
 - **Codex:** its native read-only interface can provide quota windows/reset times,
   including five-hour and weekly windows when exposed.
