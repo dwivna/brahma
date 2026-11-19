@@ -8,7 +8,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from brahma import cli, quota
 from brahma.models import Plan, Task
@@ -66,6 +66,24 @@ class Parsing(unittest.TestCase):
 
 
 class Commands(unittest.TestCase):
+    def test_usage_is_readable_or_json_without_plans_or_model_calls(self):
+        report = {"observed_at": 1000, "providers": [], "cancelled": False}
+        for argv in (("usage",), ("usage", "codex", "--json")):
+            with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp, \
+                    patch("brahma.usage.read_usage", new_callable=AsyncMock, return_value=report) as read, \
+                    patch("brahma.usage.format_usage", return_value="Quota unknown"), \
+                    patch("brahma.providers.run", side_effect=AssertionError("usage called a model")):
+                code, out, err = run_cli(*argv, state=Path(tmp)/"state")
+                self.assertEqual((code, err), (0, ""))
+                self.assertEqual(read.await_args.args[1], ("codex",) if "codex" in argv else ("codex", "claude"))
+                self.assertEqual(json.loads(out), report) if "--json" in argv else self.assertIn("Quota unknown", out)
+                store = Store(Path(tmp)/"state")
+                try:
+                    self.assertEqual(store.recent(), [])
+                    self.assertEqual(store.pending(), [])
+                finally:
+                    store.close()
+
     def test_worker_passes_resolved_home_and_once(self):
         seen = []
         async def serve(home, *, once=False):
