@@ -174,6 +174,24 @@ class Postflight(Fixture):
         self.assertEqual((restored, kept), ([], [tracked]))
         self.assertEqual((self.repo / tracked).read_text(), "user edit\nplus worker line\n")
 
+    def test_a_worker_file_named_like_a_pathspec_restores_only_itself(self):
+        # Without literal pathspecs `:(glob)**` / `*` would restore or touch every tracked file.
+        self.write("src/keep.py", "user work in progress\n")
+        before = self.baseline()
+        for name in (":(glob)**", "*", ":(top)src/keep.py", ":!src/keep.py"):
+            self.write(name, "worker\n")
+        restored, kept = gittools.restore_violations(self.repo, ["src/other/**"], before)
+        self.assertEqual(sorted(restored), sorted([":(glob)**", "*", ":(top)src/keep.py", ":!src/keep.py"]))
+        self.assertEqual((self.repo / "src/keep.py").read_text(), "user work in progress\n")
+        self.assertEqual(kept, [])
+
+    def test_git_helper_treats_paths_as_literal(self):
+        self.write("a*b.txt")
+        self.write("axb.txt")
+        gittools.git(self.repo, "add", "--", "a*b.txt")
+        staged = gittools.git(self.repo, "diff", "--cached", "--name-only")
+        self.assertEqual(staged.split("\n"), ["a*b.txt"])
+
     def test_restore_never_follows_a_symlink_out_of_the_worktree(self):
         outside = Path(self.tmp.name) / "outside.txt"
         outside.write_text("precious\n")

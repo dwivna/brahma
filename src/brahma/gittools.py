@@ -57,7 +57,7 @@ def git(repo: Path, *args: str) -> str:
     reason = refuse(args)
     if reason:
         raise ValueError(reason)
-    result = subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
+    result = subprocess.run(["git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
                             text=True, capture_output=True, timeout=60)
     if result.returncode:
         raise ValueError(result.stderr.strip() or "Git command failed")
@@ -109,7 +109,7 @@ _CACHE_SENSITIVE_PREFIXES = (".env",)
 
 
 def _ls_ignored(repo: Path, *extra: str) -> list[str]:
-    result = subprocess.run(["git", "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
                             capture_output=True, check=True, timeout=60)
     return [name for name in result.stdout.decode("utf-8", errors="surrogateescape").split("\0") if name]
 
@@ -148,7 +148,7 @@ def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
 def status_paths(repo: Path) -> list[str]:
     """Changes `git status` reports (never ignored files); these are the only paths git can stage."""
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
-    result = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    result = subprocess.run(["git", "--literal-pathspecs", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15)
     chunks = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
     paths, index = [], 0
@@ -232,6 +232,10 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     """
     restored, kept = [], []
     root = worktree.resolve()
+    # Exact comparison against the tracked list: a worker-chosen file name is never a pathspec (`:(glob)**`, `*`).
+    listing = subprocess.run(["git", "--literal-pathspecs", "-C", str(worktree), "ls-files", "-z"],
+                             capture_output=True, check=True, timeout=60).stdout
+    tracked_files = set(listing.decode("utf-8", errors="surrogateescape").split("\0"))
     for name in violating_paths(worktree, files, baseline, ignored_allow):
         target = worktree / name
         if name in baseline:
@@ -240,8 +244,7 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
         if not (target.parent.resolve() / target.name).resolve(strict=False).is_relative_to(root) and not target.is_symlink():
             kept.append(name)  # never act outside the worktree
             continue
-        tracked = subprocess.run(["git", "-C", str(worktree), "ls-files", "--error-unmatch", "--", name],
-                                 capture_output=True).returncode == 0
+        tracked = name in tracked_files
         try:
             if tracked:
                 git(worktree, "restore", "--source=HEAD", "--staged", "--worktree", "--", name)

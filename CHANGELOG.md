@@ -26,6 +26,9 @@ Safety boundaries (decision Round 7; task 2 of the Rounds 4-7 plan). Partly deli
 - The secret detector now sees compound names, quoted values, `Bearer`/`Basic` tokens and `github_pat_` tokens, and
   scans command arguments both per word and joined.
 
+- Git is run with literal pathspecs everywhere, and "tracked" is decided by exact comparison, so a worker-chosen
+  file name such as `:(glob)**` or `*` can no longer be read as a pattern by the restore or staging commands.
+
 **Not enforced (stated plainly)**
 - Reads of secret files or paths outside the worktree by a worker are not prevented by either CLI's launch settings;
   only reported. Credential files under `$HOME` stay readable. No sandbox for checks.
