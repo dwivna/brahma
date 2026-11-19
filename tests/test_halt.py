@@ -92,6 +92,44 @@ class Execution(unittest.IsolatedAsyncioTestCase):
                 store.close()
 
 
+class HaltBeforeGitWrites(unittest.IsolatedAsyncioTestCase):
+    """A kill, stop or pause that arrives after the work is ready must stop the commit and the publication."""
+
+    async def test_no_commit_or_publish_when_halted_after_the_engine_reports_ready(self):
+        for hold in ("kill", "stop", "pause"):
+            with self.subTest(hold=hold), tempfile.TemporaryDirectory() as tmp:
+                store, session, _ = approved_job(tmp)
+                session.settings.auto_commit = True
+                session.settings.publish = True
+
+                async def ready_then_halt(*args, **kwargs):
+                    halt.engage(store.home) if hold == "kill" else getattr(store, hold)(session.key)
+                    return Result("brahma", "ready", "done")
+                with patch("brahma.engine.execute", ready_then_halt), \
+                        patch.object(gittools, "commit_changes", side_effect=AssertionError("committed while halted")), \
+                        patch.object(gittools, "publish", side_effect=AssertionError("published while halted")), \
+                        patch.object(gittools, "ownership_changes", return_value=(True, "ok")):
+                    result = await session.execute(scheduled=True)
+                self.assertEqual(result.status, "cancelled")
+                store.close()
+
+    async def test_stop_during_a_running_check_cancels_it_and_the_session(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+
+            async def engine_running_a_check(*args, **kwargs):
+                cancel = args[4]
+                task = asyncio.create_task(gittools.run_checks(Path(tmp), [["sleep", "30"]], cancel, 60, lambda e: None))
+                await asyncio.sleep(.3)
+                store.stop(session.key)
+                ok, text = await asyncio.wait_for(task, 10)
+                return Result("brahma", "cancelled" if not ok else "ready", text)
+            with patch("brahma.engine.execute", engine_running_a_check):
+                result = await session.execute(scheduled=True)
+            self.assertEqual(result.status, "cancelled")
+            store.close()
+
+
 class PauseResume(unittest.TestCase):
     def test_resume_does_not_undo_a_stop_and_pause_is_separate_from_stop(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -4,6 +4,15 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.11.1
+
+Closes the last open part of plan task 3: pause, stop and kill during checks and publication.
+
+**Added (tests only; the guards shipped in 0.11.0)**
+- A kill, stop or pause that arrives after the engine reports ready prevents both the local commit and the publication, and
+  the session ends `cancelled`. Without the 0.11.0 guard these tests fail.
+- A stop during a running check cancels the check and the session.
+
 ## 0.11.0
 
 Fixes from the independent review of 0.3.0 to 0.10.0, plus the confirmed exit-code table.
