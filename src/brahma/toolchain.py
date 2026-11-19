@@ -150,7 +150,9 @@ def _selects_own_jdk(directory: Path, project_files: dict[str, str]) -> bool:
         if key.endswith("gradle.properties"):
             try:
                 path = Path(key) if key.startswith("/") else directory / key
-                if path.stat().st_size < 65536 and "org.gradle.java.home" in path.read_text(errors="replace"):
+                if path.stat().st_size >= 65536:
+                    return True                                       # too large to scan: assume it might select a JDK
+                if "org.gradle.java.home" in path.read_text(errors="replace"):
                     return True
             except OSError:
                 return True       # unreadable: assume it might
@@ -211,7 +213,9 @@ def external_startup_files(program: str, env: dict[str, str]) -> dict[str, str]:
     if name in ("mvn", "mvnw"):
         candidates = [Path("/etc/mavenrc"), Path("/usr/local/etc/mavenrc"), home / ".mavenrc"]
     elif name in ("gradle", "gradlew"):
-        user = Path(env["GRADLE_USER_HOME"]) if env.get("GRADLE_USER_HOME", "").startswith("/") else home / ".gradle"
+        if env.get("GRADLE_USER_HOME") and not env["GRADLE_USER_HOME"].startswith("/"):
+            return {"<relative GRADLE_USER_HOME>": "<unhashed>"}      # Gradle resolves it against its own cwd: not bound, flagged below
+        user = Path(env["GRADLE_USER_HOME"]) if env.get("GRADLE_USER_HOME") else home / ".gradle"
         candidates = [user / "gradle.properties"]
     result = {}
     for path in candidates:
@@ -252,6 +256,8 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> d
             info["project_files"] = startup_files(directory)
             info["external_files"] = external_startup_files(program, env)
             present = [path for path, digest in info["external_files"].items() if digest != "<absent>"]
+            if any(digest == "<unhashed>" for digest in info["external_files"].values()):
+                info["runtime"], info["runtime_unbound"] = None, True      # fail closed: an external startup file we cannot read is not bound
             if name.startswith("gradle") and (_selects_own_jdk(directory, info["project_files"])
                                               or _selects_own_jdk(Path("/"), {path: "" for path in present if path.endswith("gradle.properties")})):
                 info["runtime"], info["runtime_unbound"] = None, True      # org.gradle.java.home picks a different JDK
@@ -286,14 +292,20 @@ def describe(toolchain: dict) -> list[str]:
             line += f"; JDK {runtime.get('release') or 'version unknown'} at {runtime.get('path') or 'none found'} sha256:{(runtime.get('sha256') or 'unhashed')[:12]}"
         for name, value in sorted(info.get("variables", {}).items()):
             line += f"; {name}={value}"
-        present = sorted(path for path, digest in (info.get("external_files") or {}).items() if digest != "<absent>")
+        external = info.get("external_files") or {}
+        present = sorted(path for path, digest in external.items() if digest not in ("<absent>", "<unhashed>"))
         if present:
             line += "; bound external startup files: " + ", ".join(present)
+        if any(digest == "<unhashed>" for digest in external.values()):
+            lines_after = [f"WARNING: an external startup file of {program} could not be fingerprinted (unreadable, or a relative GRADLE_USER_HOME); it is not bound."]
+        else:
+            lines_after = []
         if info.get("project_files"):
             line += "; bound project files: " + ", ".join(sorted(info["project_files"]))
             if any("<unhashed>" in value or "<walk-limit>" == key for key, value in info["project_files"].items()):
                 lines.append(f"WARNING: some startup files of {program} could not be fingerprinted; they are not bound.")
         lines.append(line)
+        lines.extend(lines_after)
         if info.get("runtime_unbound"):
             if Path(program).name in ("java", "javac"):
                 lines.append(f"WARNING: {program} is a selector or shim; which JDK it runs is not visible to Brahma and is not bound. Use the JDK's own bin/java to bind it.")

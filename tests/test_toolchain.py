@@ -548,5 +548,25 @@ class SixthReview(unittest.TestCase):
             self.assertTrue(toolchain.probe([["gradle"]], root / "wt", env)["programs"]["gradle"]["runtime_unbound"])
 
 
+class SeventhReview(unittest.TestCase):
+    def test_a_relative_gradle_user_home_and_an_unreadable_external_file_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "bin", "gradle")
+            home = jdk(root, "21")
+            result = toolchain.probe([["gradle"]], root / "wt", {"PATH": str(root / "bin"), "JAVA_HOME": str(home), "GRADLE_USER_HOME": "rel/dir"})
+        info = result["programs"]["gradle"]
+        self.assertTrue(info["runtime_unbound"])
+        lines = toolchain.describe(result)
+        self.assertTrue(any("could not be fingerprinted" in line for line in lines))
+        self.assertFalse(any("bound external startup files" in line for line in lines))
+
+    def test_an_oversized_gradle_properties_is_assumed_to_select_a_jdk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "gradle.properties").write_text("# pad\n" * 20000)
+            self.assertTrue(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
+
+
 if __name__ == "__main__":
     unittest.main()
