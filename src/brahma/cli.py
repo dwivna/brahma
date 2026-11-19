@@ -45,6 +45,10 @@ def parser():
     p.add_argument("--once", action="store_true", help="Run at most one due job, then exit")
     p = sub.add_parser("service", help="Manage the local background scheduler (macOS launchd)")
     p.add_argument("action", choices=("install", "status", "stop"))
+    p = sub.add_parser("memory", help="Inspect or forget what Brahma remembers about one repository")
+    p.add_argument("action", choices=("show", "forget"))
+    p.add_argument("--repo", type=Path, dest="target", help="Repository (defaults to the current one)")
+    p.add_argument("--yes", action="store_true", help="Confirm `forget`; without it nothing is deleted")
     p = sub.add_parser("status", help="Where a session stands: JSON, with an exit code per outcome")
     p.add_argument("session")
     p = sub.add_parser("events", help="Stream a session's events as JSON lines")
@@ -248,6 +252,25 @@ def _main(argv):
                                     "A running worker stops at its checkpoint.",
                            "resume": f"Resumed {args.session}: it runs again only under its existing approval.",
                            "stop": f"Stopped {args.session}: its queue is cancelled and running it again needs a new approval."}[args.command])
+        finally:
+            store.close()
+    if args.command == "memory":
+        from .memory import Memory, repo_id
+        root = repository(args.target or args.repo or Path.cwd())
+        if args.action == "forget" and not args.yes:
+            raise ValueError("Forgetting deletes this repository's memory and learned routing history; add --yes to confirm")
+        if not (home / "state.sqlite3").exists():
+            return report({"repo_id": repo_id(root), "memory": [], "outcomes": []}, "Nothing is remembered for this repository.")
+        store = Store(home)
+        try:
+            memory = Memory(store)
+            identity = repo_id(root)
+            if args.action == "forget":
+                removed = memory.forget(identity)
+                return report(removed, f"Forgot {removed['memory_removed']} memory entries and {removed['outcomes_removed']} "
+                                       "routing outcomes. Sessions, approvals, worktrees and checkpoints are untouched.")
+            data = memory.inspect(identity)
+            return report(data, json.dumps(data, indent=2))
         finally:
             store.close()
     if args.command in ("status", "events"):

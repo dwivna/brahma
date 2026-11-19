@@ -4,6 +4,27 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.5.0
+
+Shared record, handoff packets and repository memory (decision Rounds 4 and 5; first task of the Rounds 4-7 plan).
+
+**Added**
+- State schema 2 (additive migration; existing databases open with their data intact). Brahma refuses a state
+  database from a newer version rather than reinterpret it. New tables: task state, attention events,
+  repository memory and measured outcomes.
+- Handoff packets (`handoff.py`): a validated, bounded, immutable packet of the locked Gherkin slice, owned
+  paths, check commands, diff reference, coordinator-verified check results and open findings. Author summaries,
+  history, transcripts, unknown fields and secrets are rejected. Packets are written read-only (mode 0444) outside
+  the repository; the module has no access to the store.
+- Repository memory (`memory.py`), keyed by the canonical repository identity (stable across worktrees):
+  decisions, conventions, check commands, past failures and measured outcomes by provider and task type. Routing
+  history reports "no data yet" below 5 samples. Measured usage and estimates are separate fields.
+- `brahma memory show` and `brahma memory forget --yes`: forget removes one repository's memory and routing
+  history only; sessions, approvals, worktrees and checkpoints are untouched.
+
+**Not yet wired**
+- The engine does not yet read packets, record outcomes or use the routing history; that is the next task of the plan.
+
 ## 0.4.0
 
 JSON command-line interface and exit codes (decisions Rounds 9 and 11).

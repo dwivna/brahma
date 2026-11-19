@@ -7,6 +7,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
+SCHEMA_VERSION = 2  # 1 = sessions/events/jobs/quotas; 2 adds the shared record (task state, memory, outcomes, attention)
+
+
 class Store:
     def __init__(self, home: Path):
         self.home = home
@@ -22,7 +25,33 @@ class Store:
                 self.db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
         self.db.execute("CREATE TABLE IF NOT EXISTS jobs (session TEXT PRIMARY KEY, generation TEXT NOT NULL, digest TEXT NOT NULL, next_at REAL, state TEXT NOT NULL, reason TEXT)")
         self.db.execute("CREATE TABLE IF NOT EXISTS quotas (provider TEXT PRIMARY KEY, snapshot TEXT NOT NULL)")
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version > SCHEMA_VERSION:
+            self.db.close()
+            raise ValueError(f"State format {version} is newer than this Brahma reads ({SCHEMA_VERSION}); "
+                             "upgrade Brahma rather than reinterpret it")
+        self._migrate_shared_record()
+        self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         self.db.commit()
+
+    def _migrate_shared_record(self) -> None:
+        """Additive, idempotent tables for the shared record (Round 5). Existing data is never touched."""
+        self.db.execute("CREATE TABLE IF NOT EXISTS task_states (session TEXT NOT NULL, task_index INTEGER NOT NULL, "
+                        "phase TEXT NOT NULL, state TEXT NOT NULL, attempt INTEGER NOT NULL DEFAULT 0, "
+                        "updated TEXT NOT NULL, PRIMARY KEY(session, task_index))")
+        # Per-repository memory: decisions, conventions, check commands, past failures. Keyed by canonical repo id.
+        self.db.execute("CREATE TABLE IF NOT EXISTS memory (repo_id TEXT NOT NULL, kind TEXT NOT NULL, key TEXT NOT NULL, "
+                        "value TEXT NOT NULL, created TEXT NOT NULL, PRIMARY KEY(repo_id, kind, key))")
+        # Measured outcomes by provider and task type: the only inputs to learned routing. Measured usage and
+        # estimated usage are separate columns and are never merged.
+        self.db.execute("CREATE TABLE IF NOT EXISTS outcomes (id INTEGER PRIMARY KEY, repo_id TEXT NOT NULL, session TEXT, "
+                        "task_index INTEGER, provider TEXT NOT NULL, task_type TEXT NOT NULL, checks_passed INTEGER NOT NULL, "
+                        "repairs INTEGER NOT NULL, findings INTEGER NOT NULL, ready INTEGER NOT NULL, seconds REAL, "
+                        "usage_measured TEXT, usage_estimated TEXT, created TEXT NOT NULL)")
+        self.db.execute("CREATE INDEX IF NOT EXISTS outcomes_repo ON outcomes(repo_id)")
+        # Interrupts and decision-only attention events for the status view.
+        self.db.execute("CREATE TABLE IF NOT EXISTS attention (id INTEGER PRIMARY KEY, session TEXT NOT NULL, kind TEXT NOT NULL, "
+                        "text TEXT NOT NULL, created TEXT NOT NULL, resolved INTEGER NOT NULL DEFAULT 0)")
 
     def create(self, repo: Path) -> str:
         key = uuid.uuid4().hex[:12]
@@ -133,6 +162,36 @@ class Store:
     def job(self, key: str) -> dict | None:
         row = self.db.execute("SELECT generation,digest,next_at,state,reason FROM jobs WHERE session=?", (key,)).fetchone()
         return dict(zip(("generation", "digest", "next_at", "state", "reason"), row)) if row else None
+
+    # ---- shared record: task state and attention ------------------------------------------------------
+    def set_task_state(self, session: str, task_index: int, phase: str, state: str, attempt: int = 0) -> None:
+        self.session(session)
+        self.db.execute("INSERT INTO task_states VALUES (?,?,?,?,?,?) ON CONFLICT(session,task_index) DO UPDATE SET "
+                        "phase=excluded.phase,state=excluded.state,attempt=excluded.attempt,updated=excluded.updated",
+                        (session, task_index, phase, state, attempt, self.now()))
+        self.db.commit()
+
+    def task_states(self, session: str) -> list[dict]:
+        return [dict(zip(("task_index", "phase", "state", "attempt", "updated"), row)) for row in
+                self.db.execute("SELECT task_index,phase,state,attempt,updated FROM task_states WHERE session=? "
+                                "ORDER BY task_index", (session,))]
+
+    def attention(self, session: str, kind: str, text: str) -> int:
+        if kind not in ("decision", "interrupt", "blocked"):
+            raise ValueError("Unknown attention kind")
+        cursor = self.db.execute("INSERT INTO attention(session,kind,text,created) VALUES (?,?,?,?)",
+                                 (session, kind, text[:500], self.now()))
+        self.db.commit()
+        return cursor.lastrowid
+
+    def open_attention(self, session: str | None = None) -> list[dict]:
+        query = "SELECT id,session,kind,text,created FROM attention WHERE resolved=0"
+        rows = self.db.execute(query + (" AND session=?" if session else "") + " ORDER BY id", (session,) if session else ())
+        return [dict(zip(("id", "session", "kind", "text", "created"), row)) for row in rows]
+
+    def resolve_attention(self, attention_id: int) -> None:
+        self.db.execute("UPDATE attention SET resolved=1 WHERE id=?", (attention_id,))
+        self.db.commit()
 
     def close(self):
         self.db.close()

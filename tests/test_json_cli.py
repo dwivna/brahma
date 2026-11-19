@@ -148,6 +148,32 @@ class JsonOnEveryCommand(unittest.TestCase):
                 self.assertEqual((code, data["ok"], data["exit_code"]), (20, False, 20))
 
 
+class MemoryCommand(unittest.TestCase):
+    def test_show_then_forget_requires_confirmation_and_only_touches_memory(self):
+        from brahma.memory import Memory, repo_id
+        from brahma.store import Store
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session = stored(tmp)
+            root = Path(session.repo)
+            identity = repo_id(root)
+            Memory(store).remember(identity, "convention", "tests", "unittest")
+            Memory(store).record_outcome(identity, provider="codex", task_type="t", checks_passed=True, repairs=0,
+                                         findings=0, ready=True)
+            store.close()
+            state = Path(tmp) / "state"
+            code, out, _ = run_cli("--json", "memory", "show", "--repo", str(root), state=state)
+            self.assertEqual((code, len(json.loads(out)["memory"]), len(json.loads(out)["outcomes"])), (0, 1, 1))
+            code, out, _ = run_cli("--json", "memory", "forget", "--repo", str(root), state=state)
+            self.assertEqual((code, json.loads(out)["ok"]), (20, False))           # refused without --yes
+            self.assertEqual(len(Memory(Store(state)).recall(identity)), 1)
+            code, out, _ = run_cli("--json", "memory", "forget", "--repo", str(root), "--yes", state=state)
+            self.assertEqual(json.loads(out)["memory_removed"], 1)
+            check = Store(state)
+            self.assertEqual(Memory(check).recall(identity), [])
+            self.assertEqual(check.session(session.key)["repo"], str(root))            # sessions remain
+            check.close()
+
+
 class ApprovalIsNotExposed(unittest.TestCase):
     def test_there_is_no_command_for_an_ai_caller_to_approve_with(self):
         from brahma import cli
