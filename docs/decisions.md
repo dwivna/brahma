@@ -296,16 +296,18 @@ Pause, the history-rewrite hard block, the agent JSON interface, and signed-poli
 
 These are required capabilities, not a report that they exist in the prototype.
 
-## Round 13 — 20 November 2026 (1.0.0 release decision)
+## Round 14 — 20 November 2026 (1.0.0 release decision)
 
-Abhinav: finish toolchain binding, review, and if fine bump to 1.0.0 as the first release; then, with the review still open,
-"yes cap at round 7".
+Abhinav: 1.0.0 locks the first version of Brahma; nothing with a known bug, security gap or vulnerability lands in it.
+Codex reviews independently, and every finding is fixed and closed before release (this replaces an earlier
+"cap the review at round 7"). Q1 A, Q2 A (both recommended).
 
-1. **Decision:** the independent review is capped at Codex round 7. 0.13.0 is merged and 1.0.0 is released on that basis.
-2. **Gate status, stated plainly:** suite and installed-tool smoke test run on the release commit. The independent review
-   was not clean: round 7 reported HIGH findings (build-tool environment inputs outside the checkout). Fixes after it are
-   tested but not independently re-reviewed. Abhinav accepted this as an explicit exception to the Round 10 "open HIGH
-   findings block the release" rule; it is recorded here, not met.
-3. **Limits shipped:** see CHANGELOG 1.0.0 and README "Release limits". Round 12 signed-policy approval, read-side secret
-   enforcement and provider confinement remain unimplemented.
-4. **Versioning:** SemVer from 1.0.0. Breaking JSON, state or contract changes need a MAJOR bump.
+1. **Gate:** the Round 10 gate in full. The suite passes on the release commit, an independent Codex review of the whole
+   codebase (not only the last diff) ends with no open findings, and the installed-tool smoke test passes.
+2. **Signed-policy approval (Q1 A):** not in 1.0.0. Every contract in 1.0.0 needs direct human approval, which is the safe
+   default; Round 12 is implemented later as a MINOR release.
+3. **Read access (Q2 A):** documented as a limit, not built. Checks and workers are not sandboxed for reads: they can read
+   files the owner's user can read. Secret protection on reads is a prompt instruction because neither provider CLI can
+   enforce it. Writes stay enforced by ownership verification.
+4. **Versioning:** SemVer from 1.0.0. A breaking change to commands, JSON output, exit codes, state schema or contract format
+   needs a MAJOR bump.
