@@ -237,8 +237,12 @@ publish = false
 checks = []
 ```
 
-Choose models your CLI/account supports. A `critical` task uses the critical-model
-profile. `task_timeout` allows 1–3600 active seconds per task; `repair_cycles`
+Choose models your CLI/account supports. The defaults are not guaranteed to be
+available to every account: if a provider rejects a model (for example a
+`model_not_found` error for the Codex critical profile on a ChatGPT account),
+the attempt fails as a "Builder error" and the task is left `incomplete`. Set
+supported names in `brahma.toml` before approving a plan. A `critical` task uses
+the critical-model profile. `task_timeout` allows 1–3600 active seconds per task; `repair_cycles`
 allows 0–3 repairs after the initial attempt. `context_chars` allows
 2,000–100,000 **characters**, not tokens.
 
