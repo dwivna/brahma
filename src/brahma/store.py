@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 
-SCHEMA_VERSION = 2  # 1 = sessions/events/jobs/quotas; 2 adds the shared record (task state, memory, outcomes, attention)
+SCHEMA_VERSION = 3  # 1 = sessions/events/jobs/quotas; 2 adds the shared record; 3 adds notices (shown-once attention)
 
 
 class Store:
@@ -52,6 +52,8 @@ class Store:
         # Interrupts and decision-only attention events for the status view.
         self.db.execute("CREATE TABLE IF NOT EXISTS attention (id INTEGER PRIMARY KEY, session TEXT NOT NULL, kind TEXT NOT NULL, "
                         "text TEXT NOT NULL, created TEXT NOT NULL, resolved INTEGER NOT NULL DEFAULT 0)")
+        self.db.execute("CREATE TABLE IF NOT EXISTS notices (session TEXT NOT NULL, key TEXT NOT NULL, created TEXT NOT NULL, "
+                        "PRIMARY KEY (session, key))")
 
     def create(self, repo: Path) -> str:
         key = uuid.uuid4().hex[:12]
@@ -65,7 +67,7 @@ class Store:
 
     # Event kinds whose text is machine-readable JSON read back by the coordinator: not rewritten by redaction.
     STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome", "dispute_reply", "disagreement", "dispute_decision",
-                               "user_note", "context_expansion"})
+                               "user_note", "context_expansion", "checks_failing", "signin_lost"})
 
     def event(self, session: str, event) -> None:
         if event.kind not in self.STRUCTURED_EVENTS and isinstance(event.text, str):
@@ -195,6 +197,12 @@ class Store:
         query = "SELECT id,session,kind,text,created FROM attention WHERE resolved=0"
         rows = self.db.execute(query + (" AND session=?" if session else "") + " ORDER BY id", (session,) if session else ())
         return [dict(zip(("id", "session", "kind", "text", "created"), row)) for row in rows]
+
+    def claim_notice(self, session: str, key: str) -> bool:
+        """True exactly once per (session, key), across polls, restarts and reopened terminals."""
+        cursor = self.db.execute("INSERT OR IGNORE INTO notices VALUES (?,?,?)", (session, key[:200], self.now()))
+        self.db.commit()
+        return cursor.rowcount == 1
 
     def resolve_attention(self, attention_id: int) -> None:
         self.db.execute("UPDATE attention SET resolved=1 WHERE id=?", (attention_id,))

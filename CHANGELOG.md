@@ -4,6 +4,24 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.10.0
+
+Terminal status board and decision-only attention (plan task 5).
+
+**Added**
+- A plain-language board in the terminal, built from the shared session record (so foreground runs, scheduler runs and a
+  reopened terminal agree): per task the current worker, phase, active minutes out of 60, repair cycles, next step and any
+  blocker; provider capacity as known, unknown or waiting with its reset; measured usage shown separately from estimates.
+  Unknown stays "unknown". Quota waits do not add active time. No raw transcript is read; all text is sanitized.
+- Terminal controls on the same durable state as the CLI: Pause and Resume buttons, `/unpause`, and `/note [N:] text`
+  (same record as `brahma note`). Stop is unchanged.
+- Notifications only for approval needed, escalated disagreement, checks still failing after repairs, lost sign-in, and
+  ready for review. Each is shown once, recorded durably (`notices` table, schema 3), so polling and reopening do not repeat it.
+- The engine records `checks_failing` and `signin_lost` signals; the builder prompt now teaches the `MISSING_CONTEXT:` line.
+
+**Changed**
+- State schema 3 adds the `notices` table (additive). An older Brahma refuses a schema-3 store rather than guess.
+
 ## 0.9.0
 
 Packet-driven briefs, bounded context expansion and scoped notes (finishes plan task 3).

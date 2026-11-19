@@ -411,6 +411,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _emit(emit, "note_applied", f"Applied notes up to #{seen} at this checkpoint")
             if feedback:
                 prompt += "\nPrevious attempt feedback; repair within the same accepted scope:\n" + feedback[-12000:]
+            prompt += ("\nIf you cannot proceed without reading specific repository files, end your reply with one line "
+                       "`MISSING_CONTEXT: path1, path2` (at most five worktree paths). Brahma may add them once.")
             prompt += "\nFinish with a concise factual summary of changes and remaining limitations."
             if resume_phase == "build":
                 if provider_gate:
@@ -439,6 +441,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         available = await _limited_wait(builder, "builder", provider_gate, emit)
                         _emit(emit, "wait", json.dumps(dict(provider=builder, **available)))
                         state = "waiting"
+                    if built.status == "unavailable":
+                        _emit(emit, "signin_lost", json.dumps({"index": index, "provider": builder}))
                     _checkpoint(emit, index, task, state, attempt, f"Builder {built.status}")
                     return result(state, task, f"Builder {built.status}; draft retained")
                 wanted = briefs.missing_context(built.text)
@@ -485,6 +489,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     continue
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=False, findings=0,
                          usage=usage, seconds=time.monotonic() - started)
+                _emit(emit, "checks_failing", json.dumps({"index": index}))
                 return result("incomplete", task, "Checks did not pass after the bounded repairs")
             # Build context anew: the reviewer inspects files independently, not the builder's claims.
             review_prompt = (_BOUNDARIES + "\nYou are the independent read-only reviewer. Do not edit files.\n"
@@ -523,6 +528,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     available = await _limited_wait(reviewer, "reviewer", provider_gate, emit)
                     _emit(emit, "wait", json.dumps(dict(provider=reviewer, **available)))
                     state = "waiting"
+                if reviewed.status == "unavailable":
+                    _emit(emit, "signin_lost", json.dumps({"index": index, "provider": reviewer}))
                 _checkpoint(emit, index, task, state, attempt, f"Independent reviewer {reviewed.status}")
                 return result(state, task, f"Independent reviewer {reviewed.status}; draft retained")
             try:

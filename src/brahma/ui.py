@@ -24,7 +24,8 @@ HELP = """Type your goal here. Brahma proposes a plan; /approve runs only that p
 /usage [codex|claude]   inspect reported quota and resets without a model request
 /models [codex|claude]  discover advertised models and task profiles without generation
 /approve     execute the displayed plan     /stop or Escape   stop the active process group
-/pause   hold (resume later)   /kill   global kill switch
+/pause   hold   /unpause   release a held session   /kill   global kill switch
+/note [N:] TEXT   guidance for the next checkpoint (never changes scope, ownership or checks)
 /capacity claude|codex   confirm you checked capacity when no reset was reported
 /skills or /agents   inspect available definitions
 /sessions    show saved conversations       /resume ID   reopen a checkpoint
@@ -48,6 +49,7 @@ class BrahmaApp(App):
     Screen { background: #0b1220; color: #dbe8f5; }
     Header { background: #152238; color: #e8c27a; }
     #status { height: 2; padding: 0 1; color: #8da7bd; }
+    #board { height: auto; max-height: 9; margin: 0 1; padding: 0 1; color: #b9d0e4; }
     #size-notice { display: none; height: 1fr; padding: 1; color: #efcc87; }
     Screen.too-small #size-notice { display: block; }
     Screen.too-small #manager, Screen.too-small #workers, Screen.too-small #controls { display: none; }
@@ -84,6 +86,7 @@ class BrahmaApp(App):
     def compose(self) -> ComposeResult:
         yield Header()
         yield Static("Starting Brahma…", id="status")
+        yield Static("", id="board", markup=False)
         yield Static("Terminal too small. Resize to at least 80×24. Escape stops; Ctrl+Q quits.",
                      id="size-notice", markup=False)
         yield ConversationLog(id="manager", min_width=1, wrap=True, markup=False, highlight=False, max_lines=1200)
@@ -93,6 +96,8 @@ class BrahmaApp(App):
         with Horizontal(id="controls"):
             yield Input(placeholder="Describe your task, or /help", id="prompt")
             yield Button("Approve", id="approve", variant="primary", disabled=True)
+            yield Button("Pause", id="pause")
+            yield Button("Resume", id="resume")
             yield Button("Stop", id="stop", variant="warning")
         yield Footer()
 
@@ -204,9 +209,24 @@ class BrahmaApp(App):
         first.truncate(width, overflow="ellipsis")
         second.truncate(width, overflow="ellipsis")
         self.query_one("#status", Static).update(Text.assemble(first, "\n", second))
+        self.refresh_board()
         self.query_one("#approve", Button).disabled = bool(self.job and not self.job.done()) or not (
             (self.demo and self.demo_plan) or
             (self.session and self.session.plan and not self.session.plan.questions and status != "ready"))
+
+    def refresh_board(self):
+        """Render the board from the shared record and notify only for permitted, not-yet-shown attention."""
+        widget = self.query_one("#board", Static)
+        if not self.session or self.demo:
+            widget.update("")
+            return
+        try:
+            from . import board
+            widget.update(Text("\n".join(board.build(self.store, self.session.key).lines(max(20, self.size.width - 4)))))
+            for kind, text in board.fresh(self.store, self.session.key):
+                self.notify(text, title="Brahma needs you" if kind != "ready" else "Brahma", timeout=15)
+        except Exception as error:   # the board is a view; it must never break the terminal
+            widget.update(Text(f"Board unavailable: {type(error).__name__}"))
 
     def select_repo(self, path: Path, key: str | None = None):
         root = repository(path)
@@ -283,6 +303,13 @@ class BrahmaApp(App):
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
         if not value:
+            return
+        if value == "/unpause" or value == "/note" or value.startswith("/note "):
+            event.input.value = ""
+            if value == "/unpause":
+                self.action_unpause()
+            else:
+                self.action_note(value[5:].strip())
             return
         if value in ("/stop", "/pause", "/quit", "/kill"):
             event.input.value = ""
@@ -421,6 +448,10 @@ class BrahmaApp(App):
     async def on_button_pressed(self, event: Button.Pressed):
         if event.button.id == "stop":
             self.action_stop()
+        elif event.button.id == "pause":
+            self.action_pause()
+        elif event.button.id == "resume":
+            self.action_unpause()
         elif not self.job or self.job.done():
             self.job = asyncio.create_task(self.handle("/approve"))
             self.refresh_status()
@@ -431,6 +462,37 @@ class BrahmaApp(App):
             self.session.pause()
         self.write(Event(text="Paused: the approval and queue are kept and nothing runs until `brahma resume "
                          + (self.session.key if self.session else "SESSION") + "`. An active worker stops at its checkpoint."))
+
+    def action_unpause(self):
+        """Same durable control as `brahma resume`: the approval is unchanged and nothing new is approved."""
+        if not self.session or self.demo:
+            self.write(Event(text="No live session to resume."))
+            return
+        self.store.resume(self.session.key)
+        self.session.cancel.clear()
+        self.write(Event(text="Resumed: the session runs again only under its existing approval."))
+        self.refresh_status()
+
+    def action_note(self, text: str):
+        """Same record as `brahma note`: applied at the next checkpoint, never to running work."""
+        import json
+        from . import briefs
+        if not self.session or self.demo:
+            self.write(Event(text="No live session to leave a note for."))
+            return
+        task = None
+        head, _, rest = text.partition(":")
+        if rest and head.strip().isdigit():
+            task, text = int(head), rest
+        try:
+            note = briefs.clean_note(text)
+            if task is not None and task < 1:
+                raise ValueError("Task numbers start at 1")
+        except ValueError as error:
+            self.write(Event(kind="error", text=str(error)))
+            return
+        self.store.event(self.session.key, Event("brahma", "user", "user_note", json.dumps({"task": task, "text": note}, ensure_ascii=False)))
+        self.write(Event(text="Note saved for the next checkpoint; it cannot change scope, ownership, permissions or checks."))
 
     def action_kill(self):
         from . import halt
