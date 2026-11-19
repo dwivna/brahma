@@ -4,6 +4,13 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.12.1
+
+**Fixed** (found by the first real run against a live repository)
+- `brahma run --approve` blocked every run immediately with "Event is bound to a different event loop": model discovery
+  and execution used two `asyncio.run` calls, and the session's cancel Event bound to the first loop. They now share one loop.
+  A regression test fails on the old code with that exact error.
+
 ## 0.12.0
 
 Fixes from the second independent review (providers, quota, contracts, scheduler, config, terminal).

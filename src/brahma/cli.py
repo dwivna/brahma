@@ -433,9 +433,12 @@ def _main(argv):
             if not args.approve:
                 raise ValueError("Execution requires --approve; inspect the plan and configured checks first")
             plan = Plan.parse(args.plan_file.read_text(encoding="utf-8"))
-            selection = asyncio.run(session.discover_model_profiles())
-            session.set_plan(plan, model_selection=selection)
-            result = asyncio.run(session.execute())
+            async def approve_and_execute():
+                # One event loop for the whole run: the session's cancel Event binds to the loop it first awaits on.
+                selection = await session.discover_model_profiles()
+                session.set_plan(plan, model_selection=selection)
+                return await session.execute()
+            result = asyncio.run(approve_and_execute())
             code = exitcodes.for_result_status(result.status)
             print(json.dumps({"ok": result.status == "ready", "session": session.key, "status": result.status,
                               "summary": result.text, "exit_code": code}, indent=2))
