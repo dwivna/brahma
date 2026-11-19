@@ -10,7 +10,7 @@ import uuid
 import time
 from dataclasses import asdict, replace
 
-from . import ownership
+from . import safety, ownership
 from .config import Settings
 from .models import Event, Plan, Result
 from . import gittools
@@ -47,6 +47,15 @@ class Session:
         event.text = CONTROL.sub("", event.text)
         self.store.event(self.key, event)
         self.callback(event)
+        if event.provider in ("codex", "claude") and event.kind not in ("enforcement", "usage", "quota", "task_state", "wait"):
+            # Worker output is data. If it tries to direct Brahma, show the user a redacted flag; never act on it.
+            flags = safety.flag_embedded_instructions(event.text)
+            if flags:
+                note = Event("brahma", "safety", "flagged_instruction",
+                             "Embedded instruction in worker output (ignored, not acted on): " +
+                             "; ".join(f"{f.kind}: \u201c{f.excerpt}\u201d" for f in flags[:5]))
+                self.store.event(self.key, note)
+                self.callback(note)
 
     @contextlib.contextmanager
     def lock(self):

@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.5.0.** This README describes the
+**Status: early development prototype, version 0.6.0.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
@@ -279,6 +279,8 @@ publish = false
 checks = []
 # Build caches a check may create inside git-ignored directories (name patterns, no slashes).
 ignored_allowlist = [".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", "dist", "*.egg-info"]
+# Refuse to start a worker when its provider CLI cannot enforce protected reads (see Limits). Off by default.
+strict_enforcement = false
 ```
 
 Use `brahma models` or `/models` to check your CLI's advertised models. Before
@@ -375,6 +377,15 @@ Use the same state directory for the terminal and scheduler. A worker lock
 prevents overlapping Brahma workers using that directory.
 
 ## State, privacy and boundaries
+
+Brahma states what it can and cannot prevent. On every worker launch it records an `enforcement` event. Neither
+supported CLI is launched with a control that stops it **reading** secret files or paths outside the worktree, so
+protected reads are reported as *not enforced*. Writes are confined to the worktree by the provider's sandbox
+(Codex) or by having no shell (Claude), and approved ownership is verified after the run: an out-of-ownership
+change is restored on the isolated branch (never a path you had already edited) and readiness stays blocked.
+Set `strict_enforcement = true` to make Brahma refuse to start workers until reads can be enforced. Events and
+logs are redacted before they are stored; text a worker prints that tries to direct Brahma (read `.env`, push,
+merge) is shown to you as a redacted flag and never acted on.
 
 State defaults to `~/.local/state/brahma`. Override it consistently when needed:
 

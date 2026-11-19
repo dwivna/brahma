@@ -24,16 +24,9 @@ MAX_TEXT = 2000
 MAX_ITEMS = 50
 MAX_PACKET_BYTES = 64 * 1024
 FORBIDDEN_FIELDS = ("summary", "author_summary", "history", "conversation", "transcript", "messages", "notes")
+SESSION_ID = re.compile(r"[0-9a-f]{12}")
 _REF = re.compile(r"^[0-9a-f]{7,40}(\.\.[0-9a-f]{7,40})?$")
-_SECRET = re.compile(
-    r"(?i)(api[_-]?key|secret|token|passwd|password|authorization|bearer)\s*[:=]\s*\S{6,}"
-    r"|sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|AKIA[0-9A-Z]{16}|xox[baprs]-[A-Za-z0-9-]{10,}"
-    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----")
-
-
-def looks_secret(text: str) -> bool:
-    """True when text appears to contain a credential. Used for packets and repository memory."""
-    return bool(_SECRET.search(text))
+from .safety import argv_looks_secret, looks_secret  # noqa: E402  (one detector for packets, memory, logs)
 
 
 def _text(value, name: str, limit: int = MAX_TEXT) -> str:
@@ -96,7 +89,9 @@ def parse(data: dict) -> Packet:
     index = data.get("task_index")
     if not isinstance(index, int) or isinstance(index, bool) or index < 1:
         raise ValueError("Packet task_index must be a positive integer")
-    session = _text(data.get("session"), "session", 64)
+    session = data.get("session")
+    if not isinstance(session, str) or not SESSION_ID.fullmatch(session):
+        raise ValueError("Packet session must be a Brahma session id (12 lowercase hex characters)")
     gherkin = tuple(_text(item, "gherkin") for item in _list(data.get("gherkin"), "gherkin"))
     if not gherkin:
         raise ValueError("Packet needs the locked Gherkin slice for its task")
@@ -107,7 +102,10 @@ def parse(data: dict) -> Packet:
         ownership.validate(pattern)
     checks = []
     for argv in _list(data.get("checks"), "checks"):
-        checks.append(tuple(_text(word, "checks", 500) for word in _list(argv, "checks")))
+        words = tuple(_text(word, "checks", 500) for word in _list(argv, "checks"))
+        if argv_looks_secret(words):
+            raise ValueError("Packet field checks appears to contain a secret")
+        checks.append(words)
     diff_ref = data.get("diff_ref")
     if diff_ref is not None and (not isinstance(diff_ref, str) or not _REF.match(diff_ref)):
         raise ValueError("Packet diff_ref must be a commit or commit range, not free text")
@@ -120,8 +118,10 @@ def parse(data: dict) -> Packet:
         code = item.get("exit_code")
         if code is not None and (not isinstance(code, int) or isinstance(code, bool)):
             raise ValueError("Check exit_code must be an integer")
-        results.append((tuple(_text(w, "check_results", 500) for w in _list(item.get("argv"), "check_results")),
-                        item["status"], code))
+        argv = tuple(_text(w, "check_results", 500) for w in _list(item.get("argv"), "check_results"))
+        if argv_looks_secret(argv):
+            raise ValueError("Packet field check_results appears to contain a secret")
+        results.append((argv, item["status"], code))
     findings = []
     for item in _list(data.get("findings"), "findings"):
         if not isinstance(item, dict) or set(item) - {"id", "severity", "path", "text"} or item.get("severity") not in SEVERITIES:
@@ -142,8 +142,14 @@ def materialize(home: Path, packet: Packet) -> Path:
     The directory is outside the repository and holds no database. The file is mode 0444 so a worker given its
     path can read but not edit it; replacing it takes a coordinator call. The packet itself is immutable.
     """
-    directory = Path(home) / "packets" / packet.session
-    directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    root = (Path(home) / "packets")
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    directory = root / packet.session
+    if directory.is_symlink() or not directory.resolve().is_relative_to(root.resolve()):
+        raise ValueError("Packet directory must stay inside the packets folder")
+    directory.mkdir(exist_ok=True, mode=0o700)
+    if not directory.resolve().is_relative_to(root.resolve()):
+        raise ValueError("Packet directory must stay inside the packets folder")
     path = directory / f"task-{packet.task_index}-{packet.phase}.json"
     if path.exists() or path.is_symlink():
         os.chmod(path, stat.S_IRUSR | stat.S_IWUSR) if not path.is_symlink() else None

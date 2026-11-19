@@ -209,6 +209,53 @@ def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_a
     return True, f"{len(paths)} changed paths fit approved ownership"
 
 
+def violating_paths(worktree: Path, files: list[str], baseline=None, ignored_allow=None) -> list[str]:
+    """Paths changed since the prelaunch baseline that fall outside ownership or are sensitive/escaping."""
+    current = changed_paths(worktree, ignored_allow)
+    paths = current if baseline is None else [name for name in sorted(set(current) | set(baseline)) if name not in baseline
+                                              or _fingerprint(worktree / name) != baseline[name]]
+    bad = []
+    for name in paths:
+        link_escape = (worktree / name).is_symlink() and not (worktree / name).resolve().is_relative_to(worktree.resolve())
+        if not any(ownership.owns(pattern, name) for pattern in files) or _sensitive(name) or link_escape:
+            bad.append(name)
+    return bad
+
+
+def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored_allow=None) -> tuple[list[str], list[str]]:
+    """Undo attributable worker changes that violate ownership, on the isolated branch only.
+
+    A path that was already changed in the prelaunch baseline (a pre-existing edit) cannot be separated from the
+    worker's change, so it is never touched and is reported as not restored. A path absent from the baseline was
+    clean at launch: tracked files go back to HEAD, new files (including ignored ones) are removed.
+    Returns (restored, not_restored). Readiness stays blocked either way; this only limits the damage.
+    """
+    restored, kept = [], []
+    root = worktree.resolve()
+    for name in violating_paths(worktree, files, baseline, ignored_allow):
+        target = worktree / name
+        if name in baseline:
+            kept.append(name)
+            continue
+        if not (target.parent.resolve() / target.name).resolve(strict=False).is_relative_to(root) and not target.is_symlink():
+            kept.append(name)  # never act outside the worktree
+            continue
+        tracked = subprocess.run(["git", "-C", str(worktree), "ls-files", "--error-unmatch", "--", name],
+                                 capture_output=True).returncode == 0
+        try:
+            if tracked:
+                git(worktree, "restore", "--source=HEAD", "--staged", "--worktree", "--", name)
+            elif target.is_symlink() or target.is_file():
+                target.unlink()
+            elif target.is_dir():
+                kept.append(name)
+                continue
+            restored.append(name)
+        except (OSError, ValueError):
+            kept.append(name)
+    return restored, kept
+
+
 async def _stop(process):
     if process.returncode is not None:
         # No leader remains to checkpoint. Kill pipe-holding descendants in one
@@ -263,7 +310,9 @@ def check_env() -> dict[str, str]:
     return env
 
 
-async def run_checks(worktree, checks, cancel, timeout, emit):
+async def run_checks(worktree, checks, cancel, timeout, emit, results=None):
+    """Run approved checks. If `results` is a list, one (argv, status, exit_code) per command is appended as the
+    coordinator observed it (status passed|failed|not_run), for handoff packets."""
     deadline = time.monotonic() + timeout
     commands = [["git", "-c", "core.hooksPath=/dev/null", "diff", "--check"], *checks]
     summaries = []
@@ -275,6 +324,8 @@ async def run_checks(worktree, checks, cancel, timeout, emit):
             process = await asyncio.create_subprocess_exec(*command, cwd=worktree, env=check_env(),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         except OSError:
+            if results is not None:
+                results.append((tuple(command), "failed", None))
             return False, "Approved check could not start: " + command[0]
         output = bytearray()
         async def drain():
@@ -289,12 +340,16 @@ async def run_checks(worktree, checks, cancel, timeout, emit):
             done, _ = await asyncio.wait((running, stopped), timeout=max(0, deadline-time.monotonic()),
                                          return_when=asyncio.FIRST_COMPLETED)
             if running not in done or cancel.is_set():
+                if results is not None:
+                    results.append((tuple(command), "not_run", None))
                 await _stop(process)
                 await running
                 return False, "Checks cancelled or timed out"
             summary = f"{' '.join(command)} => exit {process.returncode}\n" + output.decode(errors="replace")
             summaries.append(summary)
             emit(Event(kind="check", text=summary[-16000:]))
+            if results is not None:
+                results.append((tuple(command), "failed" if process.returncode else "passed", process.returncode))
             if process.returncode:
                 return False, "\n".join(summaries)
         finally:
@@ -326,7 +381,7 @@ def publish(worktree: Path, summary: str, body: str) -> str:
     branch = git(worktree, "branch", "--show-current")
     if not branch.startswith("brahma/"):
         raise ValueError("Only Brahma-owned branches may be published")
-    git(worktree, "push", "--set-upstream", "origin", branch)
+    git(worktree, "push", "--set-upstream", "origin", f"{branch}:{branch}")  # explicit destination: never a default branch
     result = subprocess.run(["gh", "pr", "create", "--draft", "--head", branch,
                              "--title", summary[:120], "--body-file", "-"], cwd=worktree,
                              input=body, text=True, capture_output=True, timeout=60)

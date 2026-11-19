@@ -14,6 +14,23 @@ from .config import Settings
 from .models import Emit, Event, Plan, Result, Task, extract_json
 
 
+def _restore_note(worktree, files, baseline, settings, emit) -> str:
+    """Undo attributable out-of-ownership changes on the isolated branch; readiness stays blocked regardless."""
+    from .gittools import restore_violations
+    try:
+        restored, kept = restore_violations(worktree, files, baseline, settings.ignored_allowlist)
+    except Exception as error:  # a failed rollback must never turn a block into a pass
+        return f" (automatic restore failed: {error})"
+    note = ""
+    if restored:
+        note += " Restored: " + ", ".join(restored) + "."
+    if kept:
+        note += " Not restored (pre-existing edit or unsafe): " + ", ".join(kept) + "."
+    if note:
+        _emit(emit, "restore", note.strip())
+    return note
+
+
 def _emit(emit: Emit, kind: str, text: str, **values) -> None:
     emit(Event("brahma", "manager", kind, providers.clean_text(text), values))
 
@@ -165,7 +182,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
     A plan with questions is never executable. Each task shares one deadline across
     its initial attempt, up to three repairs, checks and reviews.
     """
-    from .gittools import ownership_changes, run_checks, snapshot_changes
+    from .gittools import ownership_changes, restore_violations, run_checks, snapshot_changes
     started = time.monotonic()
     worktree = Path(worktree)
     # Revalidate even plans constructed directly by a caller, preserving the contract.
@@ -303,6 +320,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             budgets[index]["phase"] = "check"
             owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
             if not owned:
+                reason += _restore_note(worktree, task.files, baseline, settings, emit)
                 _checkpoint(emit, index, task, "blocked", attempt, reason)
                 return result("blocked", task, "File ownership check failed: " + reason)
             _checkpoint(emit, index, task, "checking", attempt)
@@ -377,6 +395,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             # Checks can modify files too; require ownership again before accepting readiness.
             owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
             if not owned:
+                reason += _restore_note(worktree, task.files, baseline, settings, emit)
                 _checkpoint(emit, index, task, "blocked", attempt, reason)
                 return result("blocked", task, "File ownership check failed after checks: " + reason)
             if cancel.is_set() or time.monotonic() > deadline:

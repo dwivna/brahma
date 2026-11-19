@@ -4,6 +4,32 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.6.0
+
+Safety boundaries (decision Round 7; task 2 of the Rounds 4-7 plan). Partly delivered, see "Not enforced".
+
+**Added**
+- `safety.py`: one place that redacts secrets (events are redacted before they are stored; structured JSON events
+  are left parseable), flags embedded instructions in worker output as redacted, never-acted-on warnings, and
+  reports what each provider launch can and cannot enforce. An `enforcement` event is recorded on every launch.
+- `strict_enforcement` setting (off by default): refuse to start any worker whose provider cannot enforce
+  protected reads. Both supported CLIs currently cannot, so turning it on stops all workers by design.
+- Postflight restore: an out-of-ownership, sensitive or symlink-escaping change made by a worker is reverted on the
+  isolated branch (tracked files to HEAD, new files removed, never following a link out of the worktree). A path
+  already edited before launch is never touched. Readiness stays blocked after the rollback.
+- `run_checks` can return the coordinator-observed exit status per command, in the form handoff packets use.
+- `publish` pushes an explicit `brahma/X:brahma/X` refspec, so no configured upstream can reach a default branch.
+
+**Fixed (independent security review of 0.5.0)**
+- Packet session ids must be real session ids and the packet directory must stay inside the packets folder
+  (a planted symlink or a `../` id can no longer redirect a write or unlink).
+- The secret detector now sees compound names, quoted values, `Bearer`/`Basic` tokens and `github_pat_` tokens, and
+  scans command arguments both per word and joined.
+
+**Not enforced (stated plainly)**
+- Reads of secret files or paths outside the worktree by a worker are not prevented by either CLI's launch settings;
+  only reported. Credential files under `$HOME` stay readable. No sandbox for checks.
+
 ## 0.5.0
 
 Shared record, handoff packets and repository memory (decision Rounds 4 and 5; first task of the Rounds 4-7 plan).

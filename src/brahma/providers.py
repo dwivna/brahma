@@ -311,6 +311,13 @@ async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
     Retries spend no repair cycle and never touch quota state; they stay inside the caller's
     time budget. If the provider is still overloaded the result status is "overloaded".
     """
+    from . import safety
+    try:
+        report = safety.check_launch(provider, role, bool(getattr(settings, "strict_enforcement", False)))
+    except ValueError as error:
+        emit(Event(provider, role, "enforcement", str(error)))
+        return Result(provider, "unavailable", str(error))  # fail closed: no worker starts, the limit is recorded
+    emit(Event(provider, role, "enforcement", report.describe()))
     started = time.monotonic()
     result = await _run_once(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id)
     for delay in OVERLOAD_DELAYS:

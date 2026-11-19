@@ -63,7 +63,13 @@ class Store:
     def now() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    # Event kinds whose text is machine-readable JSON read back by the coordinator: not rewritten by redaction.
+    STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created"})
+
     def event(self, session: str, event) -> None:
+        if event.kind not in self.STRUCTURED_EVENTS and isinstance(event.text, str):
+            from . import safety
+            event.text = safety.redact(event.text)  # the one chokepoint before events reach logs and screens
         self.db.execute("INSERT INTO events(session,created,provider,role,kind,text,usage) VALUES(?,?,?,?,?,?,?)",
                         (session, self.now(), event.provider, event.role, event.kind, event.text,
                          json.dumps(event.usage, ensure_ascii=False)))

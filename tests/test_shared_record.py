@@ -29,7 +29,7 @@ def make_repo(root: Path) -> Path:
 
 
 def good(**overrides) -> dict:
-    data = {"version": 1, "session": "abc123", "task_index": 2, "phase": "review",
+    data = {"version": 1, "session": "abc123def456", "task_index": 2, "phase": "review",
             "gherkin": ["Scenario: Export\n  Given a table\n  When I export\n  Then a CSV exists"],
             "owned_paths": ["src/export.py", "tests/test_export.py"], "checks": [["python", "-m", "unittest"]],
             "diff_ref": "a1b2c3d..e4f5a6b",
@@ -120,7 +120,8 @@ class PacketSchema(unittest.TestCase):
 
     def test_unknown_and_invalid_fields_are_rejected(self):
         bad = (dict(extra="x"), dict(version=2), dict(phase="deploy"), dict(task_index=0), dict(task_index=True),
-               dict(session=""), dict(gherkin=[]), dict(gherkin=[""]), dict(owned_paths=[]), dict(owned_paths=["/etc/passwd"]),
+               dict(session=""), dict(session="../../etc"), dict(session="abc"), dict(session="ABC123DEF456"),
+               dict(session="abc123def456/x"), dict(session="..") , dict(gherkin=[]), dict(gherkin=[""]), dict(owned_paths=[]), dict(owned_paths=["/etc/passwd"]),
                dict(owned_paths=["../x"]), dict(diff_ref="my latest changes"), dict(diff_ref="HEAD; rm -rf /"),
                dict(diff_ref=None), dict(check_results=[{"argv": ["x"], "status": "great"}]),
                dict(check_results=[{"argv": ["x"], "status": "passed", "stdout": "log"}]),
@@ -142,6 +143,22 @@ class PacketSchema(unittest.TestCase):
                              dict(checks=[["run", secret]])):
                 with self.subTest(secret=secret[:20], field=list(override)[0]), self.assertRaisesRegex(ValueError, "secret"):
                     handoff.parse(good(**override))
+
+    def test_more_secret_formats_are_refused(self):
+        secrets = ('"api_key": "abcdef123456"', "MY_SERVICE_TOKEN = abcdef123456", "Authorization: Bearer abcdefgh12345678",
+                   "github_pat_11ABCDEFG0abcdefghijklmnop", "client_secret: 'abcdef123456'", "db_password abcdef123456")
+        for secret in secrets:
+            with self.subTest(secret=secret), self.assertRaisesRegex(ValueError, "secret"):
+                handoff.parse(good(gherkin=[secret]))
+        for argv in (["tool", "--password", "hunter2hunter2"], ["env", "API_KEY=abcdef123456", "run"], ["x", "--token=abcdef123456"]):
+            with self.subTest(argv=argv), self.assertRaisesRegex(ValueError, "secret"):
+                handoff.parse(good(checks=[argv]))
+            with self.subTest(argv=argv, field="results"), self.assertRaisesRegex(ValueError, "secret"):
+                handoff.parse(good(check_results=[{"argv": argv, "status": "passed", "exit_code": 0}]))
+
+    def test_ordinary_text_is_not_mistaken_for_a_secret(self):
+        handoff.parse(good(gherkin=["Scenario: token refresh\n  Given a user\n  When the token expires\n  Then it renews"],
+                           findings=[{"id": "1", "severity": "low", "text": "Password reset email wording is unclear"}]))
 
     def test_a_build_packet_needs_no_diff_but_a_review_packet_does(self):
         handoff.parse(good(phase="build", diff_ref=None, check_results=[], findings=[]))
@@ -196,6 +213,17 @@ class PacketIsReadOnly(unittest.TestCase):
             link.symlink_to(path)
             with self.assertRaisesRegex(ValueError, "symlink"):
                 handoff.load(link)
+
+    def test_materialize_never_leaves_the_packets_folder(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "state"
+            outside = Path(tmp) / "elsewhere"
+            outside.mkdir()
+            (home / "packets").mkdir(parents=True)
+            (home / "packets" / "abc123def456").symlink_to(outside)   # a planted symlink for the session directory
+            with self.assertRaisesRegex(ValueError, "inside the packets folder"):
+                handoff.materialize(home, handoff.parse(good()))
+            self.assertEqual(list(outside.iterdir()), [])
 
     def test_rewriting_a_packet_replaces_the_read_only_file(self):
         with tempfile.TemporaryDirectory() as tmp:

@@ -26,6 +26,9 @@ class Settings:
     publish: bool = False
     checks: list[list[str]] = field(default_factory=list)
     ignored_allowlist: list[str] = field(default_factory=lambda: list(_DEFAULT_IGNORED))
+    # Refuse to start a worker whose provider CLI cannot enforce protected reads (fail closed). Off by default
+    # because neither supported CLI can currently enforce them; the limit is then reported on every launch.
+    strict_enforcement: bool = False
 
     def model_for(self, provider: str, complexity: str = "routine") -> str:
         if provider not in ("codex", "claude"):
@@ -50,8 +53,9 @@ class Settings:
             raise ValueError("Repair cycles must be 0–3")
         if type(result.context_chars) is not int or not 2000 <= result.context_chars <= 100000:
             raise ValueError("Context limit must be 2000–100000 characters")
-        if type(result.auto_commit) is not bool or type(result.publish) is not bool:
-            raise ValueError("auto_commit and publish must be booleans")
+        if (type(result.auto_commit) is not bool or type(result.publish) is not bool
+                or type(result.strict_enforcement) is not bool):
+            raise ValueError("auto_commit, publish and strict_enforcement must be booleans")
         for field in ("codex_model", "codex_critical_model", "claude_model", "claude_critical_model"):
             if not isinstance(getattr(result, field), str) or not getattr(result, field).strip():
                 raise ValueError("Model names must be nonempty strings")
