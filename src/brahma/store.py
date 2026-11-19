@@ -123,5 +123,16 @@ class Store:
         return [dict(zip(("provider", "role", "kind", "text", "usage"), (*row[:4], json.loads(row[4]))))
                 for row in self.db.execute("SELECT provider,role,kind,text,usage FROM events WHERE session=? ORDER BY seq", (key,))]
 
+    def events_after(self, key: str, after: int = 0, limit: int = 500) -> list[dict]:
+        """Events with their sequence numbers, oldest first, for streaming callers."""
+        rows = self.db.execute("SELECT seq,created,provider,role,kind,text,usage FROM events WHERE session=? AND seq>? "
+                               "ORDER BY seq LIMIT ?", (key, after, limit))
+        return [dict(zip(("seq", "created", "provider", "role", "kind", "text", "usage"),
+                         (*row[:6], json.loads(row[6])))) for row in rows]
+
+    def job(self, key: str) -> dict | None:
+        row = self.db.execute("SELECT generation,digest,next_at,state,reason FROM jobs WHERE session=?", (key,)).fetchone()
+        return dict(zip(("generation", "digest", "next_at", "state", "reason"), row)) if row else None
+
     def close(self):
         self.db.close()

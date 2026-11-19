@@ -4,6 +4,24 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.4.0
+
+JSON command-line interface and exit codes (decisions Rounds 9 and 11).
+
+**Added**
+- `--json`: every command prints one JSON object with `ok` and `exit_code`, and errors are JSON too.
+- `brahma status SESSION`: where a session stands (status, approval, contract digest, pause/stop/kill, queued
+  job); the exit code is the outcome.
+- `brahma events SESSION [--after N] [--follow]`: a streamed event log as JSON lines with sequence numbers.
+- There is deliberately no `approve` command: an AI caller may not approve its own contract (Round 9 item 3).
+  The human-signed policy approval of Round 11/12 is still not built.
+
+**Breaking**
+- Exit codes are now the documented table (README): 0 ready, 10 waiting, 11 needs approval, 12 needs checks,
+  13 blocked, 14 cancelled/paused/killed, 20 usage error, 30 provider CLI missing or not signed in. Previously
+  errors were 2 and `brahma doctor` failures were 1. This is the *proposed starting table*; the final table is
+  not yet confirmed by Abhinav.
+
 ## 0.3.0
 
 Kill switch, distinct Pause/Stop, and Git hard blocks (decisions Rounds 6, 7 and 11).

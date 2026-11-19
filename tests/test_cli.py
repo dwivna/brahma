@@ -62,9 +62,10 @@ class Parsing(unittest.TestCase):
 
     def test_invalid_arguments_exit_with_usage_error(self):
         for argv in (["worker"], ["service"], ["service", "restart"], ["pause"]):
-            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as cm:
+            with self.subTest(argv=argv), self.assertRaises(ValueError):
                 cli.parser().parse_args(argv)
-            self.assertEqual(cm.exception.code, 2)
+            with self.subTest(argv=argv, via="main"), contextlib.redirect_stderr(io.StringIO()):
+                self.assertEqual(cli.main(argv), 20)  # usage error (Round 11 exit-code table)
 
 
 class Commands(unittest.TestCase):
@@ -101,7 +102,7 @@ class Commands(unittest.TestCase):
             raise OSError("disk unavailable")
         with tempfile.TemporaryDirectory() as tmp, patch("brahma.scheduler.serve", serve):
             code, _, err = run_cli("worker", "--home", tmp, state=tmp)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 20)
         self.assertIn("disk unavailable", err)
 
     def test_service_actions_delegate_and_errors_are_clean(self):
@@ -120,12 +121,12 @@ class Commands(unittest.TestCase):
                 raise ValueError("Automatic service installation currently supports macOS")
             with patch("brahma.scheduler.service", unsupported):
                 code, _, err = run_cli("service", "install", state=tmp)
-            self.assertEqual(code, 2)
+            self.assertEqual(code, 20)
             self.assertIn("supports macOS", err)
             def failing(action, home, **kwargs):
                 raise subprocess.CalledProcessError(1, ["launchctl"])
             with patch("brahma.scheduler.service", failing):
-                self.assertEqual(run_cli("service", "stop", state=tmp)[0], 2)
+                self.assertEqual(run_cli("service", "stop", state=tmp)[0], 13)  # the service manager failed: blocked
 
     def test_service_status_reports_queue_without_claiming_capacity(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -178,7 +179,7 @@ class Commands(unittest.TestCase):
     def test_pause_unknown_session_fails_cleanly(self):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, err = run_cli("pause", "missing", state=tmp)
-        self.assertEqual(code, 2)
+        self.assertEqual(code, 20)
         self.assertEqual(out, "")
         self.assertIn("Unknown session", err)
 
@@ -215,7 +216,7 @@ class Doctor(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             code, out, _ = self.doctor(Path(tmp) / "state", provider_rows(codex=False))
         rows = {r["provider"]: r for r in json.loads(out)["providers"]}
-        self.assertEqual(code, 1)
+        self.assertEqual(code, 30)  # provider CLI missing or not signed in
         self.assertEqual(rows["codex"]["readiness"], "missing")
         self.assertEqual(rows["claude"]["readiness"], "ready")
 

@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.3.0.** This README describes the
+**Status: early development prototype, version 0.4.0.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
@@ -220,9 +220,38 @@ brahma plan "Add CSV export" --repo /path/to/repository --output /tmp/export.pla
 # Inspect and resolve the plan first; creates a new execution session.
 brahma run /tmp/export.plan.json --repo /path/to/repository --approve
 
-# Prevent an existing session's automatic continuation.
+# Hold, release or stop a session; global kill switch.
 brahma pause SESSION_ID
+brahma resume SESSION_ID
+brahma stop SESSION_ID
+brahma kill            # brahma kill --release to lift
 ```
+
+### For scripts and AI callers
+
+Add `--json` before any command and every result or error is one JSON object with
+`ok` and `exit_code`; `brahma events` prints one JSON object per line.
+
+```sh
+brahma --json status SESSION_ID          # where it stands; exit code is the outcome
+brahma events SESSION_ID --after 120 --follow   # stream events (JSON lines)
+```
+
+An AI caller may plan, read status, usage and models, and run contracts a human has
+already approved. There is deliberately no `approve` command: only a human approves.
+
+Exit codes (a proposed table, versioned: changing one is a MINOR version bump):
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Ready (or the command succeeded) |
+| `10` | Waiting for provider capacity, or queued to run |
+| `11` | Needs human approval of the contract |
+| `12` | Needs approved checks, so nothing can be marked ready |
+| `13` | Blocked (policy gate, failed check, provider or service problem) |
+| `14` | Stopped, paused or killed by the user |
+| `20` | Usage error: bad arguments, unknown session or unreadable input |
+| `30` | A provider CLI is missing or not signed in (`brahma doctor`) |
 
 For an existing checkpoint, use `brahma --resume SESSION_ID`, inspect it, then
 `/approve`. `brahma run` executes a plan file; it is not existing-session resume.
@@ -386,8 +415,8 @@ they do not automatically spawn child processes.
 The [initial build report](docs/build-review-20261118.md) records historical
 verification; it does not certify every later change. Ongoing work includes learned
 routing and inspectable repository memory, smaller typed handoff packets, a
-desktop/web view sharing the same state, distinct Pause/note controls, stronger
-enforcement and a global kill switch. Automatic compaction and savings need
+desktop/web view sharing the same state, note controls, a human-signed approval policy for AI
+callers and stronger enforcement. Automatic compaction and savings need
 measurement.
 
 The [decision register](docs/decisions.md) separates requirements from delivered
