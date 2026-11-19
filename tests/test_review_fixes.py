@@ -200,7 +200,8 @@ class ToolchainBlock(Flow):
         self.assertEqual(result.status, "blocked")
         self.assertIn("Toolchain changed", result.text)
         self.assertEqual(len(self.calls), 1)                                  # one builder run, no repair attempts
-        self.assertEqual(self.states()[-1]["state"], "blocked")
+        last = self.states()[-1]
+        self.assertEqual((last["state"], last["attempt"]), ("checking", 0))   # resumable at the same attempt: nothing is spent
 
 
 class Session(unittest.TestCase):

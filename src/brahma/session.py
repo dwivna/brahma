@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import json
 import sqlite3
+import subprocess
 from pathlib import Path
 import re
 import uuid
@@ -169,6 +170,18 @@ class Session:
         self.emit(Event(kind="plan", text=json.dumps(self.plan.to_dict(), ensure_ascii=False)))
         return self.plan
 
+    def _toolchain_basis(self) -> tuple[Path | None, str]:
+        """Where to fingerprint the toolchain from. A follow-on plan uses the existing worktree only when it is clean, so what is
+        fingerprinted is committed, reviewed content; a dirty worktree may hold unreviewed worker edits, so the repository is used."""
+        tree = self.store.session(self.key)["worktree"]
+        if tree:
+            try:
+                if not gittools.status_paths(Path(tree)):
+                    return Path(tree), "worktree"
+            except (OSError, ValueError, subprocess.SubprocessError):
+                pass
+        return None, "repo"
+
     def set_plan(self, plan: Plan, *, model_selection: dict | None = None):
         from .contracts import prepare_contract, write_contract
         from .discovery import discover
@@ -188,9 +201,8 @@ class Session:
                                          base_revision=(gittools.git(Path(self.store.session(self.key)["worktree"]), "rev-parse", "HEAD")
                                                         if self.store.session(self.key)["worktree"] else None),
                                          # A follow-on plan runs in the existing worktree, so its toolchain is read from there.
-                                         toolchain_directory=(Path(self.store.session(self.key)["worktree"])
-                                                              if self.store.session(self.key)["worktree"] else None),
-                                         toolchain_basis="worktree" if self.store.session(self.key)["worktree"] else "repo")
+                                         toolchain_directory=self._toolchain_basis()[0],
+                                         toolchain_basis=self._toolchain_basis()[1])
             # Check required context before asking for approval; never silently truncate it.
             from .engine import _task_context, _brief, _BOUNDARIES
             settings._definition_catalog = catalog.entries

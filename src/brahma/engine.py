@@ -501,7 +501,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                                                        getattr(settings, "bound_toolchain", None))
             except toolchain.ToolchainChanged as error:
                 # The environment moved after approval: stop at once and ask for a new approval; do not burn repairs on it.
-                _checkpoint(emit, index, task, "blocked", attempt, safety.redact(str(error)))
+                # Recorded as "checking" at this attempt so a resume re-runs the checks without spending an attempt.
+                budgets[index]["phase"] = "check"
+                _checkpoint(emit, index, task, "checking", attempt, safety.redact(str(error)))
                 return result("blocked", task, str(error))
             if cancel.is_set():
                 _checkpoint(emit, index, task, "cancelled", attempt)

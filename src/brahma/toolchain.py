@@ -32,11 +32,15 @@ _LAUNCHERS = {"uv", "uvx", "npx", "pipx", "poetry", "env", "sh", "bash", "zsh", 
               "nix", "nix-shell", "make", "time", "timeout", "nohup", "sudo"}
 # Variables that decide which toolchain a program picks up, and only for the programs they steer.
 _JAVA_VARIABLES = ("JAVA_HOME", "MAVEN_HOME", "M2_HOME", "GRADLE_HOME")
-# Files a Java build tool reads from the project before it does anything else. A worker can edit them (a jvm.config line can
-# load a Java agent; a wrapper properties file chooses what gets downloaded and run), so they are bound like the program.
-_JAVA_PROJECT_FILES = (".mvn/jvm.config", ".mvn/maven.config", ".mvn/extensions.xml", ".mvn/wrapper/maven-wrapper.properties",
-                       ".mvn/wrapper/maven-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties",
-                       "gradle/wrapper/gradle-wrapper.jar", "gradle.properties", ".sdkmanrc")
+# Files a Java build tool reads from the project before it does anything else. A worker can edit them (a jvm.config line can load a
+# Java agent; a wrapper properties file chooses what gets downloaded and run), so for build tools they are bound like the program.
+# They are looked for anywhere under the checkout, not only beside the command: `mvn -f service/pom.xml` reads `service/.mvn/`.
+_BUILD_TOOLS = {"mvn", "mvnw", "gradle", "gradlew", "ant", "sbt", "kotlinc"}
+_STARTUP_NAMES = {".mvn": {"jvm.config", "maven.config", "extensions.xml"}, "wrapper": {"maven-wrapper.properties", "maven-wrapper.jar",
+                  "gradle-wrapper.properties", "gradle-wrapper.jar"}}
+_STARTUP_TOP = {"gradle.properties", ".sdkmanrc"}
+_SKIP_DIRS = {".git", "node_modules", "target", "build", ".gradle", ".venv", "venv", "__pycache__", ".idea"}
+_MAX_WALK = 20000
 _VERSION_TEXT = re.compile(r"[0-9]+(?:\.[0-9]+){0,3}(?:[_+-][0-9A-Za-z]{1,8}){0,2}")   # a Java version, nothing free-form
 
 
@@ -72,7 +76,7 @@ def resolve(program: str, directory: Path, env: dict[str, str]) -> tuple[Path | 
     directory = Path(directory).resolve()
     relative = "/" in program and not os.path.isabs(program)
     if "/" in program:
-        candidate = Path(os.path.normpath(directory / program)) if relative else Path(program)
+        candidate = (directory / program) if relative else Path(program)     # never collapse '..': that can change which file is meant
     else:
         found = shutil.which(program, path=trusted_path(env))
         if not found:
@@ -85,17 +89,23 @@ def resolve(program: str, directory: Path, env: dict[str, str]) -> tuple[Path | 
 
 
 def _java_runtime(env: dict[str, str], program: str, target: Path) -> dict | None:
-    """The JDK a Java-family program will use, or None when it cannot be known without running something."""
+    """The JDK a Java-family program will use, or None when it cannot be known without running something.
+
+    A `java`/`javac` file that sits in a real JDK (a `release` file two levels up) is its own runtime. A selector or shim (the macOS
+    /usr/bin/java stub, a version-manager shim) delegates elsewhere, so it is treated like a build tool: bound through an absolute
+    JAVA_HOME if one is set, otherwise reported as not bound."""
     name = Path(program).name
+    home = None
     if name in ("java", "javac"):
-        java = target if name == "java" else target.parent / "java"      # the program is the runtime: derive it from the file itself
-        home = java.parent.parent
-    else:
+        own = target.parent.parent
+        if (own / "release").is_file():
+            home = own
+    if home is None:
         home_text = env.get("JAVA_HOME", "")
         if not home_text or not os.path.isabs(home_text):
             return None                                                 # the tool picks its own JDK; reported as not bound
         home = Path(home_text)
-        java = home / "bin" / "java"
+    java = home / "bin" / "java"
     try:
         java = java.resolve(strict=True)
     except OSError:
@@ -112,6 +122,34 @@ def _java_runtime(env: dict[str, str], program: str, target: Path) -> dict | Non
     except OSError:
         pass
     return {"path": str(java), "sha256": _fingerprint(java), "release": release}
+
+
+def startup_files(directory: Path) -> dict[str, str]:
+    """Fingerprint every build-tool startup file under `directory`. A symlink or file outside the tree is still bound: the content it
+    resolves to is hashed and the link target is recorded, so retargeting it is a change. Anything unreadable is recorded as such,
+    never dropped."""
+    directory = Path(directory).resolve()
+    found: dict[str, str] = {}
+    visited = 0
+    for root, dirs, files in os.walk(directory):
+        dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+        visited += 1
+        if visited > _MAX_WALK:
+            found["<walk-limit>"] = "more than %d directories; startup files beyond the limit are not bound" % _MAX_WALK
+            break
+        here = Path(root)
+        names = set(_STARTUP_NAMES.get(here.name, ())) | (_STARTUP_TOP if here == directory else set())
+        if here.name == "wrapper" and here.parent.name not in (".mvn", "gradle"):
+            names = set()
+        for name in sorted(names & set(files)):
+            path = here / name
+            digest = _fingerprint(path) or "<unhashed>"
+            try:
+                link = f"@{path.resolve()}" if path.is_symlink() else ""
+            except OSError:
+                link = "@<unresolvable>"
+            found[path.relative_to(directory).as_posix()] = digest + link
+    return found
 
 
 def _relative_or_absolute(path: Path, directory: Path, relative: bool) -> str:
@@ -139,8 +177,8 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> d
         info["runtime"] = _java_runtime(env, program, target)
         info["runtime_unbound"] = info["runtime"] is None
         info["variables"] = {key: env[key] for key in _JAVA_VARIABLES if key in env}
-        info["project_files"] = {relative_file: _fingerprint(directory / relative_file) for relative_file in _JAVA_PROJECT_FILES
-                                 if (directory / relative_file).is_file() and (directory / relative_file).resolve().is_relative_to(directory)}
+        if name in _BUILD_TOOLS:
+            info["project_files"] = startup_files(directory)
     elif name == "go" and "GOROOT" in env:
         info["variables"] = {"GOROOT": env["GOROOT"]}
     return info
@@ -172,6 +210,8 @@ def describe(toolchain: dict) -> list[str]:
             line += f"; {name}={value}"
         if info.get("project_files"):
             line += "; bound project files: " + ", ".join(sorted(info["project_files"]))
+            if any("<unhashed>" in value or "<walk-limit>" == key for key, value in info["project_files"].items()):
+                lines.append(f"WARNING: some startup files of {program} could not be fingerprinted; they are not bound.")
         lines.append(line)
         if info.get("runtime_unbound"):
             lines.append(f"WARNING: {program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.")

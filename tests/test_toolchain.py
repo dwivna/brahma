@@ -309,5 +309,81 @@ class ReviewRegressions(unittest.TestCase):
         self.assertNotIn("ghp_", repr(result))
 
 
+class ThirdReview(unittest.TestCase):
+    def test_a_startup_file_in_a_subproject_is_bound_for_mvn_dash_f(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree = root / "repo", root / "wt"
+            for base in (repo, worktree):
+                (base / "service" / ".mvn").mkdir(parents=True)
+                (base / "service" / ".mvn" / "jvm.config").write_text("-Xmx1g\n")
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["mvn", "-f", "service/pom.xml", "test"]], repo, env)
+            self.assertIn("service/.mvn/jvm.config", bound["programs"]["mvn"]["project_files"])
+            self.assertIsNone(toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+            (worktree / "service" / ".mvn" / "jvm.config").write_text("-javaagent:/tmp/x.jar\n")
+            self.assertIn("service/.mvn/jvm.config", toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+
+    def test_a_symlinked_startup_file_is_bound_through_its_target_and_retargeting_is_a_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            outside = root / "outside.config"
+            outside.write_text("-Xmx1g\n")
+            repo, worktree = root / "repo", root / "wt"
+            for base in (repo, worktree):
+                (base / ".mvn").mkdir(parents=True)
+                (base / ".mvn" / "jvm.config").symlink_to(outside)
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["mvn"]], repo, env)
+            self.assertIn("@", bound["programs"]["mvn"]["project_files"][".mvn/jvm.config"])
+            self.assertIsNone(toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+            outside.write_text("-javaagent:/tmp/x.jar\n")
+            self.assertIn("Toolchain changed", toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+
+    def test_a_new_startup_file_created_after_approval_is_a_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree = root / "repo", root / "wt"
+            repo.mkdir(); worktree.mkdir()
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["mvn"]], repo, env)
+            (worktree / ".mvn").mkdir()
+            (worktree / ".mvn" / "jvm.config").write_text("-javaagent:/tmp/x.jar\n")
+            self.assertIn("Toolchain changed", toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+
+    def test_plain_java_is_not_refused_because_a_maven_config_changed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree = root / "repo", root / "wt"
+            for base in (repo, worktree):
+                (base / ".mvn").mkdir(parents=True)
+                (base / ".mvn" / "jvm.config").write_text("a\n")
+            home = jdk(root, "21")
+            env = {"PATH": str(home / "bin")}
+            bound = toolchain.probe([["java", "-version"]], repo, env)
+            (worktree / ".mvn" / "jvm.config").write_text("b\n")
+            self.assertIsNone(toolchain.verify_before_run(["java", "-version"], worktree, bound, env)[1])
+
+    def test_a_java_selector_without_an_adjacent_release_file_is_not_treated_as_a_jdk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "usrbin", "java", "exec \"$JAVA_HOME/bin/java\" \"$@\"")     # the macOS-style stub: no release file nearby
+            home = jdk(root, "21")
+            unbound = toolchain.probe([["java"]], root / "r", {"PATH": str(root / "usrbin")})
+            bound = toolchain.probe([["java"]], root / "r", {"PATH": str(root / "usrbin"), "JAVA_HOME": str(home)})
+        self.assertTrue(unbound["programs"]["java"]["runtime_unbound"])
+        self.assertEqual(bound["programs"]["java"]["runtime"]["release"], "21")      # the stub is bound through JAVA_HOME
+
+    def test_dot_dot_components_are_not_collapsed_into_another_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            script(repo / ".venv" / "bin", "python")
+            result = toolchain.probe([["./missing/../.venv/bin/python"]], repo, {"PATH": "/usr/bin"})
+        self.assertIsNone(result["programs"]["./missing/../.venv/bin/python"]["path"])     # the path as written does not exist
+
+
 if __name__ == "__main__":
     unittest.main()
