@@ -163,6 +163,16 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len([e for e in app.store.events_after(key, 0) if e["kind"] == "user_note"]), 1)
                 app.action_stop()
                 self.assertTrue(app.store.session(key)["stopped"])
+                app.action_unpause()                                       # a stopped session is not resumed from the terminal
+                self.assertTrue(app.session.cancel.is_set())
+                from brahma import halt
+                app.store.resume(key)
+                halt.engage(app.store.home)
+                app.session.cancel.set()
+                app.action_pause()
+                app.action_unpause()                                       # nor under the kill switch
+                self.assertTrue(app.session.cancel.is_set())
+                self.assertTrue(app.store.session(key)["paused"])
 
 
 if __name__ == "__main__":

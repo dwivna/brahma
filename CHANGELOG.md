@@ -19,6 +19,9 @@ Terminal status board and decision-only attention (plan task 5).
   ready for review. Each is shown once, recorded durably (`notices` table, schema 3), so polling and reopening do not repeat it.
 - The engine records `checks_failing` and `signin_lost` signals; the builder prompt now teaches the `MISSING_CONTEXT:` line.
 
+**Fixed (automated review of this branch)**
+- Terminal Resume refuses to run under the kill switch or on a stopped session, and does not clear the cancel signal while a worker is still winding down.
+
 **Changed**
 - State schema 3 adds the `notices` table (additive). An older Brahma refuses a schema-3 store rather than guess.
 

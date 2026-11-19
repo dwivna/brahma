@@ -468,8 +468,15 @@ class BrahmaApp(App):
         if not self.session or self.demo:
             self.write(Event(text="No live session to resume."))
             return
+        # Never lift a halt that is stronger than a pause: the kill switch and a stop stay in force.
+        if self.store.killed or self.store.session(self.session.key)["stopped"]:
+            self.write(Event(kind="error", text="Not resumed: the kill switch is engaged or the session was stopped. "
+                             "Use `brahma kill --release` or start a new approved run."))
+            return
         self.store.resume(self.session.key)
-        self.session.cancel.clear()
+        # Do not clear the cancel event while a worker is still winding down; execute() starts each run with its own state.
+        if not (self.job and not self.job.done()):
+            self.session.cancel.clear()
         self.write(Event(text="Resumed: the session runs again only under its existing approval."))
         self.refresh_status()
 
