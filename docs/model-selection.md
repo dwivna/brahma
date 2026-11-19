@@ -27,7 +27,8 @@ discovery source and reasons. Its display shows both providers' routine and
 critical selections. Worker panes identify the model used for each phase. Resume
 uses the locked choices; changed configuration requires a new plan and approval.
 Verified Claude aliases are pinned to the concrete model ID returned by the
-catalog. Unverified aliases remain labelled as such when the catalog is unavailable.
+catalog. Unverified aliases remain labelled as such when the catalog or its
+concrete model identifiers are unavailable.
 Discovery does not change an existing approval or run a model merely to test access.
 
 When a configured version is absent, Brahma first looks for an advertised model
@@ -87,3 +88,16 @@ response. It caught configured GPT-6.2 preferences missing from the advertised
 catalog and verified selection of the available Sol/Astra family versions. No
 account identity, credentials, quota amounts or raw native transcripts are recorded
 here. Claude's concurrently active checkout was left unchanged.
+
+### Re-review before merge — 19 November 2026
+
+Claude's follow-up commit `b223748` fixes the planner's sentence ordering and
+adds a regression test. Independent re-review then found two further defects:
+missing Claude concrete IDs were labelled verified, and a local usage reply could
+skip pending scheduler events in the terminal. Both new regressions failed on
+that commit and pass with the fixes: unresolved aliases remain unverified, and
+local callbacks drain unseen stored events in order before advancing the cursor.
+
+The full offline suite now passes **200 tests in 31.263 seconds**. Both reviewers
+rechecked their findings and reported no remaining material defects. No live
+model calls or user-state inspection were needed for this re-review.

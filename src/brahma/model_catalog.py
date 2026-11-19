@@ -306,6 +306,11 @@ def select_profiles(settings, catalogs) -> dict:
                 else:
                     row.update(selected=None, available=False,
                                reason="No configured subscription-safe model is advertised; update the plan's model profiles")
+        if (provider == "claude" and row["verified"]
+                and not row["selected"].startswith("claude-")):
+            # An advertised alias is usable, but is not evidence of a pinned version.
+            row.update(verified=False, resolved_model=None,
+                       reason=row["reason"] + "; concrete model ID unavailable, alias remains unverified")
         selected[field] = row["selected"]
         profiles[field] = row
     return {"configured": configured, "selected": selected, "profiles": profiles}

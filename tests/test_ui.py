@@ -77,6 +77,35 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     await asyncio.gather(blocker, return_exceptions=True)
                 app.store.close()
 
+    async def test_usage_reply_drains_unseen_background_errors_and_tokens_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = init_repo(Path(tmp) / "repo")
+            app = BrahmaApp(root, home=Path(tmp)/"state")
+            try:
+                with patch("brahma.ui.read_usage", new_callable=AsyncMock, return_value={}), \
+                        patch("brahma.ui.format_usage", return_value="Usage report complete"):
+                    async with app.run_test(size=(120, 40)) as pilot:
+                        await pilot.pause()
+                        key = app.session.key
+                        # The scheduler writes through a separate connection between UI polls.
+                        from brahma.store import Store
+                        background = Store(app.store.home)
+                        try:
+                            background.event(key, Event("claude", "reviewer", "error", "UNSEEN_WORKER_ERROR"))
+                            background.event(key, Event("claude", "reviewer", "usage", usage={"input_tokens": 17, "output_tokens": 3}))
+                        finally:
+                            background.close()
+                        await app.show_usage(("claude",))
+                        app.poll_events()
+                        app.poll_events()
+                        await pilot.pause()
+                        self.assertEqual(self.pane(app, "claude").count("UNSEEN_WORKER_ERROR"), 1)
+                        self.assertEqual(self.pane(app, "manager").count("Usage report complete"), 1)
+                        self.assertEqual((app.inputs, app.outputs), (17, 3))
+                        self.assertEqual(app._seen_events, len(app.store.events(key)))
+            finally:
+                app.store.close()
+
     async def test_internal_protocol_hidden_but_readable_plan_and_usage_remain(self):
         with tempfile.TemporaryDirectory() as tmp:
             app = BrahmaApp(home=Path(tmp)/"state", demo=True)

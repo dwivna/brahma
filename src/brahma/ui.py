@@ -175,16 +175,22 @@ class BrahmaApp(App):
 
     def on_session_event(self, event: Event):
         if self.session:
-            self._seen_events = len(self.store.events(self.session.key))
-        self.write(event)
+            self.drain_session_events()
+        else:
+            self.write(event)
+
+    def drain_session_events(self):
+        # Local callbacks and scheduler polling share one ordered cursor. A callback
+        # must render pending background records before advancing past its own event.
+        events = self.store.events(self.session.key)
+        for row in events[self._seen_events:]:
+            self.write(Event(row["provider"], row["role"], row["kind"], row["text"], row["usage"]))
+        self._seen_events = len(events)
+        self.refresh_status()
 
     def poll_events(self):
         if self.session and not self.demo:
-            events = self.store.events(self.session.key)
-            for row in events[self._seen_events:]:
-                self.write(Event(row["provider"], row["role"], row["kind"], row["text"], row["usage"]))
-            self._seen_events = len(events)
-            self.refresh_status()
+            self.drain_session_events()
 
     def refresh_status(self):
         selected = self.session.repo.name if self.session else "No repository selected"

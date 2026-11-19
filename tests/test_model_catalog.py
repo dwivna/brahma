@@ -205,7 +205,11 @@ class ProfileSelection(unittest.TestCase):
             "codex": self.observed("codex", ["gpt-6.2-sol", "gpt-6.2-astra", "gpt-999-astra"]),
             "claude": self.observed("claude", ["sonnet", "opus", "default", "claude-fable-5-2[1m]"])})
         self.assertEqual(result["selected"], result["configured"])
-        self.assertTrue(all(row["verified"] for row in result["profiles"].values()))
+        self.assertTrue(result["profiles"]["codex_model"]["verified"])
+        self.assertTrue(result["profiles"]["codex_critical_model"]["verified"])
+        # This fixture advertises only aliases; it supplies no concrete Claude IDs.
+        self.assertFalse(result["profiles"]["claude_model"]["verified"])
+        self.assertFalse(result["profiles"]["claude_critical_model"]["verified"])
 
     def test_missing_critical_never_downgrades_to_routine_model(self):
         result = catalog.select_profiles(Settings(), {
@@ -265,6 +269,29 @@ class ProfileSelection(unittest.TestCase):
         self.assertEqual(result["selected"]["claude_critical_model"], "claude-opus-5-5")
         self.assertEqual(result["profiles"]["claude_model"]["configured"], "sonnet")
         self.assertEqual(result["profiles"]["claude_model"]["resolved_model"], "claude-sonnet-5-5")
+
+    def test_claude_alias_without_concrete_resolution_is_never_verified(self):
+        for resolved in (None, "", "sonnet", "invalid model", [], 17):
+            with self.subTest(resolved=resolved):
+                native = {"value": "sonnet"}
+                if resolved is not None:
+                    native["resolvedModel"] = resolved
+                observed = self.observed("claude", [])
+                observed["models"] = [catalog._model(native, "claude")]
+                result = catalog.select_profiles(Settings(), {"claude": observed})
+                detail = result["profiles"]["claude_model"]
+                self.assertEqual(detail["selected"], "sonnet")
+                self.assertTrue(detail["available"])
+                self.assertFalse(detail["verified"])
+                self.assertIsNone(detail["resolved_model"])
+                self.assertIn("unverified", detail["reason"])
+
+    def test_full_claude_model_value_is_concrete_without_separate_resolution(self):
+        observed = self.observed("claude", [])
+        observed["models"] = [catalog._model({"value": "claude-sonnet-5-5"}, "claude")]
+        result = catalog.select_profiles(Settings(), {"claude": observed})
+        self.assertEqual(result["selected"]["claude_model"], "claude-sonnet-5-5")
+        self.assertTrue(result["profiles"]["claude_model"]["verified"])
 
     def test_same_family_version_order_is_numeric_and_stable(self):
         names = ["gpt-5.9-sol", "gpt-5.10-sol", "gpt-5.6-astra"]
