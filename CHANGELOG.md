@@ -20,6 +20,13 @@ Quota-aware routing, outcome recording and draft proposals (decision Round 4; fi
 - `brahma proposals`: draft proposals (with draft Gherkin) from recorded check failures, stale local `brahma/*`
   branches and feedback you pass with `--feedback`. It starts no worker, creates no approval and deletes nothing.
 
+- `brahma statusline [--then COMMAND]`: a Claude Code status-line tap. Claude has no usage query a program may call,
+  and reading its sign-in token to poll an endpoint is not allowed, so before this `brahma usage` showed Claude only
+  from old limit events. Claude Code hands its own `rate_limits` (5-hour and 7-day percentages and resets) to the
+  configured status-line command; the tap records them for `brahma usage` and then runs your existing status-line
+  command with the same input, so your line looks the same. It never fails the status line. It needs a one-time
+  change of the `statusLine` command in Claude's settings (see README); until then Claude's usage stays "unknown".
+
 **Not yet delivered (rest of plan task 3)**
 - Worker briefs are not yet generated from handoff packets; packets are not yet read by the engine.
 - The one-reply author dispute and escalation of persistent reviewer disagreement, severity tracking, one bounded

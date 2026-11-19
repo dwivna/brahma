@@ -49,6 +49,8 @@ def parser():
     p.add_argument("action", choices=("show", "forget"))
     p.add_argument("--repo", type=Path, dest="target", help="Repository (defaults to the current one)")
     p.add_argument("--yes", action="store_true", help="Confirm `forget`; without it nothing is deleted")
+    p = sub.add_parser("statusline", help="Claude Code status-line tap: records Claude's own rate-limit numbers for `brahma usage`")
+    p.add_argument("--then", metavar="COMMAND", help="Your existing status-line command; it receives the same input and its output is shown")
     p = sub.add_parser("proposals", help="Draft proposals from read-only repository signals; starts nothing, approves nothing")
     p.add_argument("--repo", type=Path, dest="target", help="Repository (defaults to the current one)")
     p.add_argument("--feedback", help="Review feedback you supply (Brahma never goes looking for it)")
@@ -82,6 +84,52 @@ def readiness(rows: list[dict], snapshots: dict) -> dict:
                                                   "reason": "No provider-reported quota observation"}
         result[name] = row["quota"]["state"]
     return result
+
+
+STATUSLINE_REFRESH_SECONDS = 15.0
+STATUSLINE_MAX_INPUT = 1_000_000
+
+
+def record_claude_statusline(home: Path, payload: str, now: float | None = None) -> bool:
+    """Store Claude Code's own `rate_limits` (5h and 7d) from a status-line payload. Never raises.
+
+    This is Claude's documented, credential-free signal: Claude Code hands the numbers to the status-line command.
+    Brahma never reads sign-in material or polls an endpoint. Written at most every few seconds.
+    """
+    import time
+    from . import quota
+    try:
+        data = json.loads(payload)
+        limits = data.get("rate_limits") if isinstance(data, dict) else None
+        if not isinstance(limits, dict) or not ({"five_hour", "seven_day"} & set(limits)):
+            return False
+        now = time.time() if now is None else now
+        snapshot = quota.normalize_claude({k: v for k, v in limits.items() if k in ("five_hour", "seven_day")}, observed_at=now)
+        store = Store(home)
+        try:
+            previous = store.quota("claude")
+            if (previous and previous.get("source") == "claude.statusline" and now - previous.get("observed_at", 0) < STATUSLINE_REFRESH_SECONDS
+                    and previous.get("windows") == snapshot["windows"]):
+                return False
+            store.observe(snapshot)
+        finally:
+            store.close()
+        return True
+    except Exception:  # a status line must never break because of Brahma
+        return False
+
+
+def statusline_tap(home: Path, then: str | None) -> int:
+    import shlex
+    payload = sys.stdin.read(STATUSLINE_MAX_INPUT)
+    record_claude_statusline(home, payload)
+    if then:
+        try:
+            done = subprocess.run(shlex.split(then), input=payload, text=True, capture_output=True, timeout=5)
+            sys.stdout.write(done.stdout)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            pass
+    return exitcodes.READY
 
 
 def session_status(store: Store, key: str) -> tuple[int, dict]:
@@ -276,6 +324,8 @@ def _main(argv):
             return report(data, json.dumps(data, indent=2))
         finally:
             store.close()
+    if args.command == "statusline":
+        return statusline_tap(home, args.then)
     if args.command == "proposals":
         from . import routing
         from .memory import Memory, repo_id

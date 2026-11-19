@@ -336,8 +336,19 @@ labelled last reported; missing or stale current capacity stays unknown.
 
 - **Codex:** its native read-only interface can provide quota windows/reset times,
   including five-hour and weekly windows when exposed.
-- **Claude:** stream limit events can provide availability and resets. A complete
-  independent five-hour/weekly quota poll is not established for headless operation.
+- **Claude:** stream limit events can provide availability and resets. Claude Code offers no
+  usage query to programs, so live five-hour/weekly numbers come only from its status-line
+  payload. Point Claude's status line at Brahma's tap once (it keeps your current line):
+
+  ```json
+  { "statusLine": { "type": "command",
+      "command": "brahma statusline --then \"bash ~/.claude/statusline-command.sh\"" } }
+  ```
+
+  (in `~/.claude/settings.json`; use the full path to `brahma` if it is not on Claude's `PATH`, and
+  drop `--then` if you have no status line of your own). Numbers then update whenever Claude Code
+  refreshes its status line in any session, and `brahma usage` labels them with their age. Without
+  the tap, Claude usage is shown only from saved limit events and stays unknown after a reset.
 - **Unknown capacity:** a signed-in provider may receive one bounded approved work
   attempt. A reported limit checkpoints work instead of repeatedly probing models.
 - **Known reset:** the scheduler waits, refreshes supported signals and resumes
