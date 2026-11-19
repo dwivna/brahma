@@ -230,6 +230,7 @@ class Session:
                         repair_cycles=fresh.repair_cycles, definitions=catalog.entries,
                         model_profiles=profiles, base_revision=contract["payload"]["base_revision"])
         selected.checks = checks
+        selected.bound_toolchain = contract["payload"].get("toolchain")    # re-verified before every check
         return contract, selected, catalog
 
     def stop(self):

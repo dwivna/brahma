@@ -495,7 +495,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 return result(state, task, "Stopped before checks; draft retained")
             check_results: list = []
             checked, checks_text = await run_checks(worktree, settings.checks, cancel,
-                                                   max(0, deadline - time.monotonic()), emit, check_results)
+                                                   max(0, deadline - time.monotonic()), emit, check_results,
+                                                   getattr(settings, "bound_toolchain", None))
             if cancel.is_set():
                 _checkpoint(emit, index, task, "cancelled", attempt)
                 return result("cancelled", task, "Stopped during checks; draft retained")
@@ -615,7 +616,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         if cancel.is_set():
             return result("cancelled", detail="Stopped before resume verification")
         checked, checks_text = await run_checks(worktree, settings.checks, cancel,
-                                               min(3600, settings.task_timeout), emit)
+                                               min(3600, settings.task_timeout), emit, None,
+                                               getattr(settings, "bound_toolchain", None))
         if not checked or cancel.is_set():
             return result("cancelled" if cancel.is_set() else "incomplete", detail=checks_text[-1000:])
         owned, reason = ownership_changes(worktree, [name for task in validated.tasks for name in task.files], ignored_allow=settings.ignored_allowlist)

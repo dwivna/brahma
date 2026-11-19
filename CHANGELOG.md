@@ -7,12 +7,21 @@ decided by Abhinav. See `docs/decisions.md`.
 ## 0.13.0
 
 **Added**
-- **Toolchain binding.** The approved contract now records, for every program the checks run, the file it resolves to, that
-  file's SHA-256, what it reports as its version (for Maven this includes the JDK it runs on) and the toolchain variables
-  (`JAVA_HOME`, `MAVEN_HOME`, `M2_HOME`, `GRADLE_HOME`, `VIRTUAL_ENV`, `GOROOT`, `NODE_VERSION`). Execution re-probes and refuses to run
-  if anything moved, naming what changed ("mvn: approved 'Java version: 21', now 'Java version: 26'"). This closes the gap that let a
-  service-run `mvn` use a different JDK than the one approved (live run 3). A program inside the repository (`./mvnw`) is hashed
-  and never executed to probe it. The approval screen shows the toolchain lines.
+- **Toolchain binding.** The approved contract now records, for every program the checks run, the regular file it resolves to
+  and that file's SHA-256; for Java-family programs (`mvn`, `gradle`, `java`, ...) also the JDK's `java` binary hash and the
+  version from its `release` file, plus `JAVA_HOME`/`MAVEN_HOME`/`M2_HOME`/`GRADLE_HOME`. **Nothing is executed to learn this**
+  (probing by running `--version` would run unapproved programs at plan time and `mvn --version` reads repository
+  `.mvn/jvm.config`). Execution refuses to start if anything moved, naming what changed.
+- **Verified again before every check, where the check runs.** The fingerprint is re-taken against the worktree immediately before
+  each check and the verified absolute path is what executes, so a binary swapped after approval, or a program inside the worktree
+  a worker edited (`./mvnw`), is refused before it runs. Relative and empty `PATH` entries are no longer searched (a worker-created
+  `.venv/bin` shim cannot take over a command).
+- Launchers that delegate to another runtime (`uv`, `npx`, `sh`, `docker`, `make`, ...) are flagged on the approval screen: their
+  delegated runtime is not bound. Fingerprints cover the launched file, not everything it loads (Maven's jars, Python packages).
+- The approval screen shows each program's path and short hash, and the JDK.
+
+**Fixed**
+- README no longer says secret redaction is not implemented; it now states the actual coverage and its limit.
 
 **Changed**
 - Contract format is now 3. Contracts approved under format 2 are not honoured; approve a new plan.

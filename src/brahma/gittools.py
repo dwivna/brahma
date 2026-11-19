@@ -9,7 +9,7 @@ import signal
 import subprocess
 import time
 
-from . import ownership
+from . import ownership, toolchain
 from .models import Event
 
 
@@ -332,6 +332,8 @@ def check_env() -> dict[str, str]:
     from .providers import child_env
     env = child_env()          # already strict: workers and checks share one scrub
     env["GIT_TERMINAL_PROMPT"] = "0"
+    from .toolchain import trusted_path
+    env["PATH"] = trusted_path(env)       # a relative PATH entry would resolve inside the worker-writable worktree
     return env
 
 
@@ -348,18 +350,25 @@ def scrub_secrets(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
-async def run_checks(worktree, checks, cancel, timeout, emit, results=None):
+async def run_checks(worktree, checks, cancel, timeout, emit, results=None, bound=None):
     """Run approved checks. If `results` is a list, one (argv, status, exit_code) per command is appended as the
     coordinator observed it (status passed|failed|not_run), for handoff packets."""
     deadline = time.monotonic() + timeout
     commands = [["git", "-c", "core.hooksPath=/dev/null", "diff", "--check"], *checks]
     summaries = []
-    for command in commands:
+    for position, command in enumerate(commands):
         if cancel.is_set() or time.monotonic() >= deadline:
             return False, "Checks cancelled or time budget exhausted"
         emit(Event(kind="check", text="Running approved check: " + " ".join(command)))
+        environment = check_env()
+        argv, problem = (command, None) if position == 0 else toolchain.verify_before_run(command, worktree, bound, environment)
+        if problem:
+            emit(Event(kind="check", text=problem))
+            if results is not None:
+                results.append((tuple(command), "failed", None))
+            return False, problem
         try:
-            process = await asyncio.create_subprocess_exec(*command, cwd=worktree, env=check_env(),
+            process = await asyncio.create_subprocess_exec(*argv, cwd=worktree, env=environment,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         except OSError:
             if results is not None:

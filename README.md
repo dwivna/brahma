@@ -102,7 +102,7 @@ uv run brahma --demo
 3. **Answer the questions** in the shared input. Recommendations and answers do
    not authorize an unseen implementation contract.
 4. **Inspect the contract:** Gherkin, separate owned paths, actual checks, the toolchain
-   they will run on (program path, hash, version, `JAVA_HOME`), selected
+   they will run on (program path and SHA-256, the JDK's hash and version, `JAVA_HOME`), selected
    definitions and model/budget settings. The UI shows its hash and `.feature` path.
 5. **Use `/approve`.** Brahma works in its own `brahma/SESSION` branch/worktree,
    runs checks and requests the other provider's review. By default, readiness
@@ -415,11 +415,14 @@ service diagnostics. Keep state, raw transcripts and sign-in material out of
 Git and public bug reports.
 
 Local storage is not offline AI: selected context goes through the provider CLIs.
-Review selected definitions and check commands. The prototype combines restricted
+Review selected definitions and check commands. Brahma combines restricted
 CLI settings with post-write ownership/sensitive-path checks. It is not a complete
 per-file security boundary: reads of files outside the worktree are guarded only by
-the provider CLIs' settings and prompts, and secret redaction is not implemented. Stronger
-enforcement is in development; this release is not a hardened sandbox.
+the provider CLIs' settings and prompts. Secret redaction covers common credential
+shapes (API keys, bearer tokens, cloud and Git host tokens, private keys, `NAME=value`
+environment lines) in events, logs and packets; it is pattern based, so an unusual
+secret format can pass it. Approved checks run worker-written code with a scrubbed
+environment but without a sandbox. Brahma is not a hardened sandbox: review what you approve.
 
 Native continuation covers Brahma-managed workers, not arbitrary external
 terminal/desktop/cloud sessions. Agent definitions load as bounded instructions;
