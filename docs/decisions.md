@@ -295,3 +295,17 @@ Out of scope for this patch (still open): read-side secret enforcement and log r
 Pause, the history-rewrite hard block, the agent JSON interface, and signed-policy approval.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 13 — 20 November 2026 (1.0.0 release decision)
+
+Abhinav: finish toolchain binding, review, and if fine bump to 1.0.0 as the first release; then, with the review still open,
+"yes cap at round 7".
+
+1. **Decision:** the independent review is capped at Codex round 7. 0.13.0 is merged and 1.0.0 is released on that basis.
+2. **Gate status, stated plainly:** suite and installed-tool smoke test run on the release commit. The independent review
+   was not clean: round 7 reported HIGH findings (build-tool environment inputs outside the checkout). Fixes after it are
+   tested but not independently re-reviewed. Abhinav accepted this as an explicit exception to the Round 10 "open HIGH
+   findings block the release" rule; it is recorded here, not met.
+3. **Limits shipped:** see CHANGELOG 1.0.0 and README "Release limits". Round 12 signed-policy approval, read-side secret
+   enforcement and provider confinement remain unimplemented.
+4. **Versioning:** SemVer from 1.0.0. Breaking JSON, state or contract changes need a MAJOR bump.

@@ -7,8 +7,8 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.13.0.** This README describes the
-merged CLI. [Planned capabilities](#development-status) are listed separately.
+**Status: first release, version 1.0.0.** This README describes the
+merged CLI. Known limits are listed under [Release limits](#release-limits-100). [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
 
@@ -440,6 +440,13 @@ they do not automatically spawn child processes.
 | Contract changed | Review the changed plan/settings/definitions before a new approval. |
 | Queue does not resume | Inspect `/status`, service status, Stop state, sign-in and reported resets. |
 | Draft publishing fails | Check `gh auth status`, remote access and the retained branch. |
+
+## Release limits (1.0.0)
+
+- Check toolchains are bound by program, JDK and known startup files and variables; other build-tool environment inputs are not
+  all bound, and the last independent review still had open findings of that kind.
+- Hashing and running are two steps; fingerprints cover the launched file, not what it loads; checks are not sandboxed.
+- Not implemented: signed-policy approval, read-side secret enforcement, confinement of the provider CLIs.
 
 ## Development status
 

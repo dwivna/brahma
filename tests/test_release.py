@@ -29,7 +29,7 @@ class Version(unittest.TestCase):
     def test_single_version_everywhere(self):
         pyproject = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
         self.assertEqual(pyproject, brahma.__version__)
-        self.assertRegex(brahma.__version__, r"^0\.\d+\.\d+$")  # SemVer 0.x until 1.0.0 (Round 10)
+        self.assertRegex(brahma.__version__, r"^[1-9]\d*\.\d+\.\d+$")  # SemVer from 1.0.0 (Round 13)
 
     def test_no_stale_hardcoded_version_in_sources(self):
         for module in (quota, model_catalog):

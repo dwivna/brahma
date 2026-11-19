@@ -1,8 +1,22 @@
 # Changelog
 
-Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any change to commands, JSON output,
+Brahma uses SemVer from 1.0.0 (decision Round 13; 0.x before): MINOR for new capabilities or any change to commands, JSON output,
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
+
+## 1.0.0
+
+First release. No code change beyond 0.13.0; this version marks the release decision (docs/decisions.md, Round 13).
+
+**Known limits shipped with 1.0.0 (not hidden by the version number)**
+- Toolchain binding covers the check program, its JDK and the startup files and variables listed under 0.13.0. Other
+  environment inputs that Maven or Gradle read outside the checkout are not all bound. The last independent review (Codex,
+  round 7) still reported HIGH findings of this kind; the fixes made after it ("disable rather than enumerate", Gradle fail-closed)
+  were tested but not re-reviewed independently. Worker edits to files it does not own are restored and block readiness regardless.
+- Hashing and executing a program are two steps, not atomic. Fingerprints cover the launched file, not everything it loads.
+  Checks are not sandboxed.
+- Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, an agent-facing stable JSON
+  interface review, and confinement of the provider CLIs.
 
 ## 0.13.0
 
