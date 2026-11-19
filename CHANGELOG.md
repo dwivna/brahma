@@ -29,6 +29,11 @@ decided by Abhinav. See `docs/decisions.md`.
   `MAVEN_OPTS`, `MAVEN_ARGS`, `GRADLE_OPTS` (a `-javaagent:` in any of them changes what runs, and they survive the environment scrub).
   A secret-shaped value is stored as a digest, never as text. Symlinked directories are followed during the startup-file walk (cycle
   safe, bounded). A Gradle project whose `gradle.properties` sets `org.gradle.java.home` is reported as having an unbound JDK.
+- Startup files outside the checkout, which ownership verification cannot see, are bound too: Maven's `/etc/mavenrc`,
+  `/usr/local/etc/mavenrc` and `~/.mavenrc` (shell code that can override `JAVA_HOME`) and Gradle's user-level `gradle.properties`
+  (`$GRADLE_USER_HOME` or `~/.gradle`). An absent file is recorded as absent, so creating one is a change. A present `mavenrc`, or any
+  `org.gradle.java.home`, marks the JDK as not bound. The walk of the checkout follows symlink aliases by their own logical names and
+  skips only cycles back to an ancestor.
 - A `java` that is not inside a real JDK (the macOS `/usr/bin/java` stub, a version-manager shim that reads `.java-version`) is a
   selector and is always reported as not bound. A Java build tool run without `JAVA_HOME` chooses its own
   JDK, which Brahma cannot know without running it, so the approval says the JDK is not bound; set `JAVA_HOME` to bind it.

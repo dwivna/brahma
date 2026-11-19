@@ -501,5 +501,52 @@ class FifthReview(unittest.TestCase):
         self.assertTrue(files["gradle"].startswith("<symlinked-dir>@"))
 
 
+class SixthReview(unittest.TestCase):
+    def test_two_routes_to_one_external_directory_are_both_walked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            external = root / "external" / "maven"
+            external.mkdir(parents=True)
+            (external / "jvm.config").write_text("-Xmx1g\n")
+            repo = root / "repo"
+            (repo / "app").mkdir(parents=True)
+            (repo / "shared").symlink_to(external)
+            (repo / "app" / ".mvn").symlink_to(external)
+            script(root / "bin", "mvn")
+            bound = toolchain.probe([["mvn", "-f", "app/pom.xml"]], repo, {"PATH": str(root / "bin")})
+        self.assertIn("app/.mvn/jvm.config", bound["programs"]["mvn"]["project_files"])
+
+    def test_a_mavenrc_makes_the_jdk_unbound_and_creating_one_is_a_change(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            script(root / "bin", "mvn")
+            jdkhome = jdk(root, "21")
+            env = {"PATH": str(root / "bin"), "HOME": str(home), "JAVA_HOME": str(jdkhome)}
+            bound = toolchain.probe([["mvn"]], root / "wt", env)
+            self.assertFalse(bound["programs"]["mvn"]["runtime_unbound"])
+            self.assertIsNone(toolchain.verify_before_run(["mvn"], root / "wt", bound, env)[1])
+            (home / ".mavenrc").write_text("export JAVA_HOME=/somewhere/else\n")
+            self.assertIn("Toolchain changed", toolchain.verify_before_run(["mvn"], root / "wt", bound, env)[1])
+            after = toolchain.probe([["mvn"]], root / "wt", env)
+        self.assertTrue(after["programs"]["mvn"]["runtime_unbound"])
+        self.assertTrue(any("mavenrc" in line and "WARNING" in line for line in toolchain.describe(after)))
+
+    def test_a_user_level_gradle_properties_is_bound_and_org_gradle_java_home_makes_the_jdk_unbound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            (home / ".gradle").mkdir(parents=True)
+            script(root / "bin", "gradle")
+            jdkhome = jdk(root, "21")
+            env = {"PATH": str(root / "bin"), "HOME": str(home), "JAVA_HOME": str(jdkhome)}
+            bound = toolchain.probe([["gradle"]], root / "wt", env)
+            self.assertFalse(bound["programs"]["gradle"]["runtime_unbound"])
+            (home / ".gradle" / "gradle.properties").write_text("org.gradle.java.home=/opt/other\n")
+            self.assertIn("Toolchain changed", toolchain.verify_before_run(["gradle"], root / "wt", bound, env)[1])
+            self.assertTrue(toolchain.probe([["gradle"]], root / "wt", env)["programs"]["gradle"]["runtime_unbound"])
+
+
 if __name__ == "__main__":
     unittest.main()

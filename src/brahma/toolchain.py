@@ -149,7 +149,7 @@ def _selects_own_jdk(directory: Path, project_files: dict[str, str]) -> bool:
     for key in project_files:
         if key.endswith("gradle.properties"):
             try:
-                path = directory / key
+                path = Path(key) if key.startswith("/") else directory / key
                 if path.stat().st_size < 65536 and "org.gradle.java.home" in path.read_text(errors="replace"):
                     return True
             except OSError:
@@ -165,7 +165,7 @@ def startup_files(directory: Path) -> dict[str, str]:
     never dropped."""
     directory = Path(directory).resolve()
     found: dict[str, str] = {}
-    seen: set[str] = {str(directory)}
+    ancestors: dict[str, frozenset] = {str(directory): frozenset({str(directory)})}      # real paths from the root to each walked directory
     visited = 0
     for root, dirs, files in os.walk(directory, followlinks=True):
         visited += 1
@@ -173,6 +173,7 @@ def startup_files(directory: Path) -> dict[str, str]:
             found["<walk-limit>"] = "more than %d directories; startup files beyond the limit are not bound" % _MAX_WALK
             break
         here = Path(root)
+        above = ancestors.get(root, frozenset())
         kept = []
         for d in sorted(dirs):
             if d in _SKIP_DIRS:
@@ -187,9 +188,9 @@ def startup_files(directory: Path) -> dict[str, str]:
             except OSError:
                 found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@<unresolvable>"
                 continue
-            if real in seen:
-                continue                      # a cycle or a second route to a directory already walked
-            seen.add(real)
+            if real in above:
+                continue            # a cycle back to an ancestor; an alias elsewhere IS walked, under its own logical name
+            ancestors[str(logical)] = above | {real}
             kept.append(d)
         dirs[:] = kept
         names = set(_STARTUP_NAMES.get(here.name, ())) | _STARTUP_TOP
@@ -198,6 +199,24 @@ def startup_files(directory: Path) -> dict[str, str]:
         for name in sorted(names & set(files)):
             _bind_file(found, here / name, directory)
     return found
+
+
+def external_startup_files(program: str, env: dict[str, str]) -> dict[str, str]:
+    """Startup files OUTSIDE the checkout that a build tool reads before it chooses a JDK or runs anything: Maven's system and user
+    `mavenrc` (shell code that can override JAVA_HOME) and Gradle's user-level `gradle.properties` (can set `org.gradle.java.home`).
+    An absent file is recorded as absent, so creating one is a change. Ownership cannot see these, so the fingerprint must."""
+    name = Path(program).name
+    home = Path(env.get("HOME") or os.path.expanduser("~"))
+    candidates: list[Path] = []
+    if name in ("mvn", "mvnw"):
+        candidates = [Path("/etc/mavenrc"), Path("/usr/local/etc/mavenrc"), home / ".mavenrc"]
+    elif name in ("gradle", "gradlew"):
+        user = Path(env["GRADLE_USER_HOME"]) if env.get("GRADLE_USER_HOME", "").startswith("/") else home / ".gradle"
+        candidates = [user / "gradle.properties"]
+    result = {}
+    for path in candidates:
+        result[str(path)] = (_fingerprint(path) or "<unhashed>") if path.exists() else "<absent>"
+    return result
 
 
 def _relative_or_absolute(path: Path, directory: Path, relative: bool) -> str:
@@ -231,8 +250,13 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> d
                 info["variables"][key] = ("sha256:" + hashlib.sha256(value.encode(errors="replace")).hexdigest()[:16]) if looks_secret(value) else value
         if name in _BUILD_TOOLS:
             info["project_files"] = startup_files(directory)
-            if name.startswith("gradle") and _selects_own_jdk(directory, info["project_files"]):
+            info["external_files"] = external_startup_files(program, env)
+            present = [path for path, digest in info["external_files"].items() if digest != "<absent>"]
+            if name.startswith("gradle") and (_selects_own_jdk(directory, info["project_files"])
+                                              or _selects_own_jdk(Path("/"), {path: "" for path in present if path.endswith("gradle.properties")})):
                 info["runtime"], info["runtime_unbound"] = None, True      # org.gradle.java.home picks a different JDK
+            if name in ("mvn", "mvnw") and any(path.endswith("mavenrc") for path in present):
+                info["runtime"], info["runtime_unbound"] = None, True      # a mavenrc is shell code that may override JAVA_HOME
     elif name == "go" and "GOROOT" in env:
         info["variables"] = {"GOROOT": env["GOROOT"]}
     return info
@@ -262,6 +286,9 @@ def describe(toolchain: dict) -> list[str]:
             line += f"; JDK {runtime.get('release') or 'version unknown'} at {runtime.get('path') or 'none found'} sha256:{(runtime.get('sha256') or 'unhashed')[:12]}"
         for name, value in sorted(info.get("variables", {}).items()):
             line += f"; {name}={value}"
+        present = sorted(path for path, digest in (info.get("external_files") or {}).items() if digest != "<absent>")
+        if present:
+            line += "; bound external startup files: " + ", ".join(present)
         if info.get("project_files"):
             line += "; bound project files: " + ", ".join(sorted(info["project_files"]))
             if any("<unhashed>" in value or "<walk-limit>" == key for key, value in info["project_files"].items()):
@@ -272,6 +299,8 @@ def describe(toolchain: dict) -> list[str]:
                 lines.append(f"WARNING: {program} is a selector or shim; which JDK it runs is not visible to Brahma and is not bound. Use the JDK's own bin/java to bind it.")
             elif Path(program).name.startswith("gradle") and info.get("project_files") and any(k.endswith("gradle.properties") for k in info["project_files"]) and (info.get("variables") or {}).get("JAVA_HOME"):
                 lines.append(f"WARNING: {program} may use a JDK chosen in gradle.properties (org.gradle.java.home); the JDK is not bound.")
+            elif any(path.endswith("mavenrc") and digest != "<absent>" for path, digest in (info.get("external_files") or {}).items()):
+                lines.append(f"WARNING: a mavenrc file is present and can override JAVA_HOME for {program}; the JDK is not bound.")
             else:
                 lines.append(f"WARNING: {program} chooses its own JDK because JAVA_HOME is not set; the JDK is not bound. Set JAVA_HOME to bind it.")
         if info.get("launcher"):
@@ -292,6 +321,8 @@ def differences(approved: dict, current: dict) -> list[str]:
             text += f"; JDK {runtime.get('release') or '?'} {runtime.get('path')} sha256:{(runtime.get('sha256') or 'unhashed')[:12]}"
         for name, value in sorted(info.get("variables", {}).items()):
             text += f"; {name}={value}"
+        for path, digest in sorted((info.get("external_files") or {}).items()):
+            text += f"; {path} {digest[:19]}"
         for relative, digest in sorted((info.get("project_files") or {}).items()):
             text += f"; {relative} sha256:{(digest or 'unhashed')[:12]}"
         return text
