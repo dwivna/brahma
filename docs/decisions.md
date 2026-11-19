@@ -244,3 +244,30 @@ classified as a quota limit; the Round 7 hard stops and kill switch are not impl
    refuses to run an approved contract of an unknown format and never reinterprets it; otherwise best effort.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 12 — 19 November 2026 (signed-policy approval design)
+
+Abhinav: Q1 A, Q2 A, Q3 A, Q4 A (all recommended). This designs Round 11 item 2; it is not implemented.
+
+1. **Signing:** a human-presence step. `brahma policy sign` needs an interactive terminal and a macOS
+   Keychain/Touch ID or password prompt at signing time. The agent may read policies but cannot create or edit
+   them. An AI caller runs as the same OS user, so no key or file it can read is a barrier. Non-macOS systems
+   have no signing path until Abhinav decides a fallback; there, policy approval stays unavailable and direct
+   human approval is required.
+2. **Scope:** narrow and routine only. A policy names the repository, owned-path globs, exact check commands,
+   a task budget and permitted providers, and covers only `routine` complexity. `critical` tasks and anything
+   outside the listed paths, checks, budget or providers always need a fresh human approval. The complexity
+   label is assigned by the planner and is not trusted alone; the signed paths, checks and budget are the
+   binding limits.
+3. **Lifetime:** default expiry 24 hours, maximum 7 days, with an optional use-count cap. `brahma policy revoke`
+   and the kill switch cancel a policy at once. Editing the policy, changing the repository's checks, or a
+   change of Brahma's contract format invalidates it. Re-signing is always a human step.
+4. **Boundaries:** any mismatch (a path, check, budget, provider, complexity or changed digest) stops and asks
+   Abhinav with the exact difference; Brahma never auto-narrows a contract. Every policy approval writes an
+   audit record (policy id, contract digest, time) and appears on the status board. The Round 7 hard stops and
+   merge/release can never be covered by a policy.
+
+AGENTS.md is amended ("plans need user approval, or a valid human-signed policy") only when this is
+implemented and tested, so it does not describe behaviour that does not yet exist.
+
+These are required capabilities, not a report that they exist in the prototype.
