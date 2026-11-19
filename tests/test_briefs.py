@@ -60,6 +60,21 @@ class Pure(unittest.TestCase):
             self.assertEqual((text, accepted), ("", []))
             self.assertNotIn("SYNTHETIC", json.dumps(rejected))
 
+    def test_expansion_refuses_a_symlinked_parent_directory(self):
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as outside:
+            root = Path(d)
+            (Path(outside) / "f.txt").write_text("outside-secret")
+            (root / "dir").symlink_to(outside)
+            text, accepted, rejected = briefs.expansion(root, ["dir/f.txt"], 10000)
+            self.assertEqual((text, accepted, rejected), ("", [], ["dir/f.txt"]))
+
+    def test_expansion_reads_nested_plain_files(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            (root / "a" / "b").mkdir(parents=True)
+            (root / "a" / "b" / "c.py").write_text("X = 1\n")
+            self.assertEqual(briefs.expansion(root, ["a/b/c.py"], 10000)[1], ["a/b/c.py"])
+
     def test_expansion_is_bounded_in_count_and_size(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

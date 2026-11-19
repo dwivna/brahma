@@ -53,6 +53,38 @@ def missing_context(text: str) -> list[str]:
     return [part.strip().strip("`'\"") for part in match.group(1).split(",") if part.strip()][:MAX_EXPANSION_FILES * 2]
 
 
+def _read_beneath(root: Path, parts: tuple[str, ...]) -> str:
+    """Read root/parts without ever following a link: walk one component at a time from a directory descriptor.
+
+    Every directory is opened with O_NOFOLLOW|O_DIRECTORY relative to its parent descriptor and the file with O_NOFOLLOW,
+    so no path string is re-resolved between check and use. The file must be a regular, single-link file on the same
+    device as the worktree root.
+    """
+    if not parts:
+        raise ValueError("empty path")
+    flags = os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    current = os.open(root, os.O_RDONLY | os.O_DIRECTORY | getattr(os, "O_CLOEXEC", 0))
+    device = os.fstat(current).st_dev
+    try:
+        for part in parts[:-1]:
+            nxt = os.open(part, flags | os.O_DIRECTORY, dir_fd=current)
+            os.close(current)
+            current = nxt
+            if os.fstat(current).st_dev != device:
+                raise ValueError("crosses a device boundary")
+        fd = os.open(parts[-1], flags | getattr(os, "O_NONBLOCK", 0), dir_fd=current)
+    finally:
+        os.close(current)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 or info.st_dev != device:
+            raise ValueError("not a plain single-link file")
+        with os.fdopen(fd, "rb", closefd=False) as handle:
+            return handle.read(MAX_EXPANSION_FILE_CHARS * 4).decode("utf-8")[:MAX_EXPANSION_FILE_CHARS]
+    finally:
+        os.close(fd)
+
+
 def expansion(worktree: Path, requested: list[str], limit: int) -> tuple[str, list[str], list[str]]:
     """Read the requested files for a one-time widening. Returns (text, accepted, rejected).
 
@@ -67,22 +99,12 @@ def expansion(worktree: Path, requested: list[str], limit: int) -> tuple[str, li
             rejected.append(safety.sanitize(str(name))[:200])
             continue
         try:
-            path = root / name
+            segments = Path(name).parts
             # Case-fold so `.ENV` or `Custody` cannot slip past the denylist on a case-insensitive filesystem.
-            if (not name or name.startswith(("/", "~")) or ".." in Path(name).parts or ":" in name
-                    or _sensitive(name.lower()) or _sensitive(name) or path.is_symlink()
-                    or not path.resolve().is_relative_to(root) or _sensitive(str(path.resolve().relative_to(root)).lower())):
+            if (not name or name.startswith(("/", "~")) or ".." in segments or "." in segments or ":" in name
+                    or _sensitive(name.lower()) or _sensitive(name)):
                 raise ValueError(name)
-            # Open without following links, then decide from the descriptor itself so check and read cannot diverge.
-            fd = os.open(path.resolve(), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
-            try:
-                info = os.fstat(fd)
-                if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 or info.st_dev != root.stat().st_dev:
-                    raise ValueError(name)    # not a regular file, or a hardlink that may alias a file outside the worktree
-                with os.fdopen(fd, "rb", closefd=False) as handle:
-                    text = handle.read(MAX_EXPANSION_FILE_CHARS * 4).decode("utf-8")[:MAX_EXPANSION_FILE_CHARS]
-            finally:
-                os.close(fd)
+            text = _read_beneath(root, segments)
         except (ValueError, OSError, UnicodeDecodeError):
             rejected.append(safety.sanitize(str(name))[:200])
             continue
