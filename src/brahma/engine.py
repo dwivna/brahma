@@ -35,6 +35,17 @@ def _emit(emit: Emit, kind: str, text: str, **values) -> None:
     emit(Event("brahma", "manager", kind, providers.clean_text(text), values))
 
 
+def _outcome(emit: Emit, index: int, task: Task, provider: str, attempt: int, *, ready: bool, checks_passed: bool,
+             findings: int, usage: dict, seconds: float) -> None:
+    """Record one measured result for routing history. Usage here is provider-reported; nothing is estimated."""
+    from . import routing
+    measured = {k: v for k, v in usage.items() if k.startswith(f"task_{index}_") and v}
+    _emit(emit, "outcome", json.dumps({"index": index, "provider": provider, "task_type": routing.task_type(task.files),
+                                       "ready": ready, "checks_passed": checks_passed, "repairs": attempt,
+                                       "findings": findings, "seconds": round(seconds, 1),
+                                       "usage_measured": measured or None}, ensure_ascii=False))
+
+
 def _checkpoint(emit: Emit, index: int, task: Task, state: str,
                 attempt: int = 0, summary: str = "") -> None:
     _emit(emit, "task_state", json.dumps({"index": index, "title": task.title,
@@ -71,7 +82,7 @@ def _settings_for(settings: Settings, provider: str, complexity: str) -> Setting
         raise ValueError(f"No approved {provider} {complexity} model is advertised; update model preferences and approve a new plan")
     result = replace(settings, **{provider + "_model": settings.model_for(provider, complexity)})
     # dataclasses.replace only copies public fields; keep the locked context and evidence.
-    for name in ("_model_selection", "_shared_contract", "_definition_catalog"):
+    for name in ("_model_selection", "_shared_contract", "_definition_catalog", "_routing_history"):
         if hasattr(settings, name):
             setattr(result, name, getattr(settings, name))
     return result
@@ -247,14 +258,12 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         if builder not in ("codex", "claude"):
             raise ValueError("Invalid persisted worker provider")
         if provider_gate and task.provider == "auto" and not saved.get("builder"):
-            choices = [(name, await provider_gate(name)) for name in ("codex", "claude")]
-            eligible = [(name, value) for name, value in choices if value["state"] in ("available", "unknown")]
-            if eligible:
-                builder = min(eligible, key=lambda item: item[1]["state"] != "available")[0]
-            else:
-                waiting = [(name, value) for name, value in choices if value["state"] == "waiting"]
-                if waiting:
-                    builder = min(waiting, key=lambda item: item[1].get("next_at") or float("inf"))[0]
+            from . import routing
+            kind = routing.task_type(task.files)
+            choices = {name: await provider_gate(name) for name in ("codex", "claude")}
+            decision = routing.choose(choices, getattr(settings, "_routing_history", {}), kind)
+            builder = decision.provider
+            _emit(emit, "routing", json.dumps(decision.to_dict() | {"index": index, "task_type": kind}, ensure_ascii=False))
         reviewer = "claude" if builder == "codex" else "codex"
         budgets[index].update(builder=builder, builder_session=saved.get("builder_session"),
                               reviewer_session=saved.get("reviewer_session"))
@@ -340,6 +349,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _checkpoint(emit, index, task, "changes_requested", attempt, feedback)
                 if attempt < min(3, settings.repair_cycles):
                     continue
+                _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=False, findings=0,
+                         usage=usage, seconds=time.monotonic() - started)
                 return result("incomplete", task, "Checks did not pass after the bounded repairs")
             # Build context anew: the reviewer inspects files independently, not the builder's claims.
             review_prompt = (_BOUNDARIES + "\nYou are the independent read-only reviewer. Do not edit files.\n"
@@ -391,6 +402,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _checkpoint(emit, index, task, "changes_requested", attempt, review["summary"])
                 if attempt < min(3, settings.repair_cycles):
                     continue
+                _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
+                         findings=len(review.get("issues", [])) or 1, usage=usage, seconds=time.monotonic() - started)
                 return result("incomplete", task, "Independent review did not pass after the bounded repairs")
             # Checks can modify files too; require ownership again before accepting readiness.
             owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
@@ -403,6 +416,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _checkpoint(emit, index, task, state, attempt)
                 return result(state, task, "Task stopped before readiness; draft retained")
             state = "needs_checks" if needs_checks else "ready"
+            _outcome(emit, index, task, builder, attempt, ready=state == "ready", checks_passed=True,
+                     findings=len(review.get("issues", [])), usage=usage, seconds=time.monotonic() - started)
             _checkpoint(emit, index, task, state, attempt, review["summary"])
             completed.append(task.title)
             break

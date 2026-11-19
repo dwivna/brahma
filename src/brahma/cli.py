@@ -49,6 +49,9 @@ def parser():
     p.add_argument("action", choices=("show", "forget"))
     p.add_argument("--repo", type=Path, dest="target", help="Repository (defaults to the current one)")
     p.add_argument("--yes", action="store_true", help="Confirm `forget`; without it nothing is deleted")
+    p = sub.add_parser("proposals", help="Draft proposals from read-only repository signals; starts nothing, approves nothing")
+    p.add_argument("--repo", type=Path, dest="target", help="Repository (defaults to the current one)")
+    p.add_argument("--feedback", help="Review feedback you supply (Brahma never goes looking for it)")
     p = sub.add_parser("status", help="Where a session stands: JSON, with an exit code per outcome")
     p.add_argument("session")
     p = sub.add_parser("events", help="Stream a session's events as JSON lines")
@@ -273,6 +276,16 @@ def _main(argv):
             return report(data, json.dumps(data, indent=2))
         finally:
             store.close()
+    if args.command == "proposals":
+        from . import routing
+        from .memory import Memory, repo_id
+        root = repository(args.target or args.repo or Path.cwd())
+        store = Store(home)
+        try:
+            drafts = routing.draft_proposals(root, Memory(store), repo_id(root), args.feedback)
+        finally:
+            store.close()
+        return report({"proposals": drafts}, json.dumps(drafts, indent=2) if drafts else "No proposals from the current signals.")
     if args.command in ("status", "events"):
         if not (home / "state.sqlite3").exists():
             raise ValueError("Unknown session")

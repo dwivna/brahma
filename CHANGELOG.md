@@ -4,6 +4,27 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.7.0
+
+Quota-aware routing, outcome recording and draft proposals (decision Round 4; first part of plan task 3).
+
+**Added**
+- `routing.py`. For `auto` tasks the builder is chosen capacity first: a provider whose quota is exhausted is never
+  chosen over one with capacity, whatever its record. Among providers with capacity a learned ranking (ready rate,
+  then repairs, then review findings, by task type: tests, docs or code, in this repository) is used only when both
+  have at least 5 measured runs. Otherwise the choice says "no data yet" and uses a plain default (available before
+  unknown, then codex before claude), which is not a claim about which model is better. Pinned providers are
+  honoured. The decision and its per-provider table are recorded as a `routing` event.
+- Measured outcomes (ready, checks passed, repair cycles, review findings, seconds, provider-reported usage) are
+  recorded into per-repository memory when a task finishes, and checks that exit non-zero are remembered.
+- `brahma proposals`: draft proposals (with draft Gherkin) from recorded check failures, stale local `brahma/*`
+  branches and feedback you pass with `--feedback`. It starts no worker, creates no approval and deletes nothing.
+
+**Not yet delivered (rest of plan task 3)**
+- Worker briefs are not yet generated from handoff packets; packets are not yet read by the engine.
+- The one-reply author dispute and escalation of persistent reviewer disagreement, severity tracking, one bounded
+  context expansion and scoped notes are not built. Review still follows the earlier changes-requested loop.
+
 ## 0.6.0
 
 Safety boundaries (decision Round 7; task 2 of the Rounds 4-7 plan). Partly delivered, see "Not enforced".

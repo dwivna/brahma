@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import fcntl
 import json
+import sqlite3
 from pathlib import Path
 import re
 import uuid
@@ -36,6 +37,10 @@ class Session:
     def emit(self, event: Event):
         if event.kind == "quota":
             self.store.observe(json.loads(event.text))
+        if event.kind == "outcome":
+            self._record_outcome(json.loads(event.text))
+        if event.kind == "check":
+            self._record_check_failure(event.text)
         if event.kind == "task_state":
             state = json.loads(event.text)
             state["generation"] = self.generation
@@ -56,6 +61,32 @@ class Session:
                              "; ".join(f"{f.kind}: \u201c{f.excerpt}\u201d" for f in flags[:5]))
                 self.store.event(self.key, note)
                 self.callback(note)
+
+    def _memory(self):
+        from .memory import Memory, repo_id
+        return Memory(self.store), repo_id(self.repo)
+
+    def _record_outcome(self, data: dict) -> None:
+        """Measured result of one task into per-repository routing history (never blocks the run)."""
+        try:
+            memory, repo = self._memory()
+            memory.record_outcome(repo, provider=data["provider"], task_type=data["task_type"],
+                                  checks_passed=data["checks_passed"], repairs=data["repairs"], findings=data["findings"],
+                                  ready=data["ready"], session=self.key, task_index=data["index"], seconds=data["seconds"],
+                                  usage_measured=data.get("usage_measured"))
+        except (ValueError, KeyError, OSError, sqlite3.Error):
+            pass
+
+    def _record_check_failure(self, text: str) -> None:
+        """A check that exited non-zero is remembered so a repair can be proposed (never started) later."""
+        match = re.search(r"^(.*?) => exit (\d+)", text, re.M)
+        if not match or match.group(2) == "0":
+            return
+        try:
+            memory, repo = self._memory()
+            memory.remember(repo, "failure", "check:" + match.group(1)[:150], text[:600])
+        except (ValueError, OSError, sqlite3.Error):
+            pass
 
     @contextlib.contextmanager
     def lock(self):
@@ -238,6 +269,11 @@ class Session:
         contract, settings, catalog = self.approved_contract()
         settings._definition_catalog = catalog.entries
         settings._shared_contract = contract
+        try:
+            memory, repo = self._memory()
+            settings._routing_history = memory.routing_history(repo)
+        except (ValueError, sqlite3.Error):
+            settings._routing_history = {}
         self.settings = settings
         if scheduled:
             saved = self.store.session(self.key)
