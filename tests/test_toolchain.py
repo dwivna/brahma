@@ -375,7 +375,7 @@ class ThirdReview(unittest.TestCase):
             unbound = toolchain.probe([["java"]], root / "r", {"PATH": str(root / "usrbin")})
             bound = toolchain.probe([["java"]], root / "r", {"PATH": str(root / "usrbin"), "JAVA_HOME": str(home)})
         self.assertTrue(unbound["programs"]["java"]["runtime_unbound"])
-        self.assertEqual(bound["programs"]["java"]["runtime"]["release"], "21")      # the stub is bound through JAVA_HOME
+        self.assertTrue(bound["programs"]["java"]["runtime_unbound"])               # a shim may select by .java-version: never bound by JAVA_HOME
 
     def test_dot_dot_components_are_not_collapsed_into_another_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -383,6 +383,49 @@ class ThirdReview(unittest.TestCase):
             script(repo / ".venv" / "bin", "python")
             result = toolchain.probe([["./missing/../.venv/bin/python"]], repo, {"PATH": "/usr/bin"})
         self.assertIsNone(result["programs"]["./missing/../.venv/bin/python"]["path"])     # the path as written does not exist
+
+
+class FourthReview(unittest.TestCase):
+    def test_a_symlinked_mvn_directory_still_binds_its_files(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree = root / "repo", root / "wt"
+            for base in (repo, worktree):
+                (base / "config" / "maven").mkdir(parents=True)
+                (base / "config" / "maven" / "jvm.config").write_text("-Xmx1g\n")
+                (base / ".mvn").symlink_to(base / "config" / "maven")
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["mvn"]], repo, env)
+            files = bound["programs"]["mvn"]["project_files"]
+            self.assertIn(".mvn/jvm.config", files)
+            self.assertTrue(files[".mvn"].startswith("<symlinked-dir>@"))
+            self.assertIsNone(toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])    # identical checkouts compare equal
+            (worktree / "config" / "maven" / "jvm.config").write_text("-javaagent:/tmp/x.jar\n")
+            self.assertIn("Toolchain changed", toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+
+    def test_an_internal_file_symlink_does_not_falsely_mismatch_across_checkouts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            repo, worktree = root / "repo", root / "wt"
+            for base in (repo, worktree):
+                (base / ".mvn").mkdir(parents=True)
+                (base / "config").mkdir()
+                (base / "config" / "jvm.config").write_text("-Xmx1g\n")
+                (base / ".mvn" / "jvm.config").symlink_to("../config/jvm.config")
+            script(root / "bin", "mvn")
+            env = {"PATH": str(root / "bin")}
+            bound = toolchain.probe([["mvn"]], repo, env)
+            self.assertIsNone(toolchain.verify_before_run(["mvn"], worktree, bound, env)[1])
+
+    def test_a_nested_gradle_properties_is_bound(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "repo"
+            (repo / "app").mkdir(parents=True)
+            (repo / "app" / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx1g\n")
+            script(Path(tmp) / "bin", "gradle")
+            bound = toolchain.probe([["gradle", "build"]], repo, {"PATH": str(Path(tmp) / "bin")})
+        self.assertIn("app/gradle.properties", bound["programs"]["gradle"]["project_files"])
 
 
 if __name__ == "__main__":

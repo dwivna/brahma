@@ -171,8 +171,9 @@ class Session:
         return self.plan
 
     def _toolchain_basis(self) -> tuple[Path | None, str]:
-        """Where to fingerprint the toolchain from. A follow-on plan uses the existing worktree only when it is clean, so what is
-        fingerprinted is committed, reviewed content; a dirty worktree may hold unreviewed worker edits, so the repository is used."""
+        """Where to fingerprint the toolchain from. A follow-on plan uses the existing worktree only when `git status` is clean (committed
+        content); a dirty worktree may hold unreviewed worker edits, so the repository is used. Git-ignored files are not seen by that
+        status; they are still verified against this fingerprint immediately before every check, and a mismatch refuses the check."""
         tree = self.store.session(self.key)["worktree"]
         if tree:
             try:
@@ -192,6 +193,7 @@ class Session:
             profiles["selection"] = model_selection
         catalog = discover(self.repo)
         contract = None
+        basis_directory, basis_label = self._toolchain_basis()       # decided once for this plan
         if not plan.questions:
             checks = plan.checks or settings.checks
             candidate = prepare_contract(plan, self.repo, checks, task_timeout=settings.task_timeout,
@@ -201,8 +203,7 @@ class Session:
                                          base_revision=(gittools.git(Path(self.store.session(self.key)["worktree"]), "rev-parse", "HEAD")
                                                         if self.store.session(self.key)["worktree"] else None),
                                          # A follow-on plan runs in the existing worktree, so its toolchain is read from there.
-                                         toolchain_directory=self._toolchain_basis()[0],
-                                         toolchain_basis=self._toolchain_basis()[1])
+                                         toolchain_directory=basis_directory, toolchain_basis=basis_label)
             # Check required context before asking for approval; never silently truncate it.
             from .engine import _task_context, _brief, _BOUNDARIES
             settings._definition_catalog = catalog.entries

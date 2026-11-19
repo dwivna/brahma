@@ -18,18 +18,21 @@ decided by Abhinav. See `docs/decisions.md`.
   `.venv/bin` shim cannot take over a command).
 - Launchers that delegate to another runtime (`uv`, `npx`, `sh`, `docker`, `make`, ...) are flagged on the approval screen: their
   delegated runtime is not bound. Fingerprints cover the launched file, not everything it loads (Maven's jars, Python packages).
-- **Build tools** (`mvn`, `gradle`, `ant`, `sbt`, and their wrappers) also bind the startup files they read first: `.mvn/jvm.config`,
-  `.mvn/maven.config`, `.mvn/extensions.xml`, the Maven and Gradle wrapper files and `gradle.properties`, found anywhere under the
-  checkout (so `mvn -f service/pom.xml` is covered). A symlinked startup file is bound through the content it resolves to and its
-  link target, so retargeting it, or creating a new one, is a change. Plain `java` is not bound to them.
-- A `java` that is not inside a real JDK (the macOS `/usr/bin/java` stub, a version-manager shim) is treated as a selector: bound
-  through an absolute `JAVA_HOME` when set, otherwise reported as not bound. A Java build tool run without `JAVA_HOME` chooses its own
+- **Build tools** (`mvn`, `gradle`, `ant`, `sbt`, and their wrappers) also bind the startup files they read first (`.mvn/jvm.config`,
+  `.mvn/maven.config`, `.mvn/extensions.xml`, the Maven and Gradle wrapper files, `gradle.properties`, `.sdkmanrc`) found in a bounded
+  walk of the checkout, so `mvn -f service/pom.xml` is covered. Symlinked files and symlinked `.mvn`/`gradle` directories are bound
+  through the content they resolve to and their link target; creating or retargeting one is a change. Plain `java` is not bound to
+  them. Not walked: pruned directories (`target`, `build`, `node_modules`, `.venv`, ...). This is defence in depth: a worker's edit to
+  any file it does not own is already restored and blocks readiness through ownership verification.
+- A `java` that is not inside a real JDK (the macOS `/usr/bin/java` stub, a version-manager shim that reads `.java-version`) is a
+  selector and is always reported as not bound. A Java build tool run without `JAVA_HOME` chooses its own
   JDK, which Brahma cannot know without running it, so the approval says the JDK is not bound; set `JAVA_HOME` to bind it.
-- A toolchain change found after approval stops the run (`blocked`, exit 13) and spends no attempt: the task is checkpointed as
-  checking at the same attempt, so restoring the environment and resuming re-runs the checks.
+- A toolchain change found after approval stops the run (`blocked`, exit 13) and spends neither an attempt nor active time: the task is
+  checkpointed as inactive `waiting` at the same attempt in the check phase, so restoring the environment and resuming re-runs the checks.
 - The programs are executed by their invocation path, never the resolved symlink target, so virtualenv and version-manager shims keep
-  working; `..` in a path is never collapsed. A follow-on plan is fingerprinted in the existing worktree only if it is clean (committed,
-  reviewed content); a dirty worktree falls back to the repository, and any later difference is refused before the check runs.
+  working; `..` in a path is never collapsed. A follow-on plan is fingerprinted in the existing worktree only if `git status` is clean;
+  a dirty worktree falls back to the repository. Git-ignored files are not seen by that status, but are verified before every check
+  and any difference is refused before the check runs.
 - Stated limit: hashing and executing are two steps, not one atomic step; a process a worker leaves running could change a file in
   between. Checks are not sandboxed and this is accepted for 1.0.0.
 - The approval screen shows each program's path and short hash, and the JDK.

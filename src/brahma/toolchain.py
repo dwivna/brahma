@@ -92,18 +92,18 @@ def _java_runtime(env: dict[str, str], program: str, target: Path) -> dict | Non
     """The JDK a Java-family program will use, or None when it cannot be known without running something.
 
     A `java`/`javac` file that sits in a real JDK (a `release` file two levels up) is its own runtime. A selector or shim (the macOS
-    /usr/bin/java stub, a version-manager shim) delegates elsewhere, so it is treated like a build tool: bound through an absolute
-    JAVA_HOME if one is set, otherwise reported as not bound."""
+    /usr/bin/java stub, a version-manager shim reading .java-version or .tool-versions) delegates by rules Brahma cannot see, so it is
+    always reported as not bound. A Java build tool is bound through an absolute JAVA_HOME, which Maven and Gradle document honouring."""
     name = Path(program).name
-    home = None
     if name in ("java", "javac"):
         own = target.parent.parent
-        if (own / "release").is_file():
-            home = own
-    if home is None:
+        if not (own / "release").is_file():
+            return None          # a selector or shim: what it delegates to (JAVA_HOME, .java-version, .tool-versions) is unknowable here
+        home = own
+    else:
         home_text = env.get("JAVA_HOME", "")
         if not home_text or not os.path.isabs(home_text):
-            return None                                                 # the tool picks its own JDK; reported as not bound
+            return None          # the tool picks its own JDK; reported as not bound
         home = Path(home_text)
     java = home / "bin" / "java"
     try:
@@ -124,10 +124,26 @@ def _java_runtime(env: dict[str, str], program: str, target: Path) -> dict | Non
     return {"path": str(java), "sha256": _fingerprint(java), "release": release}
 
 
+def _bind_file(found: dict[str, str], path: Path, directory: Path) -> None:
+    """Record one startup file: the hash of the content it resolves to, plus its link target when it is a symlink. A target inside the
+    checkout is written relative to it, so identical checkouts compare equal; an external target keeps its absolute identity."""
+    key = path.relative_to(directory).as_posix()
+    digest = _fingerprint(path) or "<unhashed>"
+    link = ""
+    try:
+        if path.is_symlink():
+            resolved = path.resolve()
+            link = "@" + (resolved.relative_to(directory).as_posix() if resolved.is_relative_to(directory) else str(resolved))
+    except OSError:
+        link = "@<unresolvable>"
+    found[key] = digest + link
+
+
 def startup_files(directory: Path) -> dict[str, str]:
-    """Fingerprint every build-tool startup file under `directory`. A symlink or file outside the tree is still bound: the content it
-    resolves to is hashed and the link target is recorded, so retargeting it is a change. Anything unreadable is recorded as such,
-    never dropped."""
+    """Fingerprint the build-tool startup files in a bounded walk of `directory` (defence in depth: a worker's edit to any file it does
+    not own is already restored and blocks readiness through ownership verification). Directories named `.mvn` or `gradle` that are
+    symlinks are followed by name, so their files are still seen. Not walked: pruned directories (`target`, `build`, `node_modules`,
+    ...) and anything past the walk limit, which is recorded. Unreadable files are recorded as such, never dropped."""
     directory = Path(directory).resolve()
     found: dict[str, str] = {}
     visited = 0
@@ -138,17 +154,25 @@ def startup_files(directory: Path) -> dict[str, str]:
             found["<walk-limit>"] = "more than %d directories; startup files beyond the limit are not bound" % _MAX_WALK
             break
         here = Path(root)
-        names = set(_STARTUP_NAMES.get(here.name, ())) | (_STARTUP_TOP if here == directory else set())
+        names = set(_STARTUP_NAMES.get(here.name, ())) | _STARTUP_TOP
         if here.name == "wrapper" and here.parent.name not in (".mvn", "gradle"):
-            names = set()
+            names = _STARTUP_TOP
         for name in sorted(names & set(files)):
-            path = here / name
-            digest = _fingerprint(path) or "<unhashed>"
-            try:
-                link = f"@{path.resolve()}" if path.is_symlink() else ""
-            except OSError:
-                link = "@<unresolvable>"
-            found[path.relative_to(directory).as_posix()] = digest + link
+            _bind_file(found, here / name, directory)
+        for d in dirs:
+            logical = here / d
+            if d in (".mvn", "gradle") and logical.is_symlink():
+                try:
+                    where = logical.resolve()
+                    found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@" + (
+                        where.relative_to(directory).as_posix() if where.is_relative_to(directory) else str(where))
+                except OSError:
+                    found[logical.relative_to(directory).as_posix()] = "<symlinked-dir>@<unresolvable>"
+                for sub, wanted in ((logical, _STARTUP_NAMES[".mvn"] if d == ".mvn" else set()),
+                                    (logical / "wrapper", _STARTUP_NAMES["wrapper"])):
+                    for name in sorted(wanted):
+                        if (sub / name).is_file():
+                            _bind_file(found, sub / name, directory)
     return found
 
 
