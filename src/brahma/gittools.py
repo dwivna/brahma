@@ -79,6 +79,12 @@ def ignored_paths(repo: Path, allow=None) -> list[str]:
 
 
 def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
+    """Every changed path for ownership review: tracked/untracked changes plus git-ignored files."""
+    return sorted(set(status_paths(repo)) | set(ignored_paths(repo, ignored_allow)))
+
+
+def status_paths(repo: Path) -> list[str]:
+    """Changes `git status` reports (never ignored files); these are the only paths git can stage."""
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
     result = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15)
@@ -92,7 +98,6 @@ def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
             if index < len(chunks) and chunks[index]:
                 paths.append(chunks[index])
         index += 1
-    paths.extend(ignored_paths(repo, ignored_allow))
     return sorted(set(paths))
 
 
@@ -221,12 +226,13 @@ async def run_checks(worktree, checks, cancel, timeout, emit):
 
 
 def commit_changes(worktree: Path, summary: str) -> str:
-    paths = changed_paths(worktree)
-    if not paths:
-        return git(worktree, "rev-parse", "HEAD")
     ok, message = ownership_changes(worktree, ["**"])
     if not ok:
         raise ValueError(message)
+    # Owned git-ignored files are reviewed above but never staged (`git add` refuses them).
+    paths = status_paths(worktree)
+    if not paths:
+        return git(worktree, "rev-parse", "HEAD")
     git(worktree, "add", "--", *paths)
     git(worktree, "commit", "-m", "Brahma: " + summary[:120])
     return git(worktree, "rev-parse", "HEAD")

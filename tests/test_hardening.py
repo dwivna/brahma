@@ -90,6 +90,24 @@ class IgnoredFiles(Fixture):
         self.assertIn("pre.log", message)
 
 
+class CommitWithIgnoredFiles(Fixture):
+    def test_owned_ignored_file_does_not_break_the_commit_and_is_not_staged(self):
+        self.write("src/new.py", "y = 2\n")
+        self.write("tools/helper.sh", "echo hi\n")  # ignored by *.sh, owned via the contract
+        self.assertIn("tools/helper.sh", gittools.changed_paths(self.repo))      # reviewed for ownership
+        self.assertNotIn("tools/helper.sh", gittools.status_paths(self.repo))    # but not stageable
+        head = gittools.commit_changes(self.repo, "add new")
+        files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=", head],
+                               capture_output=True, text=True, check=True).stdout.split()
+        self.assertEqual(files, ["src/new.py"])
+
+    def test_sensitive_ignored_file_still_blocks_the_commit(self):
+        self.write("src/new.py")
+        self.write(".env", "TOKEN=1\n")
+        with self.assertRaises(ValueError):
+            gittools.commit_changes(self.repo, "x")
+
+
 class OwnershipSemantics(Fixture):
     def test_single_star_pattern_does_not_own_nested_files(self):
         self.write("src/a/b.py")
