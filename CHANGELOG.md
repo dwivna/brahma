@@ -4,6 +4,13 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.12.3
+
+**Fixed** (found by live run 5)
+- A reviewer's `pass` that carried only low or medium severity notes was rejected as an invalid review, so a good review forced
+  repair after repair until the attempts ran out. A pass may now carry rated low or medium notes, which are recorded (sanitized) in a
+  `review_notes` event for Abhinav. A pass that carries a high finding or an unrated issue is still invalid and is repaired.
+
 ## 0.12.2
 
 **Fixed** (found by the second live run)

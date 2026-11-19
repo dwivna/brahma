@@ -166,6 +166,29 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         self.assertIn("late note", self.calls[0][1])
 
 
+class PassWithNotes(Flow):
+    """Found by live run 5: a pass carrying only low-severity notes was rejected as invalid and burned every repair."""
+
+    async def test_a_pass_with_low_severity_notes_is_ready_and_the_notes_are_recorded_sanitized(self):
+        notes = [{"id": "F1", "severity": "low", "text": "minor nit " + SECRET, "path": "src/t.py"},
+                 {"id": "F2", "severity": "medium", "text": "consider a follow-up"}]
+        result = await self.run_flow([("b", Result("codex", "ok", "d")), ("r", Result("claude", "ok", review("pass", notes)))])
+        self.assertEqual(result.status, "ready")
+        recorded = [json.loads(e.text) for e in self.events if e.kind == "review_notes"]
+        self.assertEqual(len(recorded), 1)
+        self.assertEqual([n["severity"] for n in recorded[0]["notes"]], ["low", "medium"])
+        self.assertNotIn("SYNTHETIC", json.dumps(recorded))
+
+    async def test_a_pass_with_a_high_or_unrated_issue_is_still_invalid_and_repaired(self):
+        for issues in ([HIGH], ["bare string"], [{"severity": "low", "text": "x"}, HIGH]):
+            with self.subTest(issues=issues):
+                self.events.clear()
+                result = await self.run_flow([("b", Result("codex", "ok", "d")), ("r", Result("claude", "ok", review("pass", issues))),
+                                              ("b", Result("codex", "ok", "fixed")), ("r", Result("claude", "ok", review("pass", [])))])
+                self.assertEqual(result.status, "ready")
+                self.assertEqual([e for e in self.events if e.kind == "review_notes"], [])
+
+
 class Session(unittest.TestCase):
     def test_decision_is_bound_to_the_exact_dispute_and_stale_attention_is_resolved_on_a_new_plan(self):
         from tests.test_cli import repo_session, run_cli

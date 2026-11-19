@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.12.2.** This README describes the
+**Status: early development prototype, version 0.12.3.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.

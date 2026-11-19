@@ -266,8 +266,10 @@ def _review(text: str) -> dict:
     from . import dispute
     for issue in value["issues"]:
         dispute.validate_issue(issue)
-    if value["verdict"] == "pass" and value["issues"]:
-        raise ValueError("A passing review cannot contain unresolved issues")
+    if value["verdict"] == "pass" and any(not isinstance(i, dict) or i.get("severity") not in ("low", "medium")
+                                         for i in value["issues"]):
+        # A pass may carry rated low or medium notes; it may not carry a high finding or an unrated one.
+        raise ValueError("A passing review may only carry low or medium severity notes")
     return value
 
 
@@ -585,6 +587,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
                          findings=len(review.get("issues", [])) or 1, usage=usage, seconds=time.monotonic() - started)
                 return result("incomplete", task, "Independent review did not pass after the bounded repairs")
+            if review["verdict"] == "pass" and review["issues"]:
+                # Recorded for Abhinav; sanitized because dispute events are stored unredacted.
+                _emit(emit, "review_notes", json.dumps({"index": index, "notes": _dispute.findings(review)}, ensure_ascii=False))
             if review["verdict"] != "pass":        # allow-list: only an explicit pass may reach readiness
                 _checkpoint(emit, index, task, "blocked", attempt, "Review did not pass")
                 return result("blocked", task, "Review did not pass")

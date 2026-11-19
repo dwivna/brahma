@@ -67,7 +67,7 @@ class Store:
 
     # Event kinds whose text is machine-readable JSON read back by the coordinator: not rewritten by redaction.
     STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome", "dispute_reply", "disagreement", "dispute_decision",
-                               "user_note", "context_expansion", "checks_failing", "signin_lost"})
+                               "user_note", "context_expansion", "checks_failing", "signin_lost", "review_notes"})
 
     def event(self, session: str, event) -> None:
         if event.kind == "task_state" and isinstance(event.text, str):

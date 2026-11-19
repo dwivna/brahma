@@ -25,6 +25,8 @@ class ReviewTests(unittest.TestCase):
     def test_review_requires_exact_structured_verdict(self):
         for value in ("PASS", "Tests PASS and no issues", '{"verdict":"pass"}',
                       '{"verdict":"pass","summary":"ok","issues":["bug"]}',
+                      '{"verdict":"pass","summary":"ok","issues":[{"severity":"high","text":"bad"}]}',
+                      '{"verdict":"pass","summary":"ok","issues":[{"text":"unrated"}]}',
                       '{"verdict":"pass","summary":"ok","issues":[],"other":1}'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 engine._review(value)
