@@ -271,3 +271,27 @@ AGENTS.md is amended ("plans need user approval, or a valid human-signed policy"
 implemented and tested, so it does not describe behaviour that does not yet exist.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 13 — 19 November 2026 (hole-closing patch scope)
+
+Abhinav: Q1 A, Q2 A, Q3 A, Q4 A (all recommended). Implements Round 11 item 1; not yet built.
+
+1. **Check environment:** run configured checks with the same scrubbed environment workers receive (no tokens or
+   provider credentials), keeping only what tools need. This does **not** stop a test from reading files in the
+   owner's home directory; a sandbox or container for checks is deferred and is not claimed.
+2. **Ignored files:** include git-ignored files in the change check. A default allowlist of build caches
+   (`.venv`, `__pycache__`, `.pytest_cache`, `node_modules`, `dist`) is tolerated; any other ignored file a
+   worker creates or edits counts as outside ownership; sensitive names (`.env*`, `*.pem`, `*.key`,
+   credentials) always block. The allowlist is configurable in `brahma.toml` and locked into the contract.
+3. **Ownership patterns:** gitignore-style. `*` stays within one directory, `**` crosses directories, and a
+   directory path (`src/` or `src/**`) owns its subtree. The planner prompt and plan parser are updated to
+   match. This changes what existing contracts mean, so it is a MINOR version bump (0.2.0) and a contract of
+   the old pattern format is refused rather than reinterpreted (Round 11 item 4).
+4. **Provider "overloaded":** a transient error, not quota. Retry up to three times with growing delays (about
+   one, five and ten minutes) within the same attempt, without spending a repair cycle or changing quota state.
+   If it still fails, checkpoint as blocked "provider overloaded" with the reason, never as a quota limit.
+
+Out of scope for this patch (still open): read-side secret enforcement and log redaction, the kill switch and
+Pause, the history-rewrite hard block, the agent JSON interface, and signed-policy approval.
+
+These are required capabilities, not a report that they exist in the prototype.
