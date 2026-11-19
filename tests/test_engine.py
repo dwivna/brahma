@@ -212,6 +212,17 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(ValueError):
                 await engine.plan("Build it", Path("/repo"), self.settings, self.events.append, self.cancel)
 
+    async def test_planner_prompt_sentences_are_not_spliced(self):
+        proposal = Plan("Need decision", [], ["Which target?"])
+        run = AsyncMock(return_value=Result("codex", "ok", json.dumps(proposal.to_dict())))
+        with patch.object(engine.providers, "run", run):
+            await engine.plan("Build it", Path("/repo"), self.settings, self.events.append, self.cancel)
+        prompt = run.call_args.args[1]
+        # The complexity guidance must not interrupt the instruction to ask questions.
+        self.assertIn("Ask questions when scope or a user decision cannot be established", prompt)
+        self.assertIn("Use critical for architecture, security", prompt)
+        self.assertLess(prompt.index("Use critical for"), prompt.index("Ask questions when"))
+
 
 if __name__ == "__main__":
     unittest.main()

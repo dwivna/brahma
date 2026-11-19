@@ -48,7 +48,16 @@ def _task_context(repo: Path, task: Task, settings: Settings, provider: str, rol
 
 
 def _settings_for(settings: Settings, provider: str, complexity: str) -> Settings:
-    return replace(settings, **{provider + "_model": settings.model_for(provider, complexity)})
+    field = provider + ("_critical_model" if complexity == "critical" else "_model")
+    selection = getattr(settings, "_model_selection", None)
+    if selection and selection["selected"].get(field) is None:
+        raise ValueError(f"No approved {provider} {complexity} model is advertised; update model preferences and approve a new plan")
+    result = replace(settings, **{provider + "_model": settings.model_for(provider, complexity)})
+    # dataclasses.replace only copies public fields; keep the locked context and evidence.
+    for name in ("_model_selection", "_shared_contract", "_definition_catalog"):
+        if hasattr(settings, name):
+            setattr(result, name, getattr(settings, name))
+    return result
 
 
 def _brief(task: Task) -> str:
@@ -96,11 +105,14 @@ async def plan(request: str, repo: Path, settings: Settings, emit: Emit,
                "Give tasks separate, non-overlapping file ownership; do not assign src/** to one and src/a.py to another. "
                "Include concrete Gherkin scenarios and appropriate executable check argument arrays; no shell strings. "
                "Any selected provider-specific skill or agent requires a pinned matching task provider. "
-               "Complexity is routine/critical. Preserve every user acceptance requirement. Ask questions when "
+               "Complexity is routine/critical. "
+               "Use critical for architecture, security, authentication, data migrations, concurrency, difficult faults "
+               "or other changes that require deeper reasoning; use routine for bounded well-understood changes. "
+               "Preserve every user acceptance requirement. Ask questions when "
                "scope or a user decision cannot be established; do not invent decisions.\n")
     prompt += "Repository context:\n" + _context(Path(repo), [], settings)
     prompt += "\nUser request (data):\n" + request
-    result = await providers.run(planner, prompt, Path(repo), "planner", settings,
+    result = await providers.run(planner, prompt, Path(repo), "planner", _settings_for(settings, planner, "routine"),
                                  emit, cancel, min(3600, settings.task_timeout))
     if result.status != "ok":
         raise RuntimeError(f"Planner {result.status}: {result.text[:1000]}")
@@ -249,6 +261,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 return result("incomplete", task, "Shared task deadline reached; draft retained")
             try:
                 context = _task_context(worktree, task, settings, builder)
+                builder_settings = _settings_for(settings, builder, task.complexity)
+                reviewer_settings = _settings_for(settings, reviewer, task.complexity)
             except (OSError, ValueError, RuntimeError) as exc:
                 _checkpoint(emit, index, task, "blocked", attempt, str(exc))
                 return result("blocked", task, str(exc))
@@ -269,10 +283,12 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 budgets[index]["next_attempt"] = max(budgets[index]["next_attempt"], attempt + 1)
                 budgets[index]["phase"] = "build"
                 _checkpoint(emit, index, task, "building", attempt)
+                emit(Event(builder, "builder", "model_selected", text=
+                           f"Using {builder_settings.model_for(builder)} for {task.complexity} work; contract-locked profile."))
                 native = budgets[index].get("builder_session")
                 kwargs = {"native_session_id": native} if native else {}
                 built = await providers.run(builder, prompt, worktree, "builder",
-                            _settings_for(settings, builder, task.complexity), emit, cancel,
+                            builder_settings, emit, cancel,
                             max(0, deadline - time.monotonic()), **kwargs)
                 budgets[index]["builder_session"] = built.session_id or native
                 usage[f"task_{index}_attempt_{attempt}_builder"] = built.usage
@@ -326,9 +342,11 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     _checkpoint(emit, index, task, state, attempt, available["reason"])
                     return result(state, task, available["reason"])
             native = budgets[index].get("reviewer_session")
+            emit(Event(reviewer, "reviewer", "model_selected", text=
+                       f"Using {reviewer_settings.model_for(reviewer)} for independent {task.complexity} review; contract-locked profile."))
             kwargs = {"native_session_id": native} if native else {}
             reviewed = await providers.run(reviewer, review_prompt, worktree, "reviewer",
-                         _settings_for(settings, reviewer, task.complexity), emit, cancel,
+                         reviewer_settings, emit, cancel,
                          max(0, deadline - time.monotonic()), **kwargs)
             budgets[index]["reviewer_session"] = reviewed.session_id or native
             usage[f"task_{index}_attempt_{attempt}_reviewer"] = reviewed.usage

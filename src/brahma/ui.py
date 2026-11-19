@@ -10,16 +10,19 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 
-from .config import state_home
+from .config import Settings, state_home
 from .gittools import repository
 from .models import Event, Plan, Task
 from .session import CONTROL, Session
 from .store import Store
+from .usage import format_usage, read_usage, usage_request
 
 
 HELP = """Type your goal here. Brahma proposes a plan; /approve runs only that plan in an isolated branch.
 /repo PATH   select a Git repository       /new   start a fresh conversation
 /doctor      check signed-in CLIs           /status   checkpoint and reported usage
+/usage [codex|claude]   inspect reported quota and resets without a model request
+/models [codex|claude]  discover advertised models and task profiles without generation
 /approve     execute the displayed plan     /stop or Escape   stop the active process group
 /capacity claude|codex   confirm you checked capacity when no reset was reported
 /skills or /agents   inspect available definitions
@@ -72,6 +75,8 @@ class BrahmaApp(App):
         self.outputs = 0
         self.have_usage = False
         self.checking_auth = False
+        self.usage_job: asyncio.Task | None = None
+        self.usage_cancel = asyncio.Event()
         self._seen_events = 0
         self._pane_entries = {key: deque(maxlen=200) for key in ("manager", "codex", "claude")}
 
@@ -129,30 +134,63 @@ class BrahmaApp(App):
             log.write(entry)
 
     def write(self, event: Event, *, count_usage: bool = True):
+        if count_usage and event.kind == "usage":
+            self.have_usage = True
+            self.inputs += int(event.usage.get("input_tokens", 0) or 0)
+            self.outputs += int(event.usage.get("output_tokens", 0) or 0)
+        # The event log retains the protocol; the conversation shows the readable result.
+        if (event.kind in ("plan", "plan_created", "native_session", "usage")
+                or (event.role == "planner" and event.kind == "message")):
+            self.refresh_status()
+            return
         target = event.provider if event.provider in ("codex", "claude") else "manager"
         text = CONTROL.sub("", event.text)
         color = "#efcc87" if target == "manager" else "#8ec9ee" if target == "codex" else "#e6b6a0"
         rendered = Text(f"{event.role} · {text}", style=color)
         self._pane_entries[target].append(rendered)
         self.query_one("#" + target, RichLog).write(rendered)
-        if count_usage and event.kind == "usage":
-            self.have_usage = True
-            self.inputs += int(event.usage.get("input_tokens", 0) or 0)
-            self.outputs += int(event.usage.get("output_tokens", 0) or 0)
         self.refresh_status()
+
+    async def show_usage(self, names: tuple[str, ...]):
+        if self.demo:
+            self.write(Event(text="DEMO — quota inspection is skipped; no provider requests are made."))
+            return
+        self.usage_cancel.clear()
+        key = self.session.key if self.session else None
+        report = await read_usage(self.store, names, cancel=self.usage_cancel)
+        event = Event(kind="information", text=format_usage(report))
+        # Operational questions never enter the planning history or alter its approval.
+        if self.session and self.session.key == key:
+            self.session.emit(event)
+        else:
+            self.write(event)
+
+    async def inspect_usage(self, names: tuple[str, ...]):
+        try:
+            await self.show_usage(names)
+        except Exception as error:
+            self.write(Event(kind="error", text=str(error)))
+        finally:
+            self.usage_job = None
 
     def on_session_event(self, event: Event):
         if self.session:
-            self._seen_events = len(self.store.events(self.session.key))
-        self.write(event)
+            self.drain_session_events()
+        else:
+            self.write(event)
+
+    def drain_session_events(self):
+        # Local callbacks and scheduler polling share one ordered cursor. A callback
+        # must render pending background records before advancing past its own event.
+        events = self.store.events(self.session.key)
+        for row in events[self._seen_events:]:
+            self.write(Event(row["provider"], row["role"], row["kind"], row["text"], row["usage"]))
+        self._seen_events = len(events)
+        self.refresh_status()
 
     def poll_events(self):
         if self.session and not self.demo:
-            events = self.store.events(self.session.key)
-            for row in events[self._seen_events:]:
-                self.write(Event(row["provider"], row["role"], row["kind"], row["text"], row["usage"]))
-            self._seen_events = len(events)
-            self.refresh_status()
+            self.drain_session_events()
 
     def refresh_status(self):
         selected = self.session.repo.name if self.session else "No repository selected"
@@ -220,11 +258,20 @@ class BrahmaApp(App):
                                   contract["payload"]["feature"],
                                   "Checks: " + json.dumps(contract["payload"]["checks"]),
                                   "Budget: 60 active minutes/task; at most 3 repairs; quota waiting excluded."))
+                    models = contract["payload"]["models"]
+                    selection = models.get("selection")
+                    for provider in ("codex", "claude"):
+                        for suffix, purpose in (("_model", "routine"), ("_critical_model", "critical")):
+                            field = provider + suffix
+                            detail = selection["profiles"][field] if selection else None
+                            chosen = detail["selected"] if detail else models.get(field)
+                            state = "advertised" if detail and detail["verified"] else "unavailable" if detail and detail["available"] is False else "unverified"
+                            lines.append(f"Model: {provider} {purpose} = {chosen or 'unavailable'} ({state})")
             lines.append("/approve locks this complete contract and permits queued resumption. /stop cancels restarts.")
         if self.session:
             lines.append("Approved checks: " + ("; ".join(" ".join(c) for c in (plan.checks or self.session.settings.checks)) or
                         "none configured — outcome cannot be marked ready"))
-        self.write(Event(kind="plan", text="\n".join(lines)))
+        self.write(Event(kind="plan_display", text="\n".join(lines)))
 
     async def on_input_submitted(self, event: Input.Submitted):
         value = event.value.strip()
@@ -236,6 +283,14 @@ class BrahmaApp(App):
                 await self.action_quit()
             else:
                 self.action_stop()
+            return
+        names = usage_request(value)
+        if names is not None:
+            event.input.value = ""
+            if self.usage_job and not self.usage_job.done():
+                self.write(Event(text="A usage check is already running."))
+            else:
+                self.usage_job = asyncio.create_task(self.inspect_usage(names))
             return
         if self.job and not self.job.done():
             if value in ("/status", "/help"):
@@ -250,8 +305,26 @@ class BrahmaApp(App):
 
     async def handle(self, value: str):
         try:
-            if value == "/help":
+            names = usage_request(value)
+            if names is not None:
+                await self.show_usage(names)
+            elif value == "/help":
                 self.inspect(value)
+            elif value == "/models" or value.startswith("/models "):
+                names = tuple(value.split()[1:]) or ("codex", "claude")
+                if len(names) > 2 or any(name not in ("codex", "claude") for name in names):
+                    raise ValueError("Use /models [codex|claude]")
+                if self.demo:
+                    self.write(Event(text="DEMO — model discovery is skipped; no provider requests are made."))
+                else:
+                    from .model_selection import format_models, read_models
+                    settings = Settings.load(self.session.repo) if self.session else Settings()
+                    self.checking_auth = True
+                    try:
+                        report = await read_models(settings, names)
+                        self.write(Event(kind="information", text=format_models(report)))
+                    finally:
+                        self.checking_auth = False
             elif value.startswith("/repo "):
                 self.select_repo(Path(value[6:].strip()).expanduser())
             elif value == "/new":
@@ -342,6 +415,7 @@ class BrahmaApp(App):
             self.refresh_status()
 
     def action_stop(self):
+        self.usage_cancel.set()
         active = self.job is not None and not self.job.done()
         if self.session and not self.demo:
             self.session.stop()
@@ -357,6 +431,10 @@ class BrahmaApp(App):
             self.select_repo(self.session.repo)
 
     async def action_quit(self):
+        self.usage_cancel.set()
+        if self.usage_job:
+            self.usage_job.cancel()
+            await asyncio.gather(self.usage_job, return_exceptions=True)
         # Closing the terminal checkpoints active work; explicit Stop is durable cancellation.
         if self.checking_auth and self.job:
             self.job.cancel()

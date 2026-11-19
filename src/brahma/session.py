@@ -60,6 +60,30 @@ class Session:
             finally:
                 fcntl.flock(stream, fcntl.LOCK_UN)
 
+    async def discover_model_profiles(self) -> dict:
+        from .model_catalog import discover_models, select_profiles
+        settings = Settings.load(self.repo)
+        catalogs = await asyncio.gather(*(discover_models(name, self.cancel)
+                                          for name in ("codex", "claude")))
+        if self.cancel.is_set():
+            raise ValueError("Model discovery cancelled")
+        return select_profiles(settings, {row["provider"]: row for row in catalogs})
+
+    @staticmethod
+    def selected_settings(settings: Settings, selection: dict | None) -> Settings:
+        if selection is None:
+            return settings
+        names = ("codex_model", "codex_critical_model", "claude_model", "claude_critical_model")
+        configured, selected = selection.get("configured"), selection.get("selected")
+        if (configured != {name: getattr(settings, name) for name in names}
+                or not isinstance(selected, dict) or set(selected) != set(names)
+                or any(value is not None and (not isinstance(value, str) or not value.strip() or len(value) > 200)
+                       for value in selected.values())):
+            raise ValueError("Model settings changed; discover and approve a new plan")
+        result = replace(settings, **{name: value or getattr(settings, name) for name, value in selected.items()})
+        result._model_selection = selection
+        return result
+
     async def ask(self, request: str) -> Plan:
         from . import engine
         self.cancel.clear()
@@ -76,16 +100,22 @@ class Session:
         with self.lock():
             active = Path(saved["worktree"]) if saved["worktree"] else self.repo
             from .scheduler import Capacity
-            plan = await engine.plan(brief, active, self.settings, self.emit, self.cancel,
+            selection = await self.discover_model_profiles()
+            settings = self.selected_settings(Settings.load(self.repo), selection)
+            plan = await engine.plan(brief, active, settings, self.emit, self.cancel,
                                      provider_gate=Capacity(self.store, self.cancel))
-        self.set_plan(plan)
+        self.set_plan(plan, model_selection=selection)
         self.emit(Event(kind="plan", text=json.dumps(self.plan.to_dict(), ensure_ascii=False)))
         return self.plan
 
-    def set_plan(self, plan: Plan):
+    def set_plan(self, plan: Plan, *, model_selection: dict | None = None):
         from .contracts import prepare_contract, write_contract
         from .discovery import discover
         settings = Settings.load(self.repo)
+        profiles = asdict(settings)
+        settings = self.selected_settings(settings, model_selection)
+        if model_selection is not None:
+            profiles["selection"] = model_selection
         catalog = discover(self.repo)
         contract = None
         if not plan.questions:
@@ -93,7 +123,7 @@ class Session:
             candidate = prepare_contract(plan, self.repo, checks, task_timeout=settings.task_timeout,
                                          repair_cycles=settings.repair_cycles,
                                          definitions=catalog.entries,
-                                         model_profiles=asdict(settings),
+                                         model_profiles=profiles,
                                          base_revision=(gittools.git(Path(self.store.session(self.key)["worktree"]), "rev-parse", "HEAD")
                                                         if self.store.session(self.key)["worktree"] else None))
             # Check required context before asking for approval; never silently truncate it.
@@ -126,12 +156,18 @@ class Session:
         contract = read_contract(Path(saved["contract"]))
         # Reload settings on every dispatch: configuration changes require approval.
         fresh = Settings.load(self.repo)
+        profiles = asdict(fresh)
+        selection = contract["payload"]["models"].get("selection")
+        selected = self.selected_settings(fresh, selection)
+        if selection is not None:
+            profiles["selection"] = selection
         checks = self.plan.checks or fresh.checks
         catalog = discover(self.repo)
         verify_contract(contract, self.plan, self.repo, checks, task_timeout=fresh.task_timeout,
                         repair_cycles=fresh.repair_cycles, definitions=catalog.entries,
-                        model_profiles=asdict(fresh), base_revision=contract["payload"]["base_revision"])
-        return contract, replace(fresh, checks=checks), catalog
+                        model_profiles=profiles, base_revision=contract["payload"]["base_revision"])
+        selected.checks = checks
+        return contract, selected, catalog
 
     def stop(self):
         self.store.stop(self.key)

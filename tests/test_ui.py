@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 from textual.widgets import Button, Input, RichLog, Static
 
-from brahma.models import Event
+from brahma.models import Event, Plan, Task
 from brahma.ui import BrahmaApp
 from test_core import init_repo
 
@@ -23,6 +23,148 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
     @staticmethod
     def pane(app, name):
         return "\n".join(strip.text for strip in app.query_one("#" + name, RichLog).lines)
+
+    async def test_usage_conversation_bypasses_planner_and_preserves_approval(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = init_repo(Path(tmp) / "repo")
+            app = BrahmaApp(root, home=Path(tmp)/"state")
+            try:
+                with patch("brahma.ui.read_usage", new_callable=AsyncMock, return_value={"fixture": True}) as read, \
+                        patch("brahma.ui.format_usage", return_value="Codex: 40% remaining. Claude: unknown."), \
+                        patch("brahma.providers.run", side_effect=AssertionError("usage called a model")):
+                    async with app.run_test(size=(120, 40)) as pilot:
+                        await pilot.pause()
+                        app.session.set_plan(Plan("Existing work", [Task("task", "change", ["first.txt"], ["correct"])]))
+                        before = app.store.session(app.session.key)
+                        generation = app.session.generation
+                        for text in ("codex and claude both available usage limits",
+                                     "yes i want current usage limits and remaining capacity for both claude and codex"):
+                            app.query_one("#prompt", Input).value = text
+                            await pilot.press("enter")
+                            await pilot.pause()
+                        self.assertEqual(read.await_count, 2)
+                        self.assertEqual(app.store.session(app.session.key), before)
+                        self.assertEqual(app.session.generation, generation)
+                        self.assertEqual(app.store.pending(), [])
+                        self.assertFalse(any(row["kind"] == "user" for row in app.store.events(app.session.key)))
+                        pane = self.pane(app, "manager")
+                        self.assertEqual(pane.count("Claude: unknown."), 2)
+                        self.assertNotIn("empty plan", pane)
+                        self.assertFalse(app.query_one("#approve", Button).disabled)
+            finally:
+                app.store.close()
+
+    async def test_usage_inspection_does_not_replace_active_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BrahmaApp(home=Path(tmp)/"state")
+            blocker = None
+            try:
+                async with app.run_test(size=(100, 30)) as pilot:
+                    await pilot.pause()
+                    blocker = asyncio.create_task(asyncio.Event().wait())
+                    app.job = blocker
+                    with patch("brahma.ui.read_usage", new_callable=AsyncMock, return_value={}), \
+                            patch("brahma.ui.format_usage", return_value="Quota report"):
+                        app.query_one("#prompt", Input).value = "/usage"
+                        await pilot.press("enter")
+                        await pilot.pause()
+                        self.assertIs(app.job, blocker)
+                        self.assertFalse(blocker.done())
+                        self.assertIn("Quota report", self.pane(app, "manager"))
+            finally:
+                if blocker:
+                    blocker.cancel()
+                    await asyncio.gather(blocker, return_exceptions=True)
+                app.store.close()
+
+    async def test_usage_reply_drains_unseen_background_errors_and_tokens_once(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = init_repo(Path(tmp) / "repo")
+            app = BrahmaApp(root, home=Path(tmp)/"state")
+            try:
+                with patch("brahma.ui.read_usage", new_callable=AsyncMock, return_value={}), \
+                        patch("brahma.ui.format_usage", return_value="Usage report complete"):
+                    async with app.run_test(size=(120, 40)) as pilot:
+                        await pilot.pause()
+                        key = app.session.key
+                        # The scheduler writes through a separate connection between UI polls.
+                        from brahma.store import Store
+                        background = Store(app.store.home)
+                        try:
+                            background.event(key, Event("claude", "reviewer", "error", "UNSEEN_WORKER_ERROR"))
+                            background.event(key, Event("claude", "reviewer", "usage", usage={"input_tokens": 17, "output_tokens": 3}))
+                        finally:
+                            background.close()
+                        await app.show_usage(("claude",))
+                        app.poll_events()
+                        app.poll_events()
+                        await pilot.pause()
+                        self.assertEqual(self.pane(app, "claude").count("UNSEEN_WORKER_ERROR"), 1)
+                        self.assertEqual(self.pane(app, "manager").count("Usage report complete"), 1)
+                        self.assertEqual((app.inputs, app.outputs), (17, 3))
+                        self.assertEqual(app._seen_events, len(app.store.events(key)))
+            finally:
+                app.store.close()
+
+    async def test_internal_protocol_hidden_but_readable_plan_and_usage_remain(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BrahmaApp(home=Path(tmp)/"state", demo=True)
+            try:
+                async with app.run_test(size=(120, 40)) as pilot:
+                    for event in (Event(kind="plan", text='{"summary":"RAW_JSON"}'),
+                                  Event(kind="plan_created", text="INTERNAL_GENERATION"),
+                                  Event("codex", "planner", text='{"summary":"RAW_JSON"}'),
+                                  Event("codex", "planner", "native_session", "NATIVE_ID"),
+                                  Event("codex", "planner", "usage", usage={"input_tokens": 40, "output_tokens": 2})):
+                        app.write(event)
+                    app.show_plan(Plan("Readable goal", [], ["Which file?"]))
+                    await pilot.pause()
+                    combined = self.pane(app, "manager") + self.pane(app, "codex")
+                    for hidden in ("RAW_JSON", "INTERNAL_GENERATION", "NATIVE_ID"):
+                        self.assertNotIn(hidden, combined)
+                    self.assertEqual(combined.count("Readable goal"), 1)
+                    self.assertIn("Which file?", combined)
+                    self.assertEqual((app.inputs, app.outputs), (40, 2))
+            finally:
+                app.store.close()
+
+    async def test_usage_demo_never_probes_accounts(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            app = BrahmaApp(home=Path(tmp)/"state", demo=True)
+            try:
+                with patch("brahma.ui.read_usage", side_effect=AssertionError("demo queried account")), \
+                        patch("brahma.model_selection.read_models", side_effect=AssertionError("demo queried models")):
+                    async with app.run_test(size=(100, 30)) as pilot:
+                        await app.handle("/usage codex")
+                        await app.handle("/models claude")
+                        await pilot.pause()
+                        self.assertIn("quota inspection is skipped", self.pane(app, "manager"))
+                        self.assertIn("model discovery is skipped", self.pane(app, "manager"))
+            finally:
+                app.store.close()
+
+    async def test_models_inspection_keeps_existing_plan_and_uses_repository_settings(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = init_repo(Path(tmp) / "repo")
+            (root / "brahma.toml").write_text('[brahma]\ncodex_model="gpt-6-sol"\n')
+            app = BrahmaApp(root, home=Path(tmp)/"state")
+            try:
+                with patch("brahma.model_selection.read_models", new_callable=AsyncMock, return_value={}) as read, \
+                        patch("brahma.model_selection.format_models", return_value="Native models checked"), \
+                        patch("brahma.providers.run", side_effect=AssertionError("inspection generated work")):
+                    async with app.run_test(size=(110, 36)) as pilot:
+                        await pilot.pause()
+                        app.session.set_plan(Plan("Existing plan", [Task("task", "change", ["first.txt"], ["correct"])]))
+                        before = app.store.session(app.session.key)
+                        await app.handle("/models codex")
+                        await pilot.pause()
+                        self.assertEqual(read.await_args.args[0].codex_model, "gpt-6-sol")
+                        self.assertEqual(read.await_args.args[1], ("codex",))
+                        self.assertEqual(app.store.session(app.session.key), before)
+                        self.assertFalse(app.checking_auth)
+                        self.assertIn("Native models checked", self.pane(app, "manager"))
+            finally:
+                app.store.close()
 
     async def test_three_panes_demo_approval_and_resize_without_provider_calls(self):
         with tempfile.TemporaryDirectory() as tmp:

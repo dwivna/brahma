@@ -157,3 +157,21 @@ Abhinav: hard stops A/B/C (not D), enforcement A, untrusted text A, kill switch 
    and writes a stop record. Nothing is deleted. Resuming needs Abhinav's explicit action.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 7 addendum — 18 November 2026
+
+Abhinav chose a **hard block** for deleting or rewriting Git history (force-push, branch deletion, history
+rewrites). This supersedes the flagged-only wording in Round 7 item 1; there is no approval path in this
+version. Abhinav also approved the Rounds 4-7 plan in `docs/plans/rounds-4-7.plan.json` as drafted (with this
+amendment), executed on an isolated branch; merge remains Abhinav's.
+
+## Round 8 — 19 November 2026 (model selection)
+
+Abhinav:
+
+> brahma should be able to check and select the available best and suitable model for codex and claude based on work
+
+This extends the routing requirement in Round 4. Implementation evidence and
+the limits of advertised model availability are documented in
+[model-selection.md](model-selection.md). The request is a target; it does not
+establish measured superiority, included billing entitlement or quota availability.

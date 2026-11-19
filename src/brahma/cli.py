@@ -8,7 +8,7 @@ import subprocess
 import sys
 
 from . import __version__
-from .config import state_home
+from .config import Settings, state_home
 from .models import Plan
 from .store import Store
 from .session import Session
@@ -23,6 +23,12 @@ def parser():
     result.add_argument("--resume", metavar="SESSION", help="Reopen a local conversation/checkpoint")
     sub = result.add_subparsers(dest="command")
     sub.add_parser("doctor", help="Read-only CLI and subscription sign-in diagnostics")
+    p = sub.add_parser("usage", help="Inspect provider-reported quota without a model request")
+    p.add_argument("provider", nargs="?", choices=("codex", "claude"))
+    p.add_argument("--json", action="store_true", help="Print the structured observation report")
+    p = sub.add_parser("models", help="Discover native models and show task profile selection without generation")
+    p.add_argument("provider", nargs="?", choices=("codex", "claude"))
+    p.add_argument("--json", action="store_true", help="Print the structured catalog and selection")
     sub.add_parser("sessions", help="List local saved sessions")
     p = sub.add_parser("plan", help="Propose a read-only plan, without executing it")
     p.add_argument("request")
@@ -59,6 +65,34 @@ def readiness(rows: list[dict], snapshots: dict) -> dict:
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    if args.command == "models":
+        from .model_selection import format_models, read_models
+        try:
+            root = repository(args.repo or Path.cwd())
+        except ValueError as error:
+            if args.repo:
+                print(f"brahma: {error}", file=sys.stderr)
+                return 2
+            root = None
+        try:
+            settings = Settings.load(root) if root else Settings()
+            names = (args.provider,) if args.provider else ("codex", "claude")
+            report = asyncio.run(read_models(settings, names))
+        except (ValueError, OSError) as error:
+            print(f"brahma: {error}", file=sys.stderr)
+            return 2
+        print(json.dumps(report, indent=2) if args.json else format_models(report))
+        return 0
+    if args.command == "usage":
+        from .usage import format_usage, read_usage
+        store = Store(state_home())
+        try:
+            names = (args.provider,) if args.provider else ("codex", "claude")
+            report = asyncio.run(read_usage(store, names))
+            print(json.dumps(report, indent=2) if args.json else format_usage(report))
+            return 0
+        finally:
+            store.close()
     if args.command == "doctor":
         from .providers import doctor
         async def inspect():
@@ -138,7 +172,9 @@ def main(argv=None):
                 return 0
             if not args.approve:
                 raise ValueError("Execution requires --approve; inspect the plan and configured checks first")
-            session.set_plan(Plan.parse(args.plan_file.read_text(encoding="utf-8")))
+            plan = Plan.parse(args.plan_file.read_text(encoding="utf-8"))
+            selection = asyncio.run(session.discover_model_profiles())
+            session.set_plan(plan, model_selection=selection)
             result = asyncio.run(session.execute())
             print(json.dumps({"session": session.key, "status": result.status, "summary": result.text}, indent=2))
             return 0 if result.status == "ready" else 2
