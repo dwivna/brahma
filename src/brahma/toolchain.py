@@ -152,7 +152,8 @@ def _selects_own_jdk(directory: Path, project_files: dict[str, str]) -> bool:
                 path = Path(key) if key.startswith("/") else directory / key
                 if path.stat().st_size >= 65536:
                     return True                                       # too large to scan: assume it might select a JDK
-                if "org.gradle.java.home" in path.read_text(errors="replace"):
+                text = path.read_text(errors="replace")
+                if "java.home" in text or "\\u" in text:            # any mention, or a unicode escape that could spell it
                     return True
             except OSError:
                 return True       # unreadable: assume it might
@@ -211,7 +212,8 @@ def external_startup_files(program: str, env: dict[str, str]) -> dict[str, str]:
     home = Path(env.get("HOME") or os.path.expanduser("~"))
     candidates: list[Path] = []
     if name in ("mvn", "mvnw"):
-        candidates = [Path("/etc/mavenrc"), Path("/usr/local/etc/mavenrc"), home / ".mavenrc"]
+        candidates = [] if env.get("MAVEN_SKIP_RC") else [Path("/etc/mavenrc"), Path("/usr/local/etc/mavenrc"),
+                                                          Path("/opt/homebrew/etc/mavenrc"), home / ".mavenrc"]    # skipped by MAVEN_SKIP_RC
     elif name in ("gradle", "gradlew"):
         if env.get("GRADLE_USER_HOME") and not env["GRADLE_USER_HOME"].startswith("/"):
             return {"<relative GRADLE_USER_HOME>": "<unhashed>"}      # Gradle resolves it against its own cwd: not bound, flagged below
@@ -232,7 +234,14 @@ def _relative_or_absolute(path: Path, directory: Path, relative: bool) -> str:
     return str(path)
 
 
-def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> dict:
+def _redirects_gradle(args: list[str]) -> bool:
+    """Command-line options that move Gradle's user home or choose its JDK, which the fingerprint cannot follow."""
+    return any(arg in ("-g", "--gradle-user-home") or arg.startswith(("--gradle-user-home=", "-Dorg.gradle.java.home", "-Porg.gradle.java.home",
+                                                                       "-Dorg.gradle.java.installations", "-Dgradle.user.home"))
+               for arg in args)
+
+
+def fingerprint_program(program: str, directory: Path, env: dict[str, str], args: list[str] | None = None) -> dict:
     """Describe one program as it would run from `directory`. Pure reads: nothing is executed."""
     directory = Path(directory).resolve()
     invocation, target, relative = resolve(program, directory, env)
@@ -261,6 +270,10 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str]) -> d
             if name.startswith("gradle") and (_selects_own_jdk(directory, info["project_files"])
                                               or _selects_own_jdk(Path("/"), {path: "" for path in present if path.endswith("gradle.properties")})):
                 info["runtime"], info["runtime_unbound"] = None, True      # org.gradle.java.home picks a different JDK
+            if name.startswith("gradle"):
+                info["redirected_by_args"] = _redirects_gradle(args or [])
+                if info["redirected_by_args"] or not (env.get("GRADLE_USER_HOME") or "/").startswith("/"):
+                    info["runtime"], info["runtime_unbound"] = None, True  # -g / -Dorg.gradle.java.home / relative GRADLE_USER_HOME
             if name in ("mvn", "mvnw") and any(path.endswith("mavenrc") for path in present):
                 info["runtime"], info["runtime_unbound"] = None, True      # a mavenrc is shell code that may override JAVA_HOME
     elif name == "go" and "GOROOT" in env:
@@ -274,9 +287,12 @@ def probe(checks: list[list[str]], directory: Path, env: dict[str, str] | None =
         from .gittools import check_env
         env = check_env()
     programs: dict[str, dict] = {}
+    arguments: dict[str, list[str]] = {}
     for command in checks:
-        if command and command[0] not in programs:
-            programs[command[0]] = fingerprint_program(command[0], directory, env)
+        if command:
+            arguments.setdefault(command[0], []).extend(command[1:])
+    for program, args in arguments.items():
+        programs[program] = fingerprint_program(program, directory, env, args)
     return {"programs": programs}
 
 
@@ -355,6 +371,14 @@ def verify_before_run(command: list[str], directory: Path, bound: dict | None, e
     if expected is None:
         return command, f"Check program {command[0]} is not part of the approved toolchain"
     actual = fingerprint_program(command[0], directory, env)
+    if expected.get("redirected_by_args"):
+        # The approval already recorded that some command line redirects this tool; carry its outcome over so a second command with
+        # plain arguments does not read as a change.
+        for key in ("runtime", "runtime_unbound", "redirected_by_args"):
+            if key in expected:
+                actual[key] = expected[key]
+    elif Path(command[0]).name.startswith("gradle") and _redirects_gradle(command[1:]):
+        return command, f"Check program {command[0]} is run with options that redirect Gradle's JDK or user home; that was not part of the approval"
     if actual["path"] is None:
         return command, f"Check program {command[0]} was not found"
     if actual != expected:

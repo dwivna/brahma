@@ -568,5 +568,48 @@ class SeventhReview(unittest.TestCase):
             self.assertTrue(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
 
 
+class EighthPass(unittest.TestCase):
+    def test_check_env_disables_maven_rc_and_strips_startup_redirects(self):
+        with patch.dict(os.environ, {"MAVEN_BASEDIR": "/x", "MAVEN_DEBUG_OPTS": "-agentlib:jdwp=y"}):
+            env = gittools.check_env()
+        self.assertEqual(env["MAVEN_SKIP_RC"], "1")
+        self.assertNotIn("MAVEN_BASEDIR", env)
+        self.assertNotIn("MAVEN_DEBUG_OPTS", env)
+        with patch.dict(os.environ, {"GRADLE_USER_HOME": "relative/dir"}):
+            self.assertNotIn("GRADLE_USER_HOME", gittools.check_env())
+
+    def test_mavenrc_is_ignored_when_maven_is_told_to_skip_it(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            home = root / "home"
+            home.mkdir()
+            (home / ".mavenrc").write_text("export JAVA_HOME=/x\n")
+            self.assertEqual(toolchain.external_startup_files("mvn", {"HOME": str(home), "MAVEN_SKIP_RC": "1"}), {})
+            self.assertIn(str(home / ".mavenrc"), toolchain.external_startup_files("mvn", {"HOME": str(home)}))
+
+    def test_gradle_command_lines_that_redirect_the_jdk_or_user_home_are_unbound_and_refused_if_new(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script(root / "bin", "gradle")
+            home = jdk(root, "21")
+            env = {"PATH": str(root / "bin"), "JAVA_HOME": str(home), "HOME": str(root / "h")}
+            plain = toolchain.probe([["gradle", "test"]], root / "wt", env)
+            redirected = toolchain.probe([["gradle", "test"], ["gradle", "-g", "/ext", "build"]], root / "wt", env)
+            self.assertFalse(plain["programs"]["gradle"]["runtime_unbound"])
+            self.assertTrue(redirected["programs"]["gradle"]["runtime_unbound"])
+            # a plain second command is not a change once the approval recorded the redirect
+            self.assertIsNone(toolchain.verify_before_run(["gradle", "test"], root / "wt", redirected, env)[1])
+            # a redirect that was not approved is refused
+            self.assertIn("redirect Gradle", toolchain.verify_before_run(["gradle", "-g", "/ext", "test"], root / "wt", plain, env)[1])
+
+    def test_gradle_properties_that_mention_java_home_or_hide_it_behind_an_escape_are_assumed_to_select_a_jdk(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp)
+            (repo / "gradle.properties").write_text("org.gradle.java.hom\\u0065=/opt/x\n")
+            self.assertTrue(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
+            (repo / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx1g\n")
+            self.assertFalse(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
+
+
 if __name__ == "__main__":
     unittest.main()

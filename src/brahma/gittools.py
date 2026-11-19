@@ -334,6 +334,13 @@ def check_env() -> dict[str, str]:
     env["GIT_TERMINAL_PROMPT"] = "0"
     from .toolchain import trusted_path
     env["PATH"] = trusted_path(env)       # a relative PATH entry would resolve inside the worker-writable worktree
+    # Disable, rather than try to enumerate, inputs that redirect Maven's JVM or startup script: mavenrc files are shell code that can
+    # override JAVA_HOME, MAVEN_BASEDIR chooses which .mvn/ is read, MAVEN_DEBUG_OPTS goes straight to the JVM.
+    env["MAVEN_SKIP_RC"] = "1"
+    for name in ("MAVEN_BASEDIR", "MAVEN_DEBUG_OPTS"):
+        env.pop(name, None)
+    if env.get("GRADLE_USER_HOME") and not env["GRADLE_USER_HOME"].startswith("/"):
+        env.pop("GRADLE_USER_HOME")       # a relative value would resolve inside the worker-writable worktree
     return env
 
 
