@@ -13,6 +13,10 @@ Packet-driven briefs, bounded context expansion and scoped notes (finishes plan 
   task, and only an explicit `pass` can reach readiness (allow-list instead of deny-list).
 - Finding `id` and `path` are sanitized as well as the text, because dispute events are stored unredacted.
 
+- Context expansion (found by the automated review of this branch): files are opened with `O_NOFOLLOW` and judged from the
+  descriptor (regular file, single link, same device), the sensitive-name check is case-folded, only the sanitized file
+  names appear in events. Worker-created files remain readable by design; only the worktree is ever read.
+
 **Added**
 - Builder and reviewer briefs carry the validated handoff packet for their phase (Gherkin slice, owned paths, approved
   checks, diff reference, coordinator-verified check results), written read-only outside the repository. If a packet

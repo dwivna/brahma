@@ -43,6 +43,23 @@ class Pure(unittest.TestCase):
             self.assertNotIn("SYNTHETIC", text)
             self.assertNotIn("outside", text)
 
+    def test_expansion_rejects_case_variants_hardlinks_and_sanitizes_reported_names(self):
+        import os
+        with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as outside:
+            root = Path(d)
+            (root / ".ENV").write_text("A=1")
+            (root / "Custody").mkdir()
+            (root / "Custody" / "x.txt").write_text("secret")
+            (Path(outside) / "t.txt").write_text("outside-secret")
+            try:
+                os.link(Path(outside) / "t.txt", root / "hard.txt")
+            except OSError:
+                self.skipTest("hardlinks across directories unavailable")
+            odd = "sk-SYNTHETICabcdefghij123456.py"
+            text, accepted, rejected = briefs.expansion(root, [".ENV", "Custody/x.txt", "hard.txt", odd], 10000)
+            self.assertEqual((text, accepted), ("", []))
+            self.assertNotIn("SYNTHETIC", json.dumps(rejected))
+
     def test_expansion_is_bounded_in_count_and_size(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

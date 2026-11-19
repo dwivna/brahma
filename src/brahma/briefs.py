@@ -9,7 +9,9 @@ checkpoint, never injected into a running worker, and can never change scope, ow
 from __future__ import annotations
 
 import json
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -62,23 +64,34 @@ def expansion(worktree: Path, requested: list[str], limit: int) -> tuple[str, li
     accepted, rejected, parts, used = [], [], [], 0
     for name in requested:
         if len(accepted) >= MAX_EXPANSION_FILES:
-            rejected.append(name)
+            rejected.append(safety.sanitize(str(name))[:200])
             continue
         try:
             path = root / name
-            if (not name or name.startswith(("/", "~")) or ".." in Path(name).parts or ":" in name or path.is_symlink()
-                    or not path.is_file() or not path.resolve().is_relative_to(root) or _sensitive(name)):
+            # Case-fold so `.ENV` or `Custody` cannot slip past the denylist on a case-insensitive filesystem.
+            if (not name or name.startswith(("/", "~")) or ".." in Path(name).parts or ":" in name
+                    or _sensitive(name.lower()) or _sensitive(name) or path.is_symlink()
+                    or not path.resolve().is_relative_to(root) or _sensitive(str(path.resolve().relative_to(root)).lower())):
                 raise ValueError(name)
-            text = path.read_text(encoding="utf-8")[:MAX_EXPANSION_FILE_CHARS]
+            # Open without following links, then decide from the descriptor itself so check and read cannot diverge.
+            fd = os.open(path.resolve(), os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+            try:
+                info = os.fstat(fd)
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink > 1 or info.st_dev != root.stat().st_dev:
+                    raise ValueError(name)    # not a regular file, or a hardlink that may alias a file outside the worktree
+                with os.fdopen(fd, "rb", closefd=False) as handle:
+                    text = handle.read(MAX_EXPANSION_FILE_CHARS * 4).decode("utf-8")[:MAX_EXPANSION_FILE_CHARS]
+            finally:
+                os.close(fd)
         except (ValueError, OSError, UnicodeDecodeError):
-            rejected.append(name)
+            rejected.append(safety.sanitize(str(name))[:200])
             continue
         text = safety.redact(text)
         if used + len(text) > limit:
-            rejected.append(name)
+            rejected.append(safety.sanitize(name)[:200])
             continue
         used += len(text)
-        accepted.append(name)
+        accepted.append(safety.sanitize(name)[:200])
         parts.append(f"--- {name} ---\n{text}")
     return "\n".join(parts), accepted, rejected
 
