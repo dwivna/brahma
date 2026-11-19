@@ -31,7 +31,6 @@ Hardening patch (decision Round 13, from the independent review recorded in Roun
 - A transient "overloaded" reply is no longer treated as a quota limit. It is retried up to three times (about
   1, 5 and 10 minutes) inside the same attempt without using a repair cycle or touching quota state, and then
   stops as `blocked` (provider overloaded) instead of stranding the queue.
-
 - Ownership matching uses no regular expressions: a hostile planner pattern can no longer hang the
   coordinator (ReDoS) or raise, and a stray `[` can no longer swallow a `/` and make two tasks own one file.
   Patterns are limited to 200 characters and 16 segments.
