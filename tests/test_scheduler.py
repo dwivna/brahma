@@ -304,8 +304,17 @@ class ServiceRegistration(unittest.TestCase):
             text = plistlib.dumps(data).decode()
             for secret in ("sk-secret", "gh-secret-xyz", "API_KEY", "GH_TOKEN"):
                 self.assertNotIn(secret, text)
-            self.assertEqual(set(data["EnvironmentVariables"]), {"PATH", "PYTHONPATH"})
+            self.assertEqual(set(data["EnvironmentVariables"]) - {"JAVA_HOME"}, {"PATH", "PYTHONPATH"})
             self.assertTrue(Path(data["EnvironmentVariables"]["PYTHONPATH"]).is_absolute())
+
+    def test_plist_carries_java_home_only_when_it_is_a_real_absolute_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "state"
+            with patch.dict(os.environ, {"JAVA_HOME": tmp}):
+                self.assertEqual(scheduler.service_plist(home)["EnvironmentVariables"]["JAVA_HOME"], str(tmp))
+            for bad in ("relative/jdk", str(Path(tmp) / "missing"), ""):
+                with self.subTest(java_home=bad), patch.dict(os.environ, {"JAVA_HOME": bad}):
+                    self.assertNotIn("JAVA_HOME", scheduler.service_plist(home)["EnvironmentVariables"])
 
     def test_install_status_stop_use_private_file_and_launchctl_only(self):
         with tempfile.TemporaryDirectory() as tmp, patch.object(scheduler.sys, "platform", "darwin"):

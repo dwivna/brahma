@@ -200,11 +200,17 @@ LABEL = "dev.dwivna.brahma"
 def service_plist(home: Path) -> dict:
     home = Path(home).expanduser().resolve()
     # Absolute Python/module paths remain valid outside an interactive shell.
-    # Only PATH (to find the signed-in CLIs) is inherited; no credentials are embedded.
+    # Only PATH (to find the signed-in CLIs) and JAVA_HOME (so scheduled checks use the same JDK as the terminal) are
+    # inherited; no credentials are embedded. Without JAVA_HOME a service-run `mvn` can pick a different JDK than the one
+    # the approved checks passed under (found by the first real run: Lombok failed under a newer default JDK).
+    environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+                   "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+    java_home = os.environ.get("JAVA_HOME", "")
+    if java_home and Path(java_home).is_absolute() and Path(java_home).is_dir() and "\x00" not in java_home:
+        environment["JAVA_HOME"] = java_home
     return {"Label": LABEL,
             "ProgramArguments": [str(Path(sys.executable).absolute()), "-m", "brahma", "worker", "--home", str(home)],
-            "EnvironmentVariables": {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                                     "PYTHONPATH": str(Path(__file__).resolve().parents[1])},
+            "EnvironmentVariables": environment,
             "WorkingDirectory": str(home),
             "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
             "StandardOutPath": str(home / "service.log"), "StandardErrorPath": str(home / "service-error.log")}

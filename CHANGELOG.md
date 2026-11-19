@@ -4,6 +4,18 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.12.2
+
+**Fixed** (found by the second live run)
+- The launchd service did not inherit `JAVA_HOME`, so a run resumed by the service after a quota wait used a different default JDK
+  than the terminal that approved it. A Maven project using Lombok then failed to compile (`cannot find symbol: log`) and the
+  failure consumed all three repair attempts. `brahma service install` now records `JAVA_HOME` (only when it is an absolute, existing
+  directory; no credentials). Reinstall the service to pick it up.
+
+**Known, not changed**
+- The approved contract does not bind the toolchain. A check that fails only because the service environment differs from the terminal
+  still counts as a failed check and uses a repair attempt.
+
 ## 0.12.1
 
 **Fixed** (found by the first real run against a live repository)
