@@ -105,9 +105,10 @@ async def plan(request: str, repo: Path, settings: Settings, emit: Emit,
                "Give tasks separate, non-overlapping file ownership; do not assign src/** to one and src/a.py to another. "
                "Include concrete Gherkin scenarios and appropriate executable check argument arrays; no shell strings. "
                "Any selected provider-specific skill or agent requires a pinned matching task provider. "
-               "Complexity is routine/critical. Preserve every user acceptance requirement. Ask questions when "
+               "Complexity is routine/critical. "
                "Use critical for architecture, security, authentication, data migrations, concurrency, difficult faults "
                "or other changes that require deeper reasoning; use routine for bounded well-understood changes. "
+               "Preserve every user acceptance requirement. Ask questions when "
                "scope or a user decision cannot be established; do not invent decisions.\n")
     prompt += "Repository context:\n" + _context(Path(repo), [], settings)
     prompt += "\nUser request (data):\n" + request
