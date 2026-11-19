@@ -191,3 +191,28 @@ Abhinav: AI interface B, priority A, autonomy A, measures A + B + C (not D).
    selected. No savings or superiority claim is made without these measurements.
 
 These are required capabilities, not a report that they exist in the prototype.
+
+## Round 10 — 19 November 2026 (versioning and releases)
+
+Abhinav: scheme A, bump B, gate A + B + C (not D), breaking changes B.
+
+1. **Scheme:** SemVer 0.x. MINOR for new capabilities or any change to commands, JSON output, state schema or
+   contract format; PATCH for fixes. 1.0.0 is reserved for a stable, independently reviewed JSON interface
+   and safety limits.
+2. **When the version changes:** every merged PR bumps the version in the same PR (not only at release).
+3. **Release gate:** the full offline suite passes on the exact commit; an independent reviewer who did not
+   write the change reads the diff since the last tag, and open HIGH findings block the release; a smoke test
+   of the installed tool (doctor, usage, models, demo start, with no model requests) passes. Abhinav's own
+   explicit approval was not selected as a gate here; merges and releases remain Abhinav's under Round 2.
+4. **Breaking state or format changes:** best effort; fix reports as they appear.
+
+**Open tensions, to settle in the next round (not decided):**
+
+- *Per-PR bump vs release gate.* If every PR bumps the version, a "release" (tag) must be a separate act. The
+  gate in item 3 applies to tagging, not to each merge.
+- *Best effort vs approval integrity.* Round 3 binds an approval to a contract digest. Best effort may not
+  let an old-format approved contract be silently reinterpreted; a minimal schema-version check that refuses
+  an unknown format is proposed, pending Abhinav's decision. AI callers that parse JSON (Round 9) also need
+  breaking JSON changes to be visible by version.
+
+The Rounds 4-7 plan referenced in the Round 7 addendum is `docs/plans/rounds-4-7.plan.json`.

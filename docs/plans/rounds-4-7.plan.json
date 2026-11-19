@@ -1,0 +1,155 @@
+{
+  "summary": "Implement Brahma decision Rounds 4–7 after Abhinav approves the Gherkin, file ownership, checks, and budget as one contract. Run the tasks below sequentially in an isolated worktree. This plan covers the terminal and shared local state. The local web view is deferred.",
+  "tasks": [
+    {
+      "title": "Define the local shared record, handoff packets, and repository memory",
+      "instructions": "Extend the existing SQLite store and event log with backward-compatible migrations for typed handoffs, task outcomes, status, interrupts, and attention events. Define a bounded handoff packet containing the locked task Gherkin slice, owned paths, approved check commands, diff or commit reference, verified check results, and structured open findings as applicable to the phase. Materialize read-only per-task packets outside the repository without giving workers access to SQLite or its event log. Store inspectable repository memory keyed by canonical repository identity, covering decisions, conventions, check commands, past failures, and measured outcomes by provider and task type. Implement a repository-scoped forget operation that removes its memory and derived routing history without deleting worktrees, approval records, or run checkpoints. Keep measured usage and estimates in distinct fields.",
+      "files": [
+        "src/brahma/store.py",
+        "src/brahma/handoff.py",
+        "src/brahma/memory.py",
+        "tests/test_shared_record.py"
+      ],
+      "acceptance": [
+        "Existing session databases open after migration, and persisted task state survives reopening.",
+        "Packets reject invalid fields and exclude free-form history, author summaries, raw transcripts, and secrets.",
+        "Workers cannot mutate the coordinator record through the packet interface.",
+        "Forgetting one repository clears its memory and learned routing inputs across restart while preserving other repositories and durable session records."
+      ],
+      "provider": "codex",
+      "complexity": "critical",
+      "scenarios": [
+        "Scenario: A reviewer receives a bounded handoff\n  Given a locked task with a candidate diff and coordinator-verified check results\n  When Brahma materializes the review packet\n  Then the packet contains the task slice, ownership, diff reference, check evidence and open findings\n  And it contains no author summary or conversation history",
+        "Scenario: Forget only the selected repository\n  Given two repositories with stored memory and routing outcomes\n  When the coordinator forgets the first repository and reopens the store\n  Then the first repository has no memory or learned routing inputs\n  And its run checkpoints and the second repository's memory remain available"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    },
+    {
+      "title": "Enforce provider, filesystem, Git, and data boundaries",
+      "instructions": "Add enforceable prelaunch and postflight safety controls in the provider and Git adapters, and expose their results to the workflow. Restrict worker writes to approved ownership and reads away from secrets, environment files, native sign-in material, and other protected paths. Preserve existing signed-in CLI use through the provider's own authentication mechanism. Deny worker access to the coordinator record and prevent workers from invoking Git publication or arbitrary external tools. Validate canonical paths, symlinks, renames, index changes, untracked changes, HEAD and relevant refs against the prelaunch baseline. Restore only attributable violating changes on the isolated branch and preserve pre-existing or unrelated edits. Fail closed where the installed CLI and platform cannot enforce a required restriction, and report that limit. Guard coordinator Git operations against default-branch push, merge and release even under an approved contract. Hard-block history deletion or rewriting (force-push, branch deletion, reset --hard or rebase of shared work, history rewrites) in coordinator Git operations and worker launch; no approval path in this version, and keep it out of automated recovery. Centralize sanitization before logs, packets, or UI events are written. Treat repository files, issue and PR text, web content, and worker output as data. Flag embedded instructions in redacted form for the user and ignore them for action. Repository instruction files apply only when selected and bound to the contract.",
+      "files": [
+        "src/brahma/safety.py",
+        "src/brahma/providers.py",
+        "src/brahma/gittools.py",
+        "src/brahma/context.py",
+        "src/brahma/contracts.py",
+        "tests/test_safety.py",
+        "tests/test_providers.py",
+        "tests/test_contracts.py"
+      ],
+      "acceptance": [
+        "Both supported worker launch paths have fixture coverage for prelaunch containment and fail-closed behavior.",
+        "Brahma checks Git state and ownership after worker execution and blocks readiness on a violation even after safe rollback.",
+        "Default-branch destinations are rejected even if the local branch has an allowed name. Merge and release cannot be triggered by worker input or contract text.",
+        "Synthetic secret markers and embedded commands do not leak into packets or logs or cause actions. Flagged excerpts are redacted.",
+        "Checks expose coordinator-observed exit status for handoffs and honor cancellation.",
+        "Force-push, branch deletion and history rewrites are rejected by the coordinator even when requested by an approved contract."
+      ],
+      "provider": "claude",
+      "complexity": "critical",
+      "scenarios": [
+        "Scenario: A sandbox cannot enforce locked ownership\n  Given a provider whose installed controls cannot enforce the approved write paths or protected reads\n  When Brahma prepares to launch a worker\n  Then no worker starts and the enforcement limitation is recorded",
+        "Scenario: Verification finds a worker change outside ownership\n  Given a prelaunch snapshot with an existing user edit\n  When postflight verification finds an attributable unauthorized worker change\n  Then Brahma restores that worker change safely, preserves the existing edit and blocks readiness",
+        "Scenario: Untrusted text requests publication and secret access\n  Given untrusted text containing an instruction to read an environment file and push to the default branch\n  When Brahma processes that text\n  Then the instruction is flagged in redacted form and neither action is taken"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    },
+    {
+      "title": "Integrate quota-aware routing, proposal drafts, and independent review",
+      "instructions": "Integrate the shared record and safety adapters into engine and session execution. For auto assignments, check fresh provider eligibility first and rank eligible providers using bounded per-repository outcomes grouped by task type. Use simple documented strengths rules below a tested sample threshold and show 'no data yet'. Honor pinned providers, existing sign-in checks, the single bounded attempt with unknown quota, and durable reset waits. Let read-only repository signals such as recorded check failures, stale local branches, and explicitly supplied review feedback produce draft proposals without approval or execution. Generate each worker brief from the locked contract and phase packet. Compact at checkpoints and permit one bounded context expansion on an explicit missing-context report. Use the non-author provider for read-only review of the locked Gherkin and exact diff with verified check results. Track finding severity and evidence, allow one author evidence reply per dispute, and escalate persistent disagreement with both positions. Preserve checkpoint phase, routing choice, context expansion, reply allowance, repair count, and active time through restart. Check containment and the exact reviewed state before readiness or any coordinator commit or publication. Wire session-level pause, stop, note and global kill handling to durable state, including cancellation during checks and commit or publication guards.",
+      "files": [
+        "src/brahma/engine.py",
+        "src/brahma/session.py",
+        "src/brahma/routing.py",
+        "tests/test_engine.py",
+        "tests/test_core.py",
+        "tests/test_integration.py",
+        "tests/test_routing.py"
+      ],
+      "acceptance": [
+        "Quota eligibility overrides learned ranking. Sparse data uses an explicit fallback and unknown usage or quota is represented as unknown.",
+        "Repository signals create proposals only. Worker launch still requires a matching approved contract.",
+        "Readiness requires passing configured checks on the reviewed diff, a valid independent review, no unresolved high-severity findings, and successful postflight verification.",
+        "Persistent disagreement pauses execution for Abhinav and exposes both sanitized positions. Checkpoints prevent a second evidence reply or context expansion after restart.",
+        "Scoped notes take effect at the next checkpoint without live injection. Scope, ownership or permission changes require a newly approved contract."
+      ],
+      "provider": "codex",
+      "complexity": "critical",
+      "scenarios": [
+        "Scenario: Capacity overrides learned ranking\n  Given an auto task and sufficient local evidence favoring a provider whose quota is exhausted\n  When Brahma assigns the task\n  Then it uses an eligible alternative or records a durable wait when no permitted provider can run",
+        "Scenario: An unresolved high-severity finding survives an evidence reply\n  Given an independent reviewer reports a high-severity finding on the locked diff\n  When the author replies with evidence and the reviewer still disagrees\n  Then Brahma checkpoints both positions, blocks readiness and waits for Abhinav",
+        "Scenario: A failed check prompts a proposal\n  Given an observed repository check failure and no approved repair contract\n  When Brahma prepares a repair proposal\n  Then it presents draft Gherkin and starts no worker"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    },
+    {
+      "title": "Expose durable CLI controls and the global kill switch",
+      "instructions": "Bind the CLI and scheduler to the shared Store and Session controls. Add commands for repository-memory inspection and forget, task Stop, Pause, Resume and Note, and one global kill command. Publish a durable idempotent global stop marker before signaling processes. Stop all Brahma-managed workers and the local service, checkpoint active work, cancel pending and claimed jobs, and prevent recovery or quota reset from restarting them until explicit user action. Retain files and history. Synchronize claims, launch, recovery and kill so races cannot start work after the marker. Distinguish terminal detach, temporary service stop, per-task pause, per-task stop and global kill. Use offline process and service doubles in the tests.",
+      "files": [
+        "src/brahma/cli.py",
+        "src/brahma/scheduler.py",
+        "tests/test_cli.py",
+        "tests/test_scheduler.py"
+      ],
+      "acceptance": [
+        "Pause preserves an approved checkpoint for explicit resume. Stop cancels automatic restart. Neither can be bypassed by a quota reset.",
+        "Global kill records the stop, halts managed processes and the service, preserves checkpoints and prevents relaunch after daemon restart.",
+        "Memory commands operate on the selected canonical repository and expose no other repository's data.",
+        "A note is durable across restarts and has no effect on live worker input."
+      ],
+      "provider": "claude",
+      "complexity": "critical",
+      "scenarios": [
+        "Scenario: Kill races with a scheduler claim\n  Given one worker is active and another approved job is ready to be claimed\n  When Abhinav invokes the global kill command\n  Then Brahma stops the active worker and local service and records a retained checkpoint\n  And neither job restarts after quota reset or service recovery without explicit user action",
+        "Scenario: Pause during a quota wait\n  Given an approved task waiting for a known reset\n  When Abhinav pauses it and that reset arrives\n  Then the task remains paused with its checkpoint intact until explicitly resumed"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    },
+    {
+      "title": "Show live terminal status and decision-only attention",
+      "instructions": "Render the existing terminal conversation and panes from the shared session record. Add a plain-language board showing each task's current worker, phase, active time out of sixty minutes, repair cycles, provider capacity as known, unknown or waiting with available reset information, next step, and any decision or blocker. Display measured usage separately from estimates and omit raw transcripts. Connect the terminal Stop, Pause, Resume and Note actions to the same durable controls used by the CLI. Deduplicate attention events across polling and reopening. Notify only for approval needed, escalated disagreement, checks still failing after repairs, lost sign-in, or ready for review.",
+      "files": [
+        "src/brahma/ui.py",
+        "tests/test_ui.py"
+      ],
+      "acceptance": [
+        "The board reflects updates from foreground and scheduler runs through the same persisted session.",
+        "Unknown capacity, usage or reset information is displayed explicitly. Quota waits do not increase active time.",
+        "Each permitted attention event is shown once. Routine progress updates the board without notifying.",
+        "No raw worker transcript appears in the terminal status or notification surfaces."
+      ],
+      "provider": "codex",
+      "complexity": "routine",
+      "scenarios": [
+        "Scenario: A background task enters a quota wait\n  Given the terminal is reopened for an approved session waiting on a known reset\n  When the board refreshes from the shared record\n  Then it shows the provider, waiting phase, reset, unchanged active time, repair count and next step",
+        "Scenario: Attention is limited to an actionable event\n  Given routine progress events followed by a lost-sign-in event\n  When the terminal polls the same records twice\n  Then progress appears on the board and the lost-sign-in notification appears once"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    }
+  ],
+  "questions": [],
+  "checks": [
+    [
+      "git",
+      "diff",
+      "--check"
+    ],
+    [
+      "uv",
+      "run",
+      "python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests",
+      "-v"
+    ]
+  ],
+  "feature": ""
+}
