@@ -51,6 +51,9 @@ def parser():
     p.add_argument("--yes", action="store_true", help="Confirm `forget`; without it nothing is deleted")
     p = sub.add_parser("statusline", help="Claude Code status-line tap: records Claude's own rate-limit numbers for `brahma usage`")
     p.add_argument("--then", metavar="COMMAND", help="Your existing status-line command; it receives the same input and its output is shown")
+    p = sub.add_parser("decide", help="Decide a disputed review: side with the reviewer or the author, then work continues")
+    p.add_argument("session")
+    p.add_argument("--for", dest="side", required=True, choices=("reviewer", "author"))
     p = sub.add_parser("proposals", help="Draft proposals from read-only repository signals; starts nothing, approves nothing")
     p.add_argument("--repo", type=Path, dest="target", help="Repository (defaults to the current one)")
     p.add_argument("--feedback", help="Review feedback you supply (Brahma never goes looking for it)")
@@ -322,6 +325,33 @@ def _main(argv):
                                        "routing outcomes. Sessions, approvals, worktrees and checkpoints are untouched.")
             data = memory.inspect(identity)
             return report(data, json.dumps(data, indent=2))
+        finally:
+            store.close()
+    if args.command == "decide":
+        import time
+        from .models import Event
+        if not (home / "state.sqlite3").exists():
+            raise ValueError("Unknown session")
+        store = Store(home)
+        try:
+            saved = store.session(args.session)
+            waiting = [a for a in store.open_attention(args.session) if a["kind"] == "decision"]
+            disputes = [e for e in store.events_after(args.session, 0, 5000) if e["kind"] == "disagreement"]
+            if not waiting or not disputes:
+                raise ValueError("No disputed review is waiting for a decision")
+            index = json.loads(disputes[-1]["text"])["index"]
+            store.event(args.session, Event("brahma", "user", "dispute_decision", json.dumps({"index": index, "for": args.side})))
+            for item in waiting:
+                store.resolve_attention(item["id"])
+            queued = False
+            if saved["approved_digest"] and not saved["stopped"]:
+                session = Session(store, Path(saved["repo"]), key=args.session)
+                store.enqueue(args.session, session.generation, saved["approved_digest"], time.time(),
+                              "Abhinav decided a disputed review")
+                queued = True
+            return report({"session": args.session, "task": index, "decided_for": args.side, "queued": queued},
+                          f"Recorded: sided with the {args.side} on task {index}."
+                          + (" Queued to continue under the existing approval." if queued else " Run it again to continue."))
         finally:
             store.close()
     if args.command == "statusline":

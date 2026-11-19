@@ -113,7 +113,7 @@ def enforcement(provider: str, role: str) -> Enforcement:
     """
     if provider not in ("codex", "claude"):
         raise ValueError("Unknown provider")
-    readonly = role in ("planner", "reviewer")
+    readonly = role in ("planner", "reviewer", "reply")
     if provider == "codex":
         confinement = "none (read-only sandbox)" if readonly else "confined to the worktree by the workspace-write sandbox"
         limits = ("the sandbox does not restrict which files the worker may read, including files in your home directory",

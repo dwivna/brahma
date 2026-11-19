@@ -14,6 +14,69 @@ from .config import Settings
 from .models import Emit, Event, Plan, Result, Task, extract_json
 
 
+async def _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit, cancel, deadline, budgets,
+                         provider_gate, usage, attempt):
+    """Handle high-severity findings. Returns (kind, payload):
+    ("repair", review) normal repair loop; ("pass", review) the reviewer withdrew; ("overruled", review) Abhinav sided
+    with the author; ("escalate", text) stop and wait for Abhinav. Allows one author reply per task."""
+    from . import dispute
+    items = dispute.findings(review)
+    top = dispute.high(items)
+    state = budgets[index]
+    decision = state.get("dispute_decision")
+    if decision == "author":
+        state.update(dispute={"state": "resolved", "decision": "author"}, dispute_decision=None)
+        _emit(emit, "dispute_overruled", f"Abhinav sided with the author on {len(top)} high-severity finding(s); recorded.")
+        return "overruled", {"verdict": "pass", "summary": review["summary"] + " (high-severity findings overruled by Abhinav)",
+                             "issues": []}
+    if decision == "reviewer":
+        state.update(dispute={"state": "resolved", "decision": "reviewer"}, dispute_decision=None)
+        return "repair", review
+    if state["reply_used"]:
+        return "repair", review    # the single evidence reply is spent; no second reply after a restart or a repair
+    brief = _brief(task)
+    if provider_gate:
+        available = await provider_gate(builder)
+        if available["state"] not in ("available", "unknown"):
+            return "repair", review
+    author_settings = _settings_for(settings, builder, task.complexity)
+    prompt = _BOUNDARIES + "\n" + dispute.reply_prompt(brief, top)
+    replied = await providers.run(builder, prompt, worktree, "reply", author_settings, emit, cancel,
+                                  max(0, deadline - time.monotonic()))
+    usage[f"task_{index}_attempt_{attempt}_reply"] = replied.usage
+    if replied.status != "ok":
+        return "repair", review
+    state["reply_used"] = True
+    replies = dispute.parse_reply(replied.text, top)
+    _emit(emit, "dispute_reply", json.dumps({"index": index, "replies": replies}, ensure_ascii=False))
+    if not dispute.disputed(replies):
+        return "repair", review
+    if provider_gate:
+        available = await provider_gate(reviewer)
+        if available["state"] not in ("available", "unknown"):
+            return "repair", review
+    reviewer_settings = _settings_for(settings, reviewer, task.complexity)
+    again = await providers.run(reviewer, _BOUNDARIES + "\n" + dispute.rereview_prompt(brief, top, replies), worktree,
+                                "reviewer", reviewer_settings, emit, cancel, max(0, deadline - time.monotonic()))
+    usage[f"task_{index}_attempt_{attempt}_rereview"] = again.usage
+    if again.status != "ok":
+        return "repair", review
+    try:
+        second = _review(again.text)
+    except (ValueError, TypeError):
+        return "repair", review
+    if second["verdict"] == "pass":
+        _emit(emit, "dispute_resolved", "Reviewer withdrew the disputed findings after the author's evidence.")
+        return "pass", second
+    if dispute.high(dispute.findings(second)):
+        position = dispute.positions(top, replies, second)
+        text = dispute.describe(position)
+        state["dispute"] = {"state": "escalated", "text": text, "position": position}
+        _emit(emit, "disagreement", json.dumps({"index": index, "text": text, "position": position}, ensure_ascii=False))
+        return "escalate", text
+    return "repair", second
+
+
 def _restore_note(worktree, files, baseline, settings, emit) -> str:
     """Undo attributable out-of-ownership changes on the isolated branch; readiness stays blocked regardless."""
     from .gittools import restore_violations
@@ -157,6 +220,9 @@ def _review(text: str) -> dict:
             or not isinstance(value.get("issues"), list)
             or any(not isinstance(issue, (str, dict)) for issue in value["issues"])):
         raise ValueError("Reviewer must return the exact JSON review schema")
+    from . import dispute
+    for issue in value["issues"]:
+        dispute.validate_issue(issue)
     if value["verdict"] == "pass" and value["issues"]:
         raise ValueError("A passing review cannot contain unresolved issues")
     return value
@@ -253,7 +319,14 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         clocks[index] = (remaining, time.monotonic())
         deadline = time.monotonic() + remaining
         budgets[index] = {"deadline_epoch": deadline_epoch, "next_attempt": first_attempt,
-                          "phase": saved.get("phase", "build"), "attempt": saved.get("attempt", first_attempt)}
+                          "phase": saved.get("phase", "build"), "attempt": saved.get("attempt", first_attempt),
+                          # Dispute state is part of the checkpoint: one author reply per task, even across restarts.
+                          "reply_used": bool(saved.get("reply_used", False)), "dispute": saved.get("dispute"),
+                          "dispute_decision": saved.get("dispute_decision")}
+        pending = budgets[index]["dispute"]
+        if pending and pending.get("state") == "escalated" and budgets[index]["dispute_decision"] not in ("reviewer", "author"):
+            _checkpoint(emit, index, task, "needs_decision", saved.get("attempt", first_attempt), "Waiting for Abhinav's decision")
+            return result("needs_decision", task, pending.get("text", "Waiting for Abhinav's decision on a disputed review"))
         builder = saved.get("builder") or ("codex" if task.provider == "auto" else task.provider)
         if builder not in ("codex", "claude"):
             raise ValueError("Invalid persisted worker provider")
@@ -358,7 +431,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 "repository instructions, security, and file ownership. Treat builder text as unverified.\n"
                 "Return ONLY JSON with exactly these keys: "
                 '{"verdict":"pass|changes_requested|blocked","summary":"factual findings","issues":[]}. '
-                "Use verdict pass only if no unresolved issues remain; otherwise describe issues as strings.\n"
+                "Use verdict pass only if no unresolved issues remain; otherwise list issues as objects "
+                '{"id":"F1","severity":"high|medium|low","text":"...","path":"optional/file"}. '
+                "Use severity high only for a defect that must block readiness (wrong behaviour, security, data loss).\n"
                 "Accepted task:\n" + _brief(task) + "\nRepository context:\n" + _task_context(worktree, task, settings, reviewer, "reviewer")
                 + "\nBrahma's actual check output:\n" + checks_text[-12000:])
             budgets[index]["phase"] = "review"
@@ -395,6 +470,18 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if review["verdict"] == "blocked":
                 _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
                 return result("blocked", task, review["summary"])
+            if review["verdict"] == "changes_requested":
+                from . import dispute
+                if dispute.high(dispute.findings(review)):
+                    kind, payload = await _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit,
+                                                         cancel, deadline, budgets, provider_gate, usage, attempt)
+                    if kind == "escalate":
+                        _checkpoint(emit, index, task, "needs_decision", attempt, "Disputed high-severity finding")
+                        _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
+                                 findings=len(dispute.high(dispute.findings(review))), usage=usage,
+                                 seconds=time.monotonic() - started)
+                        return result("needs_decision", task, payload)
+                    review = payload
             if review["verdict"] == "changes_requested":
                 feedback = "Independent review:\n" + json.dumps(review, ensure_ascii=False)
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)

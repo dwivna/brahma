@@ -50,7 +50,7 @@ class Status(unittest.TestCase):
             store.close()
             code, data = self.status(tmp, session.key)
         self.assertEqual((code, data["exit_code"], data["ok"], data["approved"]), (11, 11, False, False))
-        self.assertEqual(data["outcome"], "needs human approval")
+        self.assertEqual(data["outcome"], "needs a human decision")
 
     def test_ready_paused_stopped_and_waiting_map_to_their_codes(self):
         cases = (({"status": "ready"}, 0), ({"status": "waiting", "approved_digest": "d"}, 10),

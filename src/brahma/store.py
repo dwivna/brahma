@@ -64,7 +64,7 @@ class Store:
         return datetime.now(timezone.utc).isoformat()
 
     # Event kinds whose text is machine-readable JSON read back by the coordinator: not rewritten by redaction.
-    STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome"})
+    STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome", "dispute_reply", "disagreement", "dispute_decision"})
 
     def event(self, session: str, event) -> None:
         if event.kind not in self.STRUCTURED_EVENTS and isinstance(event.text, str):

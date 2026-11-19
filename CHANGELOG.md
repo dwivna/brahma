@@ -4,6 +4,30 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.8.0
+
+Review findings with severity and the one-reply dispute flow (decisions Round 4 item 3 and Round 5 item 4; second part of
+plan task 3).
+
+**Added**
+- Reviewers report issues as objects with `severity` (high, medium, low) and text. A bare string is an unrated
+  finding and counts as medium. A high-severity finding blocks readiness.
+- When the reviewer reports a high-severity finding the author (the builder's provider, read-only, role `reply`) may
+  reply **once per task**, with evidence (a failing check or a file:line reference). A dispute without evidence counts
+  as acceptance. The reviewer then re-inspects with the author's evidence. If it withdraws, the task proceeds to the
+  normal readiness gates (checks on the reviewed diff, ownership, postflight). If it still reports a high finding,
+  Brahma stops with status `needs_decision` (exit code 11), records an attention item and shows both sanitized
+  positions.
+- `brahma decide SESSION --for reviewer|author`: Abhinav's decision. `reviewer` sends the task back to repair;
+  `author` records an overrule and lets the task continue to the readiness gates (checks and ownership still run). The
+  approved job is re-queued; a decision cannot approve anything new.
+- The reply allowance and the dispute state are in the checkpoint: after a restart there is no second reply and no
+  provider call while a dispute waits for a decision.
+
+**Not yet delivered (rest of plan task 3)**
+- Worker briefs from handoff packets, one bounded context expansion, scoped notes at the next checkpoint, and
+  session-level note handling.
+
 ## 0.7.0
 
 Quota-aware routing, outcome recording and draft proposals (decision Round 4; first part of plan task 3).

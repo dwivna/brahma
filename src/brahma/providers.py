@@ -276,7 +276,7 @@ class StreamParser:
 def _command(provider: str, executable: str, cwd: Path, role: str, settings,
              native_session_id: str | None = None) -> list[str]:
     model = settings.model_for(provider)
-    readonly = role in ("planner", "reviewer")
+    readonly = role in ("planner", "reviewer", "reply")
     if native_session_id is not None:
         _native_id(native_session_id)
     if provider == "codex":

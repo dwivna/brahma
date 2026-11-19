@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.7.0.** This README describes the
+**Status: early development prototype, version 0.8.0.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
@@ -225,6 +225,7 @@ brahma pause SESSION_ID
 brahma resume SESSION_ID
 brahma stop SESSION_ID
 brahma kill            # brahma kill --release to lift
+brahma decide SESSION --for reviewer|author   # settle a disputed review
 brahma proposals        # draft proposals from check failures, stale branches, feedback (starts nothing)
 brahma memory show     # what Brahma remembers about this repository
 brahma memory forget --yes   # delete its memory and routing history only
@@ -249,7 +250,7 @@ Exit codes (a proposed table, versioned: changing one is a MINOR version bump):
 | --- | --- |
 | `0` | Ready (or the command succeeded) |
 | `10` | Waiting for provider capacity, or queued to run |
-| `11` | Needs human approval of the contract |
+| `11` | Needs a human decision: contract approval, or a disputed review (`brahma decide`) |
 | `12` | Needs approved checks, so nothing can be marked ready |
 | `13` | Blocked (policy gate, failed check, provider or service problem) |
 | `14` | Stopped, paused or killed by the user |

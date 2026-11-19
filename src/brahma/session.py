@@ -37,6 +37,9 @@ class Session:
     def emit(self, event: Event):
         if event.kind == "quota":
             self.store.observe(json.loads(event.text))
+        if event.kind == "disagreement":
+            self.store.attention(self.key, "decision", "Disputed high-severity review finding: decide with `brahma decide "
+                                 + self.key + " --for reviewer|author`")
         if event.kind == "outcome":
             self._record_outcome(json.loads(event.text))
         if event.kind == "check":
@@ -294,7 +297,15 @@ class Session:
             current = gittools.snapshot_changes(worktree, self.settings.ignored_allowlist)
             head = gittools.git(worktree, "rev-parse", "HEAD")
             current_index = None
+            decisions: dict[int, str] = {}
             for event in self.store.events(self.key):
+                if event["kind"] == "dispute_decision":
+                    try:
+                        said = json.loads(event["text"])
+                        if said.get("for") in ("reviewer", "author") and type(said.get("index")) is int:
+                            decisions[said["index"]] = said["for"]
+                    except (ValueError, TypeError, AttributeError):
+                        pass
                 if event["kind"] == "native_session" and current_index in progress and event["role"] in ("builder", "reviewer"):
                     progress[current_index][event["role"] + "_session"] = event["text"]
                 if event["kind"] == "task_state":
@@ -322,6 +333,10 @@ class Session:
                             completed.add(index)
                         else:
                             completed.discard(index)
+            for index, side in decisions.items():   # Abhinav's decision applies only to a dispute still waiting for it
+                waiting = (progress.get(index) or {}).get("dispute")
+                if waiting and waiting.get("state") == "escalated":
+                    progress[index]["dispute_decision"] = side
             async def monitor_stop():
                 while True:
                     if self.halted():
