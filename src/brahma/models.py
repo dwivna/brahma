@@ -4,6 +4,8 @@ import json
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable
 
+from . import ownership
+
 
 @dataclass
 class Event:
@@ -93,10 +95,8 @@ class Plan:
                 raise ValueError("Unknown provider")
             if row.get("complexity", "routine") not in ("routine", "critical"):
                 raise ValueError("Unknown complexity")
-            if any(p.startswith(("/", "~")) or ".." in p.split("/") or p == ".git" or p.startswith(".git/")
-                   or "\\" in p or "\x00" in p or ":" in p or p.endswith("/")
-                   for p in row["files"]):
-                raise ValueError("File ownership must use repository-relative paths")
+            for owned_path in row["files"]:
+                ownership.validate(owned_path)
             tasks.append(Task(**{k: row[k] for k in
                          ("title", "instructions", "files", "acceptance", "provider", "complexity",
                           "scenarios", "allowed_skills", "allowed_agents") if k in row}))

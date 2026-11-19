@@ -6,11 +6,11 @@ import fcntl
 import json
 from pathlib import Path
 import re
-import fnmatch
 import uuid
 import time
 from dataclasses import asdict, replace
 
+from . import ownership
 from .config import Settings
 from .models import Event, Plan, Result
 from . import gittools
@@ -41,7 +41,7 @@ class Session:
             state["generation"] = self.generation
             if state.get("state") == "ready":
                 worktree = self.store.session(self.key)["worktree"]
-                state["snapshot"] = gittools.snapshot_changes(Path(worktree))
+                state["snapshot"] = gittools.snapshot_changes(Path(worktree), self.settings.ignored_allowlist)
                 state["head"] = gittools.git(Path(worktree), "rev-parse", "HEAD")
             event.text = json.dumps(state)
         event.text = CONTROL.sub("", event.text)
@@ -228,7 +228,7 @@ class Session:
             # Only fully verified task checkpoints are skipped; interrupted work stays for re-review.
             completed = set()
             progress = {}
-            current = gittools.snapshot_changes(worktree)
+            current = gittools.snapshot_changes(worktree, self.settings.ignored_allowlist)
             head = gittools.git(worktree, "rev-parse", "HEAD")
             current_index = None
             for event in self.store.events(self.key):
@@ -254,7 +254,7 @@ class Session:
                         snapshot = state.get("snapshot", {})
                         owned = self.plan.tasks[index - 1].files
                         relevant = {p for p in set(snapshot) | set(current)
-                                    if any(fnmatch.fnmatchcase(p, glob) for glob in owned)}
+                                    if any(ownership.owns(glob, p) for glob in owned)}
                         if all(snapshot.get(p) == current.get(p) for p in relevant):
                             completed.add(index)
                         else:
@@ -277,7 +277,7 @@ class Session:
                 result = await engine.execute(self.plan, worktree, self.settings, self.emit, self.cancel,
                                               completed_indices=completed, task_progress=progress, provider_gate=gate)
                 if result.status == "ready":
-                    ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files])
+                    ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files], ignored_allow=self.settings.ignored_allowlist)
                     if not ok:
                         result = Result("brahma", "blocked", message)
                     elif self.settings.auto_commit:

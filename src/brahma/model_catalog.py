@@ -5,6 +5,8 @@ entitlement, or establish benchmark superiority. Account metadata is discarded.
 """
 from __future__ import annotations
 
+from . import __version__
+
 import asyncio
 import json
 import math
@@ -165,7 +167,7 @@ async def discover_models(provider: str, cancel=None, timeout=8) -> dict:
             models = [_model(row, provider) for row in rows]
         else:
             await send({"id": 1, "method": "initialize", "params": {
-                "clientInfo": {"name": "brahma", "version": "0.1.0"},
+                "clientInfo": {"name": "brahma", "version": __version__},
                 "capabilities": {"experimentalApi": False}}})
             await receive(1)
             await send({"method": "initialized"})

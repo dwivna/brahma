@@ -1,6 +1,8 @@
 """Provider-reported capacity observations; never inferred from request token totals."""
 from __future__ import annotations
 
+from . import __version__
+
 import asyncio
 import json
 import math
@@ -274,7 +276,7 @@ async def probe_codex(cancel: asyncio.Event, timeout: float = 8) -> dict:
                     raise ValueError("Quota RPC output limit")
 
         await send({"id": 1, "method": "initialize", "params": {
-            "clientInfo": {"name": "brahma", "version": "0.1.0"},
+            "clientInfo": {"name": "brahma", "version": __version__},
             "capabilities": {"experimentalApi": False}}})
         await response(1)
         await send({"method": "initialized"})

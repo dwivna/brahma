@@ -6,6 +6,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
+# Mirrors gittools.DEFAULT_IGNORED_ALLOWLIST (kept here to avoid an import cycle; a test asserts equality).
+_DEFAULT_IGNORED = (".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+                    "node_modules", "dist", "*.egg-info")
+
+
 @dataclass
 class Settings:
     planner: str = "codex"
@@ -19,6 +24,7 @@ class Settings:
     auto_commit: bool = True
     publish: bool = False
     checks: list[list[str]] = field(default_factory=list)
+    ignored_allowlist: list[str] = field(default_factory=lambda: list(_DEFAULT_IGNORED))
 
     def model_for(self, provider: str, complexity: str = "routine") -> str:
         if provider not in ("codex", "claude"):
@@ -51,6 +57,11 @@ class Settings:
         if not isinstance(result.checks, list) or any(not isinstance(cmd, list) or not cmd or
                 any(not isinstance(arg, str) or not arg for arg in cmd) for cmd in result.checks):
             raise ValueError("Checks must be arrays of command arguments, never shell strings")
+        allow = result.ignored_allowlist
+        if (not isinstance(allow, list) or len(allow) > 32 or any(
+                not isinstance(item, str) or not item.strip() or len(item) > 100 or "/" in item
+                or "\\" in item or "\x00" in item or item in (".", "..") for item in allow)):
+            raise ValueError("ignored_allowlist must be a short list of directory/file name patterns without slashes")
         return result
 
 

@@ -242,7 +242,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         budgets[index].update(builder=builder, builder_session=saved.get("builder_session"),
                               reviewer_session=saved.get("reviewer_session"))
         feedback = saved.get("feedback", "")
-        baseline = saved.get("baseline", snapshot_changes(worktree))
+        baseline = saved.get("baseline", snapshot_changes(worktree, settings.ignored_allowlist))
         budgets[index].update(baseline=baseline, feedback=feedback)
         _checkpoint(emit, index, task, "assigned")
         resume_phase = budgets[index]["phase"]
@@ -293,7 +293,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 budgets[index]["builder_session"] = built.session_id or native
                 usage[f"task_{index}_attempt_{attempt}_builder"] = built.usage
                 if built.status != "ok":
-                    state = "cancelled" if built.status == "cancelled" else "blocked" if built.status in ("limited", "unavailable") else "incomplete"
+                    state = "cancelled" if built.status == "cancelled" else "blocked" if built.status in ("limited", "unavailable", "overloaded") else "incomplete"
                     if built.status == "limited" and provider_gate:
                         available = await _limited_wait(builder, "builder", provider_gate, emit)
                         _emit(emit, "wait", json.dumps(dict(provider=builder, **available)))
@@ -301,7 +301,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     _checkpoint(emit, index, task, state, attempt, f"Builder {built.status}")
                     return result(state, task, f"Builder {built.status}; draft retained")
             budgets[index]["phase"] = "check"
-            owned, reason = ownership_changes(worktree, task.files, baseline=baseline)
+            owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
             if not owned:
                 _checkpoint(emit, index, task, "blocked", attempt, reason)
                 return result("blocked", task, "File ownership check failed: " + reason)
@@ -375,7 +375,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     continue
                 return result("incomplete", task, "Independent review did not pass after the bounded repairs")
             # Checks can modify files too; require ownership again before accepting readiness.
-            owned, reason = ownership_changes(worktree, task.files, baseline=baseline)
+            owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
             if not owned:
                 _checkpoint(emit, index, task, "blocked", attempt, reason)
                 return result("blocked", task, "File ownership check failed after checks: " + reason)
@@ -396,7 +396,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                                                min(3600, settings.task_timeout), emit)
         if not checked or cancel.is_set():
             return result("cancelled" if cancel.is_set() else "incomplete", detail=checks_text[-1000:])
-        owned, reason = ownership_changes(worktree, [name for task in validated.tasks for name in task.files])
+        owned, reason = ownership_changes(worktree, [name for task in validated.tasks for name in task.files], ignored_allow=settings.ignored_allowlist)
         if not owned:
             return result("blocked", detail="Resume ownership check failed: " + reason)
     if needs_checks:

@@ -1,7 +1,6 @@
 """Human-reviewable feature contracts bound to explicit authority and evidence."""
 from __future__ import annotations
 
-import fnmatch
 import hashlib
 import json
 import os
@@ -11,9 +10,12 @@ import subprocess
 from typing import Iterable
 
 from .discovery import Definition, fingerprint
+from . import ownership
 from .models import Plan
 
 MAX_CONTRACT_BYTES = 512 * 1024
+# 2: gitignore-style ownership patterns, ignored-file detection, ignored_allowlist in models (0.2.0).
+CONTRACT_VERSION = 2
 
 
 def _canonical(value: object) -> bytes:
@@ -54,27 +56,7 @@ def render_feature(plan: Plan) -> str:
 
 
 def _overlap(left: str, right: str) -> bool:
-    if left == right:
-        return True
-    # Fixed components before the first glob establish a disjoint subtree only
-    # when they disagree. Wildcard intersection otherwise fails closed.
-    left_parts, right_parts = left.split("/"), right.split("/")
-    wild = re.compile(r"[*?\[]")
-    for a, b in zip(left_parts, right_parts):
-        if a == b:
-            continue
-        if not wild.search(a) and not wild.search(b):
-            return False
-        break
-    left_glob, right_glob = bool(wild.search(left)), bool(wild.search(right))
-    if not left_glob and not right_glob:
-        # Exact file paths do not implicitly own their descendants.
-        return False
-    if not left_glob:
-        return fnmatch.fnmatchcase(left, right) or "**" in right
-    if not right_glob:
-        return fnmatch.fnmatchcase(right, left) or "**" in left
-    return True
+    return ownership.overlaps(left, right)
 
 
 def validate_ownership(plan: Plan) -> None:
@@ -168,12 +150,16 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
     content = _canonical(payload)
     if len(content) + 512 > MAX_CONTRACT_BYTES:
         raise ValueError("Contract exceeds size limit")
-    return {"version": 1, "payload": payload, "digest": hashlib.sha256(content).hexdigest()}
+    return {"version": CONTRACT_VERSION, "payload": payload, "digest": hashlib.sha256(content).hexdigest()}
 
 
 def _validate(contract: dict) -> dict:
-    if not isinstance(contract, dict) or set(contract) != {"version", "payload", "digest"} or type(contract["version"]) is not int or contract["version"] != 1:
+    if not isinstance(contract, dict) or set(contract) != {"version", "payload", "digest"} or type(contract["version"]) is not int:
         raise ValueError("Unsupported or malformed contract")
+    if contract["version"] != CONTRACT_VERSION:
+        # Never reinterpret an approval made under different rules (Round 11/13).
+        raise ValueError(f"Contract format {contract['version']} is not supported (this Brahma reads "
+                         f"{CONTRACT_VERSION}); its approval is not honoured. Review and approve a new plan")
     if not isinstance(contract["payload"], dict):
         raise ValueError("Contract payload must be an object")
     actual = hashlib.sha256(_canonical(contract["payload"])).hexdigest()

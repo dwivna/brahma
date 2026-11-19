@@ -7,7 +7,7 @@ questions, review its Gherkin contract, then approve a bounded implementation.
 Brahma assigns work, runs checks, asks the other provider to review the changes,
 and saves checkpoints when work stops or a provider reaches its limit.
 
-**Status: early development prototype, version 0.1.0.** This README describes the
+**Status: early development prototype, version 0.2.0.** This README describes the
 merged CLI. [Planned capabilities](#development-status) are listed separately.
 The coordinator runs locally; model requests go through your installed provider
 CLIs to their hosted services. Cost savings have not been benchmarked.
@@ -239,6 +239,8 @@ context_chars = 24000
 auto_commit = true
 publish = false
 checks = []
+# Build caches a check may create inside git-ignored directories (name patterns, no slashes).
+ignored_allowlist = [".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "node_modules", "dist", "*.egg-info"]
 ```
 
 Use `brahma models` or `/models` to check your CLI's advertised models. Before
@@ -264,6 +266,21 @@ Commands must work inside the isolated worktree with its available runtime.
 They are argv arrays, not shell strings; pipes, `&&` and redirection are not
 expanded. Brahma also runs `git diff --check`. Without project check commands,
 the outcome stays `needs_checks` even after a positive model review.
+
+Checks run with the same scrubbed environment as workers: API keys, tokens and
+provider credentials are removed, as are SSH/GPG agent sockets. A check can still
+read ordinary files in your home directory; Brahma does not sandbox checks.
+
+### Ownership patterns
+
+Each task owns the paths listed in its plan. Patterns are gitignore-style and
+anchored at the repository root: `*`, `?` and `[...]` stay within one directory,
+`**` as a whole segment crosses directories, and `src`, `src/` or `src/**` each
+own everything below `src`. So `src/*.py` owns `src/a.py` but not `src/a/b.py`.
+Git-ignored files count as changes: a worker that creates or edits an ignored
+file (for example `.env` or a planted script) is outside its ownership, except
+build caches in `ignored_allowlist`. Names like `.env*`, `*.pem`, `*.key` and
+`credentials*` always block, even inside an owned path.
 
 ## Usage limits and recovery
 
@@ -331,7 +348,8 @@ Git and public bug reports.
 Local storage is not offline AI: selected context goes through the provider CLIs.
 Review selected definitions and check commands. The prototype combines restricted
 CLI settings with post-write ownership/sensitive-path checks. It is not a complete
-per-file security boundary or secret-read prevention guarantee. Stronger
+per-file security boundary: reads of files outside the worktree are guarded only by
+the provider CLIs' settings and prompts, and secret redaction is not implemented. Stronger
 enforcement is in development; this release is not a hardened sandbox.
 
 Native continuation covers Brahma-managed workers, not arbitrary external

@@ -168,6 +168,7 @@ class StreamParser:
         self.completed = False
         self.failed = False
         self.limited = False
+        self.overloaded = False
         self.truncated = False
         self.error = ""
         self._claude_assistant = ""
@@ -259,9 +260,13 @@ class StreamParser:
                 else:
                     info = value.get("rate_limit_info", {})
                     self.report_quota(quota.normalize_claude(info))
-        if self.error and any(word in self.error.lower() for word in
-                              ("rate limit", "usage limit", "quota", "limit reached", "hit your limit", "overloaded")):
+        lowered = self.error.lower()
+        if self.error and any(word in lowered for word in
+                              ("rate limit", "usage limit", "quota", "limit reached", "hit your limit")):
             self.limited = True
+        elif self.error and "overloaded" in lowered:
+            # A transient capacity error, not an account limit: never touches quota state (Round 13).
+            self.overloaded = True
 
 
 def _command(provider: str, executable: str, cwd: Path, role: str, settings,
@@ -288,9 +293,41 @@ def _command(provider: str, executable: str, cwd: Path, role: str, settings,
     return command
 
 
+# Waits between retries of a transiently overloaded provider (about 1, 5 and 10 minutes).
+OVERLOAD_DELAYS = (60.0, 300.0, 600.0)
+
+
 async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
               emit: Emit, cancel: asyncio.Event, timeout: float,
               native_session_id: str | None = None) -> Result:
+    """Run one bounded worker, retrying a transient "overloaded" error inside the same attempt.
+
+    Retries spend no repair cycle and never touch quota state; they stay inside the caller's
+    time budget. If the provider is still overloaded the result status is "overloaded".
+    """
+    started = time.monotonic()
+    result = await _run_once(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id)
+    for delay in OVERLOAD_DELAYS:
+        if result.status != "overloaded":
+            break
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= delay + 1:
+            break
+        emit(Event(provider, role, "progress",
+                   f"Provider overloaded; retrying in {int(delay)}s within this attempt (no repair cycle used)"))
+        try:
+            await asyncio.wait_for(cancel.wait(), delay)
+            return Result(provider, "cancelled", seconds=time.monotonic() - started)
+        except asyncio.TimeoutError:
+            pass
+        result = await _run_once(provider, prompt, cwd, role, settings, emit, cancel,
+                                 timeout - (time.monotonic() - started), native_session_id)
+    return result
+
+
+async def _run_once(provider: str, prompt: str, cwd: Path, role: str, settings,
+                    emit: Emit, cancel: asyncio.Event, timeout: float,
+                    native_session_id: str | None = None) -> Result:
     """Run one bounded worker. A JSON completion marker and exit code zero are required."""
     started = time.monotonic()
     if cancel.is_set():
@@ -386,6 +423,8 @@ async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
             await work
             if parser.limited:
                 status = "limited"
+            elif parser.overloaded:
+                status = "overloaded"
             elif process.returncode != 0 or parser.failed:
                 status = "error"
                 error = parser.error or "Worker exited unsuccessfully"
@@ -411,7 +450,8 @@ async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
         emit(Event(provider, role, "usage", usage=parser.usage))
     if status != "ok":
         detail = error or parser.error or {"timeout": "Worker time limit reached", "cancelled": "Worker cancelled",
-                                          "limited": "Provider limit reached"}.get(status, "Worker failed")
+                                          "limited": "Provider limit reached",
+                                          "overloaded": "Provider overloaded"}.get(status, "Worker failed")
         emit(Event(provider, role, "error", clean_text(detail)))
     return Result(provider, status, parser.final_text or parser.text or error or parser.error, parser.usage,
                   parser.session_id, time.monotonic() - started)

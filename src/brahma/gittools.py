@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 
+from . import ownership
 from .models import Event
 
 
@@ -43,7 +44,41 @@ def create_worktree(repo: Path, home: Path, session: str, base_revision: str = "
     return path
 
 
-def changed_paths(repo: Path) -> list[str]:
+# Build caches that checks legitimately create inside an ignored directory (Round 13).
+DEFAULT_IGNORED_ALLOWLIST = (".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+                             "node_modules", "dist", "*.egg-info")
+
+
+def _allowed_ignored(path: str, allow) -> bool:
+    return any(fnmatch.fnmatchcase(part, pattern) for part in Path(path).parts for pattern in allow)
+
+
+def _ls_ignored(repo: Path, *extra: str) -> list[str]:
+    result = subprocess.run(["git", "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
+                            capture_output=True, check=True, timeout=30)
+    return [name for name in result.stdout.decode("utf-8", errors="strict").split("\0") if name]
+
+
+def ignored_paths(repo: Path, allow=None) -> list[str]:
+    """Git-ignored files that exist, minus the allowlisted build caches.
+
+    `git status` never reports ignored files, so a worker could create or alter `.env` or
+    a planted script unseen. Fully ignored directories are listed once and skipped cheaply
+    when allowlisted; any other ignored directory is expanded to its files.
+    """
+    allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
+    found = []
+    for name in _ls_ignored(repo, "--directory"):
+        if _allowed_ignored(name.rstrip("/"), allow):
+            continue
+        if name.endswith("/"):
+            found.extend(item for item in _ls_ignored(repo, "--", name) if not _allowed_ignored(item, allow))
+        else:
+            found.append(name)
+    return found
+
+
+def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
     result = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15)
@@ -57,6 +92,7 @@ def changed_paths(repo: Path) -> list[str]:
             if index < len(chunks) and chunks[index]:
                 paths.append(chunks[index])
         index += 1
+    paths.extend(ignored_paths(repo, ignored_allow))
     return sorted(set(paths))
 
 
@@ -72,22 +108,27 @@ def _fingerprint(path: Path) -> str:
     return str(path.stat().st_mode) + ":" + digest.hexdigest()
 
 
-def snapshot_changes(worktree: Path) -> dict[str, str]:
-    return {name: _fingerprint(worktree / name) for name in changed_paths(worktree)}
+def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:
+    return {name: _fingerprint(worktree / name) for name in changed_paths(worktree, ignored_allow)}
 
 
-def ownership_changes(worktree: Path, files: list[str], baseline=None) -> tuple[bool, str]:
-    current = changed_paths(worktree)
+_SENSITIVE_PREFIXES = (".env", "credentials", ".credentials")
+
+
+def _sensitive(path: str) -> bool:
+    return any(part in (".brahma", "custody", ".git") or part.startswith(_SENSITIVE_PREFIXES)
+               or part.endswith((".pem", ".key")) for part in Path(path).parts)
+
+
+def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_allow=None) -> tuple[bool, str]:
+    current = changed_paths(worktree, ignored_allow)
     if baseline is None:
         paths = current
     else:
         paths = [name for name in sorted(set(current) | set(baseline)) if name not in baseline or
                  _fingerprint(worktree / name) != baseline[name]]
-    outside = [name for name in paths if not any(fnmatch.fnmatchcase(name, pattern) or
-                (pattern.endswith("/") and name.startswith(pattern)) for pattern in files)]
-    sensitive = [name for name in paths if any(part == ".env" or part.startswith(".env.") or
-                 part in (".brahma", "custody", ".git") or part.endswith((".pem", ".key"))
-                 for part in Path(name).parts)]
+    outside = [name for name in paths if not any(ownership.owns(pattern, name) for pattern in files)]
+    sensitive = [name for name in paths if _sensitive(name)]
     sensitive.extend(name for name in paths if (worktree / name).is_symlink() and
                      not (worktree / name).resolve().is_relative_to(worktree.resolve()))
     if outside or sensitive:
@@ -122,6 +163,20 @@ async def _stop(process):
         await process.wait()
 
 
+def check_env() -> dict[str, str]:
+    """Environment for approved checks: worker-written code runs here, so no credentials.
+
+    Same scrubbing as provider workers, plus agent sockets that would let a test use the
+    owner's SSH/GPG identity. A home-directory read is NOT prevented (Round 13).
+    """
+    from .providers import child_env
+    env = child_env()
+    for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "GIT_ASKPASS", "SSH_ASKPASS"):
+        env.pop(name, None)
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
 async def run_checks(worktree, checks, cancel, timeout, emit):
     deadline = time.monotonic() + timeout
     commands = [["git", "-c", "core.hooksPath=/dev/null", "diff", "--check"], *checks]
@@ -131,7 +186,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit):
             return False, "Checks cancelled or time budget exhausted"
         emit(Event(kind="check", text="Running approved check: " + " ".join(command)))
         try:
-            process = await asyncio.create_subprocess_exec(*command, cwd=worktree,
+            process = await asyncio.create_subprocess_exec(*command, cwd=worktree, env=check_env(),
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
         except OSError:
             return False, "Approved check could not start: " + command[0]
