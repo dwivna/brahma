@@ -4,6 +4,28 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.9.0
+
+Packet-driven briefs, bounded context expansion and scoped notes (finishes plan task 3).
+
+**Fixed (found by the automated security review of 0.8.0)**
+- A reviewer's `blocked` verdict on the dispute re-review fell through to readiness. A `blocked` re-review now blocks the
+  task, and only an explicit `pass` can reach readiness (allow-list instead of deny-list).
+- Finding `id` and `path` are sanitized as well as the text, because dispute events are stored unredacted.
+
+**Added**
+- Builder and reviewer briefs carry the validated handoff packet for their phase (Gherkin slice, owned paths, approved
+  checks, diff reference, coordinator-verified check results), written read-only outside the repository. If a packet
+  cannot be built the brief falls back to the task alone.
+- One bounded context expansion: a builder line `MISSING_CONTEXT: a.py, b.py` makes Brahma add up to five named files
+  (12000 characters each, redacted; no symlinks, outside paths or sensitive names) and relaunch once. It is recorded in
+  the checkpoint and never repeats after a restart.
+- `brahma note SESSION "text" [--task N]`: a sanitized note applied at the next checkpoint, never to a running worker.
+  Notes are guidance and cannot change scope, ownership, permissions or checks.
+
+**Not delivered**
+- Pause, stop and note handling is unchanged during checks and publication beyond the existing kill and pause gates.
+
 ## 0.8.0
 
 Review findings with severity and the one-reply dispute flow (decisions Round 4 item 3 and Round 5 item 4; second part of

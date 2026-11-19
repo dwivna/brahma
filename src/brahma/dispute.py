@@ -22,13 +22,14 @@ def findings(review: dict) -> list[dict]:
     out = []
     for number, issue in enumerate(review.get("issues", [])[:MAX_FINDINGS], 1):
         if isinstance(issue, str):
-            out.append({"id": f"F{number}", "severity": "medium", "text": issue[:MAX_TEXT], "path": None})
+            out.append({"id": f"F{number}", "severity": "medium", "text": safety.sanitize(issue)[:MAX_TEXT], "path": None})
             continue
         severity = issue.get("severity", "medium")
-        out.append({"id": str(issue.get("id") or f"F{number}")[:40],
+        # Every string is sanitized here: structured events are stored unredacted, so nothing secret may enter them.
+        out.append({"id": safety.sanitize(str(issue.get("id") or f"F{number}"))[:40],
                     "severity": severity if severity in SEVERITIES else "medium",
-                    "text": str(issue.get("text", ""))[:MAX_TEXT],
-                    "path": issue.get("path") if isinstance(issue.get("path"), str) else None})
+                    "text": safety.sanitize(str(issue.get("text", "")))[:MAX_TEXT],
+                    "path": safety.sanitize(issue["path"])[:300] if isinstance(issue.get("path"), str) else None})
     return out
 
 

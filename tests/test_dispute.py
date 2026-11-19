@@ -54,6 +54,14 @@ class Schema(unittest.TestCase):
         self.assertNotIn("SYNTHETIC", dispute.describe(position))
 
 
+    def test_id_and_path_are_sanitized_too(self):
+        secret = "sk-SYNTHETICabcdefghij123456"
+        item = dispute.findings({"issues": [{"id": "F1", "severity": "high", "text": "t", "path": "cfg/" + secret}]})[0]
+        self.assertNotIn("SYNTHETIC", json.dumps(item))
+        self.assertNotIn("SYNTHETIC", json.dumps(dispute.positions([item], {}, {"summary": "", "issues": [
+            {"id": "F1", "severity": "high", "text": "t", "path": "cfg/" + secret}]})))
+
+
 class Flow(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.events, self.calls = [], []
@@ -148,6 +156,14 @@ class Flow(unittest.IsolatedAsyncioTestCase):
                                       ("reviewer", Result("claude", "ok", review_text("pass", [])))], progress={1: saved})
         self.assertEqual(result.status, "ready")
         self.assertNotIn("reply", [c[1] for c in self.calls])
+
+    async def test_a_blocked_rereview_blocks_the_task_and_never_reaches_readiness(self):
+        result = await self.run_flow([
+            ("builder", Result("codex", "ok", "done")), ("reviewer", Result("claude", "ok", review_text())),
+            ("reply", Result("codex", "ok", reply_text())),
+            ("reviewer", Result("claude", "ok", review_text("blocked", [], "Cannot be accepted")))])
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(self.kinds("task_state")[-1]["state"], "blocked")
 
     async def test_an_accepting_author_goes_straight_to_repair_with_no_second_review_of_the_dispute(self):
         result = await self.run_flow([

@@ -14,6 +14,34 @@ from .config import Settings
 from .models import Emit, Event, Plan, Result, Task, extract_json
 
 
+def _packet(settings, task: Task, index: int, phase: str, worktree, check_results=None):
+    """Validated phase packet, written read-only outside the repository when a state home is known.
+
+    Returns None when a packet cannot be built (for example the worktree has no commit yet); the brief then carries the
+    task alone, exactly as before. A packet problem never stops work.
+    """
+    from . import briefs, handoff
+    session = getattr(settings, "_session_key", None) or "000000000000"
+    diff_ref = None
+    if phase == "review":
+        try:
+            import subprocess
+            head = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True, capture_output=True, timeout=15)
+            diff_ref = head.stdout.strip() if head.returncode == 0 else None
+        except (OSError, subprocess.SubprocessError):
+            diff_ref = None
+        if not diff_ref:
+            return None
+    try:
+        packet = briefs.make_packet(task, index, phase, session, settings.checks, diff_ref=diff_ref, check_results=check_results)
+        home = getattr(settings, "_packet_home", None)
+        if home is not None:
+            handoff.materialize(Path(home), packet)
+        return packet
+    except (ValueError, OSError):
+        return None
+
+
 async def _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit, cancel, deadline, budgets,
                          provider_gate, usage, attempt):
     """Handle high-severity findings. Returns (kind, payload):
@@ -145,7 +173,8 @@ def _settings_for(settings: Settings, provider: str, complexity: str) -> Setting
         raise ValueError(f"No approved {provider} {complexity} model is advertised; update model preferences and approve a new plan")
     result = replace(settings, **{provider + "_model": settings.model_for(provider, complexity)})
     # dataclasses.replace only copies public fields; keep the locked context and evidence.
-    for name in ("_model_selection", "_shared_contract", "_definition_catalog", "_routing_history"):
+    for name in ("_model_selection", "_shared_contract", "_definition_catalog", "_routing_history", "_session_key",
+                 "_packet_home", "_notes"):
         if hasattr(settings, name):
             setattr(result, name, getattr(settings, name))
     return result
@@ -322,7 +351,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                           "phase": saved.get("phase", "build"), "attempt": saved.get("attempt", first_attempt),
                           # Dispute state is part of the checkpoint: one author reply per task, even across restarts.
                           "reply_used": bool(saved.get("reply_used", False)), "dispute": saved.get("dispute"),
-                          "dispute_decision": saved.get("dispute_decision")}
+                          "dispute_decision": saved.get("dispute_decision"),
+                          # One bounded context expansion and the notes already applied survive a restart too.
+                          "expansion": saved.get("expansion"), "notes_seen": int(saved.get("notes_seen", 0) or 0)}
         pending = budgets[index]["dispute"]
         if pending and pending.get("state") == "escalated" and budgets[index]["dispute_decision"] not in ("reviewer", "author"):
             _checkpoint(emit, index, task, "needs_decision", saved.get("attempt", first_attempt), "Waiting for Abhinav's decision")
@@ -365,8 +396,19 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             except (OSError, ValueError, RuntimeError) as exc:
                 _checkpoint(emit, index, task, "blocked", attempt, str(exc))
                 return result("blocked", task, str(exc))
+            from . import briefs
+            packet = _packet(settings, task, index, "repair" if feedback else "build", worktree)
             prompt = _BOUNDARIES + "\nYou are the builder. Implement only this accepted task:\n"
-            prompt += _brief(task) + "\nRepository context:\n" + context
+            prompt += briefs.brief(task, packet) + "\nRepository context:\n" + context
+            extra = budgets[index].get("expansion")
+            if extra:
+                widened, _, _ = briefs.expansion(worktree, extra, settings.context_chars)
+                prompt += "\nAdditional files you asked for (one-time expansion):\n" + widened
+            note_text, seen = briefs.notes_for(getattr(settings, "_notes", []), index, budgets[index]["notes_seen"])
+            if note_text:
+                prompt += note_text
+                budgets[index]["notes_seen"] = seen
+                _emit(emit, "note_applied", f"Applied notes up to #{seen} at this checkpoint")
             if feedback:
                 prompt += "\nPrevious attempt feedback; repair within the same accepted scope:\n" + feedback[-12000:]
             prompt += "\nFinish with a concise factual summary of changes and remaining limitations."
@@ -399,6 +441,24 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         state = "waiting"
                     _checkpoint(emit, index, task, state, attempt, f"Builder {built.status}")
                     return result(state, task, f"Builder {built.status}; draft retained")
+                wanted = briefs.missing_context(built.text)
+                if wanted and not budgets[index].get("expansion"):
+                    # One bounded widening on an explicit report; never a second, even after a restart.
+                    widened, accepted, rejected = briefs.expansion(worktree, wanted, settings.context_chars)
+                    budgets[index]["expansion"] = accepted or ["(none accepted)"]
+                    _emit(emit, "context_expansion", json.dumps({"index": index, "accepted": accepted, "rejected": rejected}))
+                    if accepted and not cancel.is_set() and time.monotonic() < deadline:
+                        again = await providers.run(builder, prompt + "\nAdditional files you asked for (one-time expansion):\n"
+                                                    + widened, worktree, "builder", builder_settings, emit, cancel,
+                                                    max(0, deadline - time.monotonic()),
+                                                    **({"native_session_id": budgets[index]["builder_session"]}
+                                                       if budgets[index].get("builder_session") else {}))
+                        budgets[index]["builder_session"] = again.session_id or budgets[index].get("builder_session")
+                        usage[f"task_{index}_attempt_{attempt}_builder_widened"] = again.usage
+                        if again.status != "ok":
+                            state = "cancelled" if again.status == "cancelled" else "incomplete"
+                            _checkpoint(emit, index, task, state, attempt, f"Builder {again.status} after context expansion")
+                            return result(state, task, f"Builder {again.status}; draft retained")
             budgets[index]["phase"] = "check"
             owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
             if not owned:
@@ -410,8 +470,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 state = "cancelled" if cancel.is_set() else "incomplete"
                 _checkpoint(emit, index, task, state, attempt)
                 return result(state, task, "Stopped before checks; draft retained")
+            check_results: list = []
             checked, checks_text = await run_checks(worktree, settings.checks, cancel,
-                                                   max(0, deadline - time.monotonic()), emit)
+                                                   max(0, deadline - time.monotonic()), emit, check_results)
             if cancel.is_set():
                 _checkpoint(emit, index, task, "cancelled", attempt)
                 return result("cancelled", task, "Stopped during checks; draft retained")
@@ -434,7 +495,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 "Use verdict pass only if no unresolved issues remain; otherwise list issues as objects "
                 '{"id":"F1","severity":"high|medium|low","text":"...","path":"optional/file"}. '
                 "Use severity high only for a defect that must block readiness (wrong behaviour, security, data loss).\n"
-                "Accepted task:\n" + _brief(task) + "\nRepository context:\n" + _task_context(worktree, task, settings, reviewer, "reviewer")
+                "Accepted task and handoff packet (diff_ref is the commit the changes are measured against):\n"
+                + briefs.brief(task, _packet(settings, task, index, "review", worktree, check_results=check_results))
+                + "\nRepository context:\n" + _task_context(worktree, task, settings, reviewer, "reviewer")
                 + "\nBrahma's actual check output:\n" + checks_text[-12000:])
             budgets[index]["phase"] = "review"
             _checkpoint(emit, index, task, "reviewing", attempt)
@@ -482,6 +545,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                                  seconds=time.monotonic() - started)
                         return result("needs_decision", task, payload)
                     review = payload
+            if review["verdict"] == "blocked":     # a blocked re-review stops the task; it is never escalated or overridden
+                _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
+                return result("blocked", task, review["summary"])
             if review["verdict"] == "changes_requested":
                 feedback = "Independent review:\n" + json.dumps(review, ensure_ascii=False)
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)
@@ -492,6 +558,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
                          findings=len(review.get("issues", [])) or 1, usage=usage, seconds=time.monotonic() - started)
                 return result("incomplete", task, "Independent review did not pass after the bounded repairs")
+            if review["verdict"] != "pass":        # allow-list: only an explicit pass may reach readiness
+                _checkpoint(emit, index, task, "blocked", attempt, "Review did not pass")
+                return result("blocked", task, "Review did not pass")
             # Checks can modify files too; require ownership again before accepting readiness.
             owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
             if not owned:

@@ -65,6 +65,20 @@ class Session:
                 self.store.event(self.key, note)
                 self.callback(note)
 
+    def _notes(self):
+        """Notes Abhinav left for this session; applied by the engine at its next checkpoint, never mid-run."""
+        from .briefs import Note
+        notes = []
+        for event in self.store.events_after(self.key, 0, 5000):
+            if event["kind"] != "user_note":
+                continue
+            try:
+                data = json.loads(event["text"])
+                notes.append(Note(event["seq"], data.get("task") if type(data.get("task")) is int else None, str(data["text"])))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+        return notes
+
     def _memory(self):
         from .memory import Memory, repo_id
         return Memory(self.store), repo_id(self.repo)
@@ -272,6 +286,9 @@ class Session:
         contract, settings, catalog = self.approved_contract()
         settings._definition_catalog = catalog.entries
         settings._shared_contract = contract
+        settings._session_key = self.key
+        settings._packet_home = self.store.home
+        settings._notes = self._notes()
         try:
             memory, repo = self._memory()
             settings._routing_history = memory.routing_history(repo)

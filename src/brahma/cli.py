@@ -51,6 +51,10 @@ def parser():
     p.add_argument("--yes", action="store_true", help="Confirm `forget`; without it nothing is deleted")
     p = sub.add_parser("statusline", help="Claude Code status-line tap: records Claude's own rate-limit numbers for `brahma usage`")
     p.add_argument("--then", metavar="COMMAND", help="Your existing status-line command; it receives the same input and its output is shown")
+    p = sub.add_parser("note", help="Leave a note for a session; it is applied at the next checkpoint, never mid-run")
+    p.add_argument("session")
+    p.add_argument("text")
+    p.add_argument("--task", type=int, help="Apply only to this task number (default: every task)")
     p = sub.add_parser("decide", help="Decide a disputed review: side with the reviewer or the author, then work continues")
     p.add_argument("session")
     p.add_argument("--for", dest="side", required=True, choices=("reviewer", "author"))
@@ -325,6 +329,23 @@ def _main(argv):
                                        "routing outcomes. Sessions, approvals, worktrees and checkpoints are untouched.")
             data = memory.inspect(identity)
             return report(data, json.dumps(data, indent=2))
+        finally:
+            store.close()
+    if args.command == "note":
+        from . import briefs
+        from .models import Event
+        if not (home / "state.sqlite3").exists():
+            raise ValueError("Unknown session")
+        text = briefs.clean_note(args.text)
+        store = Store(home)
+        try:
+            store.session(args.session)
+            if args.task is not None and args.task < 1:
+                raise ValueError("Task numbers start at 1")
+            store.event(args.session, Event("brahma", "user", "user_note", json.dumps({"task": args.task, "text": text}, ensure_ascii=False)))
+            return report({"session": args.session, "task": args.task},
+                          "Note saved. It is applied at the next checkpoint (not to work already running) and cannot change "
+                          "scope, ownership, permissions or checks; those need a newly approved contract.")
         finally:
             store.close()
     if args.command == "decide":
