@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import itertools
+import random
+import time
 import unittest
 
 from brahma import ownership
@@ -84,6 +87,64 @@ class Overlaps(unittest.TestCase):
         plan.tasks = [Task("One", "i", ["src"], ["ok"]), Task("Two", "i", ["src/a.py"], ["ok"])]
         with self.assertRaises(ValueError):
             validate_ownership(plan)
+
+
+class Hostile(unittest.TestCase):
+    """Planner patterns are untrusted and worker file names are attacker-shaped (independent review H1/H2)."""
+
+    def test_pathological_patterns_are_bounded_in_time(self):
+        cases = (("*a" * 30 + "b", "a" * 60), ("a*" * 50 + "b", "a" * 80), ("**/" * 30 + "x", "a/" * 40 + "y"),
+                 ("*/**/" * 15 + "x", "a/" * 40), ("**/a/" * 12 + "z", "a/" * 40))
+        started = time.monotonic()
+        for pattern, path in cases:
+            with self.subTest(pattern=pattern[:20]):
+                ownership.owns(pattern, path.rstrip("/"))
+                ownership.overlaps(pattern, path.rstrip("/"))
+        self.assertLess(time.monotonic() - started, 2.0)
+
+    def test_validate_caps_length_and_depth(self):
+        for bad in ("a" * 201, "/".join("a" * 17), "a/" * 20 + "b"):
+            with self.subTest(length=len(bad)), self.assertRaises(ValueError):
+                ownership.validate(bad)
+        ownership.validate("a/" * 15 + "b")
+
+    def test_malformed_brackets_never_raise_and_stay_in_their_segment(self):
+        for pattern in ("[!]a]", "[]a]", "a[b", "[", "[]", "[!", "a[b/[^a]", "x[a-]", "[a-z", "[[]"):
+            with self.subTest(pattern=pattern):
+                ownership.validate(pattern) if pattern.strip("/") else None
+                for path in ("a", "ab", "]", "a]", "a/b", "[", "x-"):
+                    ownership.owns(pattern, path)
+                    ownership.overlaps(pattern, path)
+        self.assertTrue(ownership.owns("[!]a]", "b"))        # not `]` and not `a`
+        self.assertFalse(ownership.owns("[!]a]", "a"))
+        self.assertTrue(ownership.owns("[]a]", "]"))          # a leading `]` is a literal member
+        self.assertTrue(ownership.owns("a[b", "a[b"))         # unterminated `[` is an ordinary character
+        # A stray `[` must not pair with a `]` in a later segment and swallow the `/`.
+        self.assertFalse(ownership.owns("a[b/[^a]", "ab"))
+        self.assertTrue(ownership.owns("a[b/[^a]", "a[b/c"))
+        self.assertFalse(ownership.overlaps("ab/", "a[b/[^a]"))  # provably disjoint now: `a[b` is literal
+
+    def test_overlaps_is_sound_against_brute_force(self):
+        """If any path is owned by both patterns, overlaps() must say True (seeded, deterministic)."""
+        rng = random.Random(1307)
+        atoms = ["a", "b", "*", "?", "**", "[ab]", "[!a]", "a*", "*b", "[", "]", "[!]a]"]
+        names = ["a", "b", "ab", "ba", "[", "]", "a]", "c"]
+        paths = [ "/".join(p) for depth in (1, 2, 3) for p in itertools.product(names, repeat=depth)]
+        def pattern():
+            parts = [rng.choice(atoms) for _ in range(rng.randint(1, 3))]
+            text = "/".join(parts)
+            return text + "/" if rng.random() < 0.15 else text
+        unsound = []
+        for _ in range(250):
+            left, right = pattern(), pattern()
+            try:
+                ownership.validate(left), ownership.validate(right)
+            except ValueError:
+                continue
+            both = any(ownership.owns(left, path) and ownership.owns(right, path) for path in paths)
+            if both and not ownership.overlaps(left, right):
+                unsound.append((left, right))
+        self.assertEqual(unsound, [])
 
 
 if __name__ == "__main__":

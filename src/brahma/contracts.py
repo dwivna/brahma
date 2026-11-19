@@ -74,7 +74,9 @@ def _instructions(repo: Path, plan: Plan) -> dict[str, str]:
         for owned in task.files:
             prefix = re.split(r"[*?\[]", owned, maxsplit=1)[0]
             candidate = repo / prefix
-            if not prefix.endswith("/"):
+            if ownership.is_subtree(owned) and (repo / owned.rstrip("/")).is_dir():
+                candidate = repo / owned.rstrip("/")  # a bare directory owns its subtree (AGENTS.md inside it applies)
+            elif not prefix.endswith("/"):
                 candidate = candidate.parent
             while candidate != repo:
                 if not candidate.is_relative_to(repo):

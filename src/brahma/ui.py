@@ -253,7 +253,13 @@ class BrahmaApp(App):
                 saved = self.store.session(self.session.key)
                 if saved["contract"]:
                     from .contracts import read_contract
-                    contract = read_contract(Path(saved["contract"]))
+                    try:
+                        contract = read_contract(Path(saved["contract"]))
+                    except ValueError as error:
+                        # An old-format or damaged stored contract must not crash the terminal on restore.
+                        contract = None
+                        lines.append("Stored contract cannot be used: " + str(error) + ". Describe the goal again to create a new plan.")
+                if saved["contract"] and contract is not None:
                     lines.extend(("Contract: " + contract["digest"], "Feature file: " + str(Path(saved["contract"]).with_suffix(".feature")),
                                   contract["payload"]["feature"],
                                   "Checks: " + json.dumps(contract["payload"]["checks"]),

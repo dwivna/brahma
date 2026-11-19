@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -60,7 +61,8 @@ class Settings:
         allow = result.ignored_allowlist
         if (not isinstance(allow, list) or len(allow) > 32 or any(
                 not isinstance(item, str) or not item.strip() or len(item) > 100 or "/" in item
-                or "\\" in item or "\x00" in item or item in (".", "..") for item in allow)):
+                or "\\" in item or "\x00" in item or item in (".", "..")
+                or not re.search(r"[A-Za-z0-9_]", item) for item in allow)):
             raise ValueError("ignored_allowlist must be a short list of directory/file name patterns without slashes")
         return result
 

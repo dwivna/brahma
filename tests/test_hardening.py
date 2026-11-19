@@ -10,7 +10,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from brahma import config, gittools
+from brahma import config, contracts, gittools
+from brahma.models import Plan, Task
 
 
 def make_repo(root: Path, ignore: str = ".env\n*.log\n.venv/\n__pycache__/\nbuild/\n*.sh\n") -> Path:
@@ -106,6 +107,94 @@ class CommitWithIgnoredFiles(Fixture):
         self.write(".env", "TOKEN=1\n")
         with self.assertRaises(ValueError):
             gittools.commit_changes(self.repo, "x")
+
+
+class AllowlistAbuse(Fixture):
+    """Independent review M1: an allowlisted name must not hide a planted secret or a disguised file."""
+    IGNORE = ".env\n*.log\n.venv/\n__pycache__/\nbuild/\n*.sh\ndist/\nnode_modules/\n*.egg-info/\n.venv\n"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.repo = make_repo(Path(self.tmp.name), self.IGNORE)
+
+    def test_env_file_planted_inside_an_allowlisted_directory_is_still_seen(self):
+        for name in ("dist/.env", "src/dist/.env.local", "node_modules/x/.env", "pkg.egg-info/.envrc"):
+            with self.subTest(name=name):
+                self.write(name)
+                ok, message = gittools.ownership_changes(self.repo, ["**"])
+                self.assertFalse(ok, name)
+                self.assertIn(name, message)
+                (self.repo / name).unlink()
+
+    def test_ordinary_package_files_inside_caches_are_not_flagged(self):
+        # certifi ships cacert.pem and botocore ships credentials.py; a venv must not trip the gate.
+        self.write(".venv/lib/site-packages/certifi/cacert.pem")
+        self.write(".venv/lib/site-packages/botocore/credentials.py")
+        self.write("node_modules/x/server.key.js")
+        self.assertTrue(gittools.ownership_changes(self.repo, ["src/**"])[0])
+
+    def test_a_symlink_or_file_that_merely_carries_an_allowlisted_name_is_not_tolerated(self):
+        outside = Path(self.tmp.name + "-outside")
+        outside.mkdir()
+        self.addCleanup(lambda: outside.rmdir())
+        (self.repo / ".venv").symlink_to(outside)           # a symlink named like the cache directory
+        ok, message = gittools.ownership_changes(self.repo, ["src/**"])
+        self.assertFalse(ok)
+        self.assertIn(".venv", message)
+        (self.repo / ".venv").unlink()
+        self.write("dist", "not a directory\n")            # a *file* named dist
+        ok, message = gittools.ownership_changes(self.repo, ["src/**"])
+        self.assertFalse(ok)
+        self.assertIn("dist", message)
+
+
+class CheckEnvSurvivors(unittest.TestCase):
+    """Independent review M5: names the first denylist missed."""
+    def test_additional_secret_names_are_removed_and_tools_still_work(self):
+        secrets = {"NPM_CONFIG_//registry.npmjs.org/:_authtoken": "t", "STRIPE_KEY": "k", "SECRET_KEY": "k",
+                   "PRIVATE_KEY": "k", "DB_PASS": "p", "CLIENT_SECRET_VALUE": "s", "SENTRY_DSN": "d",
+                   "SLACK_WEBHOOK_URL": "u", "GOOGLE_APPLICATION_CREDENTIALS": "/x", "KUBECONFIG": "/k",
+                   "AWS_SHARED_CREDENTIALS_FILE": "/c", "NETRC": "/n", "DATABASE_URL": "postgres://u:p@h/d",
+                   "GH_TOKEN": "t", "HF_TOKEN": "t", "NPM_TOKEN": "t", "DOCKER_CONFIG": "/d", "AWS_PROFILE": "p"}
+        keep = {"PATH": "/usr/bin", "HOME": "/home/x", "LANG": "en_US.UTF-8", "VIRTUAL_ENV": "/v", "TMPDIR": "/t",
+                "PYTHONPATH": "/src", "JAVA_HOME": "/j", "XDG_CACHE_HOME": "/c", "UV_CACHE_DIR": "/u"}
+        with patch.dict(os.environ, {**secrets, **keep}, clear=True):
+            env = gittools.check_env()
+        self.assertEqual([name for name in secrets if name in env], [])
+        for name, value in keep.items():
+            self.assertEqual(env.get(name), value, name)
+
+
+class AllowlistConfigGuard(unittest.TestCase):
+    def test_wildcard_only_entries_that_would_allow_everything_are_rejected(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for bad in ('["*"]', '["**"]', '["?"]', '["[*]"]', '[".venv", "*"]'):
+                with self.subTest(bad=bad):
+                    (Path(directory) / "brahma.toml").write_text(f"[brahma]\nignored_allowlist = {bad}\n")
+                    with self.assertRaises(ValueError):
+                        config.Settings.load(Path(directory))
+
+
+class InstructionsForDirectoryOwnership(Fixture):
+    def test_bare_directory_owner_pulls_in_its_nested_instructions(self):
+        self.write("src/AGENTS.md", "rules for src\n")
+        for owned in ("src", "src/", "src/**"):
+            with self.subTest(owned=owned):
+                plan = Plan("g", [Task("T", "i", [owned], ["ok"])], checks=[["true"]])
+                payload = contracts.prepare_contract(plan, self.repo, [["true"]])["payload"]
+                self.assertIn("src/AGENTS.md", payload["instructions"])
+
+
+class LargeIgnoredFiles(Fixture):
+    def test_oversized_files_use_size_and_mtime_not_a_full_read(self):
+        self.write("tools/big.sh", "x")
+        with patch.object(gittools, "_FINGERPRINT_CAP", 0):
+            first = gittools.snapshot_changes(self.repo)["tools/big.sh"]
+        self.assertTrue(first.startswith("large:"))
+        self.write("tools/big.sh", "xyz")  # changes size, so the cheap fingerprint still differs
+        with patch.object(gittools, "_FINGERPRINT_CAP", 0):
+            self.assertNotEqual(first, gittools.snapshot_changes(self.repo)["tools/big.sh"])
 
 
 class OwnershipSemantics(Fixture):

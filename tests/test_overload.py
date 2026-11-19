@@ -46,6 +46,23 @@ class Classification(unittest.TestCase):
         self.assertFalse(parser.overloaded)
 
 
+class FalsePositives(unittest.TestCase):
+    def test_model_prose_mentioning_overloaded_is_not_a_provider_error(self):
+        for text in ("I refactored the overloaded request handler but ran out of turns",
+                     "the function is overloaded for two types", "Tests pass; operator overloaded correctly"):
+            with self.subTest(text=text):
+                parser, _ = Classification().parse(text)
+                self.assertFalse(parser.overloaded)
+                self.assertFalse(parser.limited)
+
+    def test_real_overload_shapes_are_recognised(self):
+        for text in ('API Error: 529 {"type":"error","error":{"type":"overloaded_error"}}', "529 Overloaded",
+                     "Overloaded", "API Error: Overloaded - try again", "error: overloaded_error"):
+            with self.subTest(text=text):
+                parser, _ = Classification().parse(text)
+                self.assertTrue(parser.overloaded, text)
+
+
 class Retry(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.tmp = tempfile.TemporaryDirectory()
@@ -80,10 +97,12 @@ print(json.dumps({{"type":"result","subtype":"success","is_error":False,"result"
     def runs(self) -> int:
         return int(self.counter.read_text())
 
-    async def invoke(self, fail_times, timeout=20, delays=(0.01, 0.01, 0.01), message="API Error: 529 overloaded"):
+    async def invoke(self, fail_times, timeout=20, delays=(0.01, 0.01, 0.01), message="API Error: 529 overloaded",
+                     min_budget=0.0):
         with patch.object(providers.shutil, "which", return_value=self.cli(fail_times, message)), patch.object(
                 providers, "doctor", AsyncMock(return_value={"available": True})), patch.object(
-                providers, "OVERLOAD_DELAYS", delays), patch.object(providers, "TERMINATE_GRACE", .03):
+                providers, "OVERLOAD_DELAYS", delays), patch.object(providers, "OVERLOAD_MIN_BUDGET", min_budget), patch.object(
+                providers, "TERMINATE_GRACE", .03):
             return await providers.run("claude", "go", self.directory, "builder", Settings(),
                                        self.events.append, self.cancel, timeout)
 
@@ -110,6 +129,12 @@ print(json.dumps({{"type":"result","subtype":"success","is_error":False,"result"
         result = await self.invoke(99, timeout=5, delays=(60.0,))
         self.assertEqual(result.status, "overloaded")
         self.assertEqual(self.runs(), 1)  # no room to wait 60s inside a 5s budget
+
+    async def test_default_minimum_budget_prevents_a_useless_last_retry(self):
+        # 5s budget, 1s delay: only 4s would remain for the retry, far below the default 60s minimum.
+        result = await self.invoke(99, timeout=5, delays=(1.0,), min_budget=providers.OVERLOAD_MIN_BUDGET)
+        self.assertEqual(result.status, "overloaded")  # not masked as a "timeout" by a starved retry
+        self.assertEqual(self.runs(), 1)
 
     async def test_cancel_during_backoff_returns_promptly(self):
         task = asyncio.create_task(self.invoke(99, timeout=100, delays=(30.0,)))

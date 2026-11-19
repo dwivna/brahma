@@ -267,9 +267,11 @@ They are argv arrays, not shell strings; pipes, `&&` and redirection are not
 expanded. Brahma also runs `git diff --check`. Without project check commands,
 the outcome stays `needs_checks` even after a positive model review.
 
-Checks run with the same scrubbed environment as workers: API keys, tokens and
-provider credentials are removed, as are SSH/GPG agent sockets. A check can still
-read ordinary files in your home directory; Brahma does not sandbox checks.
+Checks run with the same scrubbed environment as workers, plus extra scrubbing:
+API keys, tokens, secret-looking names and SSH/GPG agent sockets are removed. This
+is a denylist, so an unusually named secret variable can survive. `HOME` and `PATH`
+are kept, and a check can still read credential files under your home directory
+(`.aws`, `.npmrc`, `.netrc`, `.ssh`, GitHub CLI config). Brahma does not sandbox checks.
 
 ### Ownership patterns
 
@@ -280,7 +282,10 @@ own everything below `src`. So `src/*.py` owns `src/a.py` but not `src/a/b.py`.
 Git-ignored files count as changes: a worker that creates or edits an ignored
 file (for example `.env` or a planted script) is outside its ownership, except
 build caches in `ignored_allowlist`. Names like `.env*`, `*.pem`, `*.key` and
-`credentials*` always block, even inside an owned path.
+`credentials*` always block, even inside an owned path. Inside an allowlisted cache
+directory only `.env*` files are still checked; other files hidden there are not
+inspected. The allowlist names directories: a file or symlink that merely has an
+allowlisted name is not tolerated.
 
 ## Usage limits and recovery
 

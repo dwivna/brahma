@@ -80,5 +80,28 @@ class ContractFormat(unittest.TestCase):
                 contracts.verify_contract(first, plan, repo, [["true"]], model_profiles=asdict(widened))
 
 
+class StoredOldContract(unittest.TestCase):
+    """Independent review M4: opening a session whose stored contract is format 1 must not crash the UI."""
+    def test_show_plan_reports_the_old_contract_instead_of_raising(self):
+        from types import SimpleNamespace
+        from brahma.config import Settings
+        from brahma.ui import BrahmaApp
+        plan = Plan("Goal", [Task("One", "do", ["src/**"], ["ok"])], checks=[["true"]])
+        with tempfile.TemporaryDirectory() as directory:
+            contract = contracts.prepare_contract(plan, tiny_repo(directory), [["true"]])
+            path = Path(directory) / "old.json"
+            path.write_text(json.dumps({"version": 1, "payload": contract["payload"], "digest": contract["digest"]}))
+            written = []
+            app = SimpleNamespace(
+                session=SimpleNamespace(key="k", settings=Settings()),
+                store=SimpleNamespace(session=lambda key: {"contract": str(path)}),
+                write=written.append)
+            BrahmaApp.show_plan(app, plan)  # must not raise
+        text = "\n".join(event.text for event in written)
+        self.assertIn("Stored contract cannot be used", text)
+        self.assertIn("Contract format 1 is not supported", text)
+        self.assertIn("create a new plan", text)
+
+
 if __name__ == "__main__":
     unittest.main()

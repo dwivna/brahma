@@ -49,30 +49,49 @@ DEFAULT_IGNORED_ALLOWLIST = (".venv", "venv", "__pycache__", ".pytest_cache", ".
                              "node_modules", "dist", "*.egg-info")
 
 
-def _allowed_ignored(path: str, allow) -> bool:
-    return any(fnmatch.fnmatchcase(part, pattern) for part in Path(path).parts for pattern in allow)
+def _allowed_ignored(path: str, allow, is_dir: bool = False) -> bool:
+    """True when `path` lies inside an allowlisted build-cache directory.
+
+    The allowlist names directories: a *file* or symlink that merely carries an allowlisted
+    name (for example a symlink called `.venv`) is never tolerated.
+    """
+    parts = Path(path).parts
+    candidates = parts if is_dir else parts[:-1]
+    return any(fnmatch.fnmatchcase(part, pattern) for part in candidates for pattern in allow)
+
+
+# Inside an allowlisted cache directory only these names are still inspected. A broader scan
+# would flag ordinary packages (certifi's cacert.pem, botocore/credentials.py).
+_CACHE_SENSITIVE_PREFIXES = (".env",)
 
 
 def _ls_ignored(repo: Path, *extra: str) -> list[str]:
     result = subprocess.run(["git", "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
-                            capture_output=True, check=True, timeout=30)
-    return [name for name in result.stdout.decode("utf-8", errors="strict").split("\0") if name]
+                            capture_output=True, check=True, timeout=60)
+    return [name for name in result.stdout.decode("utf-8", errors="surrogateescape").split("\0") if name]
 
 
 def ignored_paths(repo: Path, allow=None) -> list[str]:
     """Git-ignored files that exist, minus the allowlisted build caches.
 
     `git status` never reports ignored files, so a worker could create or alter `.env` or
-    a planted script unseen. Fully ignored directories are listed once and skipped cheaply
-    when allowlisted; any other ignored directory is expanded to its files.
+    a planted script unseen. Fully ignored directories are listed once; an allowlisted one is
+    not ownership-checked but is still scanned for `.env*` files (a planted secret file), and
+    any other ignored directory is expanded to its files. Remaining blind spot: other files
+    hidden inside an allowlisted directory are not inspected.
     """
     allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
     found = []
     for name in _ls_ignored(repo, "--directory"):
-        if _allowed_ignored(name.rstrip("/"), allow):
+        is_dir = name.endswith("/")
+        if _allowed_ignored(name.rstrip("/"), allow, is_dir):
+            if is_dir:
+                found.extend(item for item in _ls_ignored(repo, "--", name)
+                             if Path(item).name.startswith(_CACHE_SENSITIVE_PREFIXES))
             continue
-        if name.endswith("/"):
-            found.extend(item for item in _ls_ignored(repo, "--", name) if not _allowed_ignored(item, allow))
+        if is_dir:
+            found.extend(item for item in _ls_ignored(repo, "--", name)
+                         if not _allowed_ignored(item, allow))
         else:
             found.append(name)
     return found
@@ -88,7 +107,7 @@ def status_paths(repo: Path) -> list[str]:
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
     result = subprocess.run(["git", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15)
-    chunks = result.stdout.decode("utf-8", errors="strict").split("\0")
+    chunks = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
     paths, index = [], 0
     while index < len(chunks) and chunks[index]:
         row = chunks[index]
@@ -101,11 +120,17 @@ def status_paths(repo: Path) -> list[str]:
     return sorted(set(paths))
 
 
+_FINGERPRINT_CAP = 64 * 1024 * 1024
+
+
 def _fingerprint(path: Path) -> str:
     if path.is_symlink():
         return "symlink:" + os.readlink(path)
     if not path.is_file():
         return "absent"
+    info = path.stat()
+    if info.st_size > _FINGERPRINT_CAP:  # huge artefacts: size+mtime, not a full read on every check
+        return f"large:{info.st_mode}:{info.st_size}:{info.st_mtime_ns}"
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         while chunk := stream.read(65536):
@@ -168,14 +193,27 @@ async def _stop(process):
         await process.wait()
 
 
+_CHECK_SECRET_MARKERS = ("AUTHTOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "PRIVATE_KEY", "DSN",
+                         "WEBHOOK", "KUBECONFIG", "NETRC")
+_CHECK_SECRET_NAMES = {"DATABASE_URL", "REDIS_URL", "MONGODB_URI", "DB_PASS", "AWS_PROFILE", "DOCKER_CONFIG",
+                       "GIT_CONFIG_GLOBAL", "NPM_TOKEN", "GH_TOKEN", "GITHUB_TOKEN", "HF_TOKEN"}
+
+
 def check_env() -> dict[str, str]:
     """Environment for approved checks: worker-written code runs here, so no credentials.
 
-    Same scrubbing as provider workers, plus agent sockets that would let a test use the
-    owner's SSH/GPG identity. A home-directory read is NOT prevented (Round 13).
+    The same scrubbing as provider workers, plus agent sockets, secret-looking names and common
+    credential-file locations. This is a denylist and cannot be complete: unusual variable names can
+    survive, HOME and PATH are kept, and credential *files* under HOME (.aws, .npmrc, .netrc, .ssh, gh
+    config) stay readable. A sandbox for checks is not provided (Round 13).
     """
     from .providers import child_env
     env = child_env()
+    for name in list(env):
+        key = name.upper()
+        if (key in _CHECK_SECRET_NAMES or any(marker in key for marker in _CHECK_SECRET_MARKERS)
+                or key.endswith(("_KEY", "_PASS", "_PWD")) or key in ("KEY", "PASS")):
+            env.pop(name)
     for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "GIT_ASKPASS", "SSH_ASKPASS"):
         env.pop(name, None)
     env["GIT_TERMINAL_PROMPT"] = "0"

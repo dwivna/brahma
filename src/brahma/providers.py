@@ -158,6 +158,10 @@ def _native_id(value: str) -> str:
     return value
 
 
+# A provider capacity error (HTTP 529 / overloaded_error), not a model's prose that happens to say "overloaded".
+_OVERLOADED = re.compile(r"overloaded_error|\b529\b|^\W*(?:api error:?\s*)?(?:\d{3}\s*)?overloaded\b", re.I)
+
+
 class StreamParser:
     def __init__(self, provider: str, role: str, emit: Emit):
         self.provider, self.role, self.emit = provider, role, emit
@@ -264,7 +268,7 @@ class StreamParser:
         if self.error and any(word in lowered for word in
                               ("rate limit", "usage limit", "quota", "limit reached", "hit your limit")):
             self.limited = True
-        elif self.error and "overloaded" in lowered:
+        elif self.error and _OVERLOADED.search(self.error):
             # A transient capacity error, not an account limit: never touches quota state (Round 13).
             self.overloaded = True
 
@@ -295,6 +299,8 @@ def _command(provider: str, executable: str, cwd: Path, role: str, settings,
 
 # Waits between retries of a transiently overloaded provider (about 1, 5 and 10 minutes).
 OVERLOAD_DELAYS = (60.0, 300.0, 600.0)
+# A retry is only worth waiting for when at least this much budget (or a quarter of it) remains afterwards.
+OVERLOAD_MIN_BUDGET = 60.0
 
 
 async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
@@ -311,7 +317,8 @@ async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
         if result.status != "overloaded":
             break
         remaining = timeout - (time.monotonic() - started)
-        if remaining <= delay + 1:
+        # Waiting is only worth it if a useful slice of the budget is left afterwards.
+        if remaining <= delay + max(OVERLOAD_MIN_BUDGET, 0.25 * timeout):
             break
         emit(Event(provider, role, "progress",
                    f"Provider overloaded; retrying in {int(delay)}s within this attempt (no repair cycle used)"))
