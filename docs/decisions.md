@@ -175,3 +175,19 @@ This extends the routing requirement in Round 4. Implementation evidence and
 the limits of advertised model availability are documented in
 [model-selection.md](model-selection.md). The request is a target; it does not
 establish measured superiority, included billing entitlement or quota availability.
+
+## Round 9 — 19 November 2026 (humans and AI callers)
+
+Abhinav: AI interface B, priority A, autonomy A, measures A + B + C (not D).
+
+1. **AI interface:** a stable JSON command-line interface only: JSON output on every command, fixed exit codes
+   and a streamed event log, so an AI agent shells out. No MCP server and no local HTTP API in this phase.
+2. **Priority:** human first, agent-safe. The terminal conversation stays the primary door; the agent door is a
+   second door over the same session, memory and approvals and may never carry weaker safety.
+3. **Autonomy of an AI caller:** may propose plans, read status, usage and models, and run contracts a human
+   has already approved. It may not approve its own contract, widen scope or permissions, merge or publish.
+4. **Success measures:** verified-ready rate per provider and task type; repair cycles and active time per
+   task; provider-reported usage per task, kept separate from estimates. Human interventions per task were not
+   selected. No savings or superiority claim is made without these measurements.
+
+These are required capabilities, not a report that they exist in the prototype.
