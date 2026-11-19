@@ -101,23 +101,27 @@ def record_claude_statusline(home: Path, payload: str, now: float | None = None)
     """Store Claude Code's own `rate_limits` (5h and 7d) from a status-line payload. Never raises.
 
     This is Claude's documented, credential-free signal: Claude Code hands the numbers to the status-line command.
-    Brahma never reads sign-in material or polls an endpoint. Written at most every few seconds.
+    Brahma never reads sign-in material or polls an endpoint. Written at most once per refresh interval.
     """
     import time
     from . import quota
     try:
         data = json.loads(payload)
         limits = data.get("rate_limits") if isinstance(data, dict) else None
-        if not isinstance(limits, dict) or not ({"five_hour", "seven_day"} & set(limits)):
-            return False
+        if not isinstance(limits, dict) or not {"five_hour", "seven_day"} <= set(limits):
+            return False          # a partial payload would read as "available" with the other window unknown
         now = time.time() if now is None else now
+        for window in (limits["five_hour"], limits["seven_day"]):
+            reset = window.get("resets_at") if isinstance(window, dict) else None
+            if isinstance(reset, (int, float)) and not isinstance(reset, bool) and reset > now + 8 * 86400:
+                return False      # a forged far-future reset would park the provider for years
         snapshot = quota.normalize_claude({k: v for k, v in limits.items() if k in ("five_hour", "seven_day")}, observed_at=now)
         store = Store(home)
         try:
             previous = store.quota("claude")
-            if (previous and previous.get("source") == "claude.statusline" and now - previous.get("observed_at", 0) < STATUSLINE_REFRESH_SECONDS
-                    and previous.get("windows") == snapshot["windows"]):
-                return False
+            if (previous and previous.get("source") == "claude.statusline"
+                    and 0 <= now - previous.get("observed_at", 0) < STATUSLINE_REFRESH_SECONDS):
+                return False      # at most one write per interval, whatever the values
             store.observe(snapshot)
         finally:
             store.close()

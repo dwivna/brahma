@@ -330,15 +330,21 @@ def check_env() -> dict[str, str]:
     config) stay readable. A sandbox for checks is not provided (Round 13).
     """
     from .providers import child_env
-    env = child_env()
+    env = child_env()          # already strict: workers and checks share one scrub
+    env["GIT_TERMINAL_PROMPT"] = "0"
+    return env
+
+
+def scrub_secrets(env: dict[str, str]) -> dict[str, str]:
+    """Remove secret-looking names, agent sockets and credential-file locations from an environment (in place)."""
     for name in list(env):
         key = name.upper()
         if (key in _CHECK_SECRET_NAMES or any(marker in key for marker in _CHECK_SECRET_MARKERS)
-                or key.endswith(("_KEY", "_PASS", "_PWD")) or key in ("KEY", "PASS")):
+                or key.endswith(("_KEY", "_PASS", "_PWD", "_PASSWD", "_PAT", "_AUTH")) or key in ("KEY", "PASS")
+                or key.startswith(("NPM_CONFIG_", "PG")) and any(m in key for m in ("PASS", "AUTH", "TOKEN"))):
             env.pop(name)
     for name in ("SSH_AUTH_SOCK", "SSH_AGENT_PID", "GPG_AGENT_INFO", "GIT_ASKPASS", "SSH_ASKPASS"):
         env.pop(name, None)
-    env["GIT_TERMINAL_PROMPT"] = "0"
     return env
 
 

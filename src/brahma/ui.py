@@ -204,7 +204,8 @@ class BrahmaApp(App):
         usage = f"reported tokens in {self.inputs:,} / out {self.outputs:,}" if self.have_usage else "tokens not yet reported"
         mode = "DEMO" if self.demo else "LIVE"
         first = Text(f"{mode} · {status} · {usage}")
-        second = Text(f"API fallback OFF · 60m/task · 3 repairs · {selected}")
+        configured = self.session.settings if self.session else Settings()
+        second = Text(f"API fallback OFF · {configured.task_timeout // 60}m/task · {min(3, configured.repair_cycles)} repairs · {selected}")
         width = max(1, self.size.width - 2)
         first.truncate(width, overflow="ellipsis")
         second.truncate(width, overflow="ellipsis")
@@ -286,6 +287,15 @@ class BrahmaApp(App):
                                   "Checks: " + json.dumps(contract["payload"]["checks"]),
                                   "Budget: 60 active minutes/task; at most 3 repairs; quota waiting excluded."))
                     models = contract["payload"]["models"]
+                    # Locked settings that widen what a run does must be visible at approval, not only inside the digest.
+                    default = Settings()
+                    wide = [f"{name}={models.get(name)!r}" for name in ("publish", "auto_commit", "strict_enforcement", "ignored_allowlist")
+                            if models.get(name, getattr(default, name)) != getattr(default, name)]
+                    lines.append("Run settings changed from the defaults: " + ", ".join(wide) if wide else "Run settings: defaults (no publication, no auto-commit)")
+                    risky = sorted({c[0].rsplit("/", 1)[-1] for c in contract["payload"]["checks"]
+                                    if c and c[0].rsplit("/", 1)[-1] in ("sh", "bash", "zsh", "curl", "wget", "nc", "ssh", "scp")})
+                    if risky:
+                        lines.append("WARNING: approved checks run these shell or network programs on this computer: " + ", ".join(risky))
                     selection = models.get("selection")
                     for provider in ("codex", "claude"):
                         for suffix, purpose in (("_model", "routine"), ("_critical_model", "critical")):

@@ -57,8 +57,9 @@ class Settings:
                 or type(result.strict_enforcement) is not bool):
             raise ValueError("auto_commit, publish and strict_enforcement must be booleans")
         for field in ("codex_model", "codex_critical_model", "claude_model", "claude_critical_model"):
-            if not isinstance(getattr(result, field), str) or not getattr(result, field).strip():
-                raise ValueError("Model names must be nonempty strings")
+            if (not isinstance(getattr(result, field), str)
+                    or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/\[\]-]{0,99}", getattr(result, field))):
+                raise ValueError("Model names must be 1-100 characters of letters, digits and . _ : / [ ] - (no leading dash)")
         if not isinstance(result.checks, list) or any(not isinstance(cmd, list) or not cmd or
                 any(not isinstance(arg, str) or not arg for arg in cmd) for cmd in result.checks):
             raise ValueError("Checks must be arrays of command arguments, never shell strings")

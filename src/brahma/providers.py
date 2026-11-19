@@ -35,7 +35,10 @@ def clean_text(value: Any) -> str:
 
 
 def child_env() -> dict[str, str]:
-    """Keep local sign-in paths, remove credentials and alternate provider routing."""
+    """Keep local sign-in files, remove credential variables, agent sockets and alternate provider routing.
+
+    A denylist: unusual variable names can survive, and credential files under HOME stay readable (documented).
+    Workers and approved checks get the same scrub."""
     result = {}
     for name, value in os.environ.items():
         key = name.upper()
@@ -50,6 +53,8 @@ def child_env() -> dict[str, str]:
                     or key.endswith(("BASE_URL", "API_BASE", "API_ENDPOINT")))
         if not credential and not override:
             result[name] = value
+    from .gittools import scrub_secrets
+    scrub_secrets(result)
     result["NO_COLOR"] = "1"
     result["TERM"] = "dumb"
     return result
@@ -159,7 +164,7 @@ def _native_id(value: str) -> str:
 
 
 # A provider capacity error (HTTP 529 / overloaded_error), not a model's prose that happens to say "overloaded".
-_OVERLOADED = re.compile(r"overloaded_error|\b529\b|^\W*(?:api error:?\s*)?(?:\d{3}\s*)?overloaded\b", re.I)
+_OVERLOADED = re.compile(r"overloaded_error|(?:status|http|error|code)\D{0,3}529\b|\b529\s+(?:error|overloaded)|^\W*(?:api error:?\s*)?(?:\d{3}\s*)?overloaded\b", re.I)
 
 
 class StreamParser:

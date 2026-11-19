@@ -4,6 +4,30 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.12.0
+
+Fixes from the second independent review (providers, quota, contracts, scheduler, config, terminal).
+
+**Fixed**
+- Medium: builder workers inherited credentials the checks already stripped (`PGPASSWORD`, `*_SECRET_KEY`, `*_PASSWD`, `*_PAT`,
+  `SSH_AUTH_SOCK`, `AWS_PROFILE`, ...). Workers and checks now share one scrub (`gittools.scrub_secrets`). Still a denylist; credential
+  files under HOME stay readable, and the docstring now says so.
+- Medium: the approval screen did not show locked settings that widen a run. It now lists `publish`, `auto_commit`,
+  `strict_enforcement` and a non-default `ignored_allowlist`, warns when an approved check runs a shell or network program (`sh`,
+  `bash`, `curl`, `ssh`, ...), and the status line shows the configured time budget and repair count instead of fixed text.
+- The Claude status-line tap writes at most once per refresh interval whatever the values, ignores payloads missing either window
+  (they read as "available" with the other window unknown) and ignores a reset more than 8 days away (a forged reset could park the
+  provider for years).
+- Model names from `brahma.toml` must be 1 to 100 characters of letters, digits and `. _ : / [ ] -` with no leading dash.
+- The capacity-error pattern no longer matches a stray "529" in prose.
+
+**Known, not changed**
+- Approved checks still run unsandboxed on worker-written code (documented). A crashed Brahma can leave an orphaned worker that a
+  restarted job might overlap. The contract hashes `AGENTS.md` and `CLAUDE.md` from the main checkout rather than the base
+  revision. An unrecognised provider quota value raises rather than degrading (fails closed). A PID-reuse window exists in worker
+  cleanup. Relative `PATH` entries are not rejected. Whether the provider CLIs confine writes to the worktree, resume keeps its
+  sandbox flags, or a repo-level Codex config loads was not verified.
+
 ## 0.11.1
 
 Closes the last open part of plan task 3: pause, stop and kill during checks and publication.

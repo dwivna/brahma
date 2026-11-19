@@ -89,14 +89,26 @@ class Tap(unittest.TestCase):
             code, out = run_tap(tmp, payload(), then="/nonexistent/command")
             self.assertEqual((code, out), (0, ""))   # a missing command is silent, never an error
 
-    def test_writes_are_throttled_when_nothing_changed_but_changes_are_recorded(self):
+    def test_writes_are_limited_to_one_per_refresh_interval_whatever_the_values(self):
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
             first = payload(five=10.0)
             self.assertTrue(cli.record_claude_statusline(home, first, now=NOW))
-            self.assertFalse(cli.record_claude_statusline(home, first, now=NOW + 3))      # same numbers, too soon
-            self.assertTrue(cli.record_claude_statusline(home, payload(five=11.0), now=NOW + 4))  # changed
-            self.assertTrue(cli.record_claude_statusline(home, first, now=NOW + 40))      # refresh interval passed
+            self.assertFalse(cli.record_claude_statusline(home, first, now=NOW + 3))             # same numbers, too soon
+            self.assertFalse(cli.record_claude_statusline(home, payload(five=11.0), now=NOW + 4))  # changed, still too soon
+            self.assertTrue(cli.record_claude_statusline(home, payload(five=11.0), now=NOW + 40))  # interval passed
+
+    def test_partial_or_far_future_payloads_are_ignored(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            self.assertFalse(cli.record_claude_statusline(home, json.dumps(
+                {"rate_limits": {"five_hour": {"used_percentage": 5, "resets_at": NOW + 3600}}}), now=NOW))   # no seven_day
+            forged = {"rate_limits": {"five_hour": {"used_percentage": 5, "resets_at": 253370764800},
+                                      "seven_day": {"used_percentage": 5, "resets_at": NOW + 86400}}}
+            self.assertFalse(cli.record_claude_statusline(home, json.dumps(forged), now=NOW))
+            store = Store(home)
+            self.assertIsNone(store.quota("claude"))
+            store.close()
 
     def test_a_statusline_observation_never_erases_a_recorded_limit_block(self):
         # A worker reported a rejection; a later low-usage statusline sample is newer information and wins,
