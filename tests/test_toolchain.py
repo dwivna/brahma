@@ -607,8 +607,13 @@ class EighthPass(unittest.TestCase):
             repo = Path(tmp)
             (repo / "gradle.properties").write_text("org.gradle.java.hom\\u0065=/opt/x\n")
             self.assertTrue(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
+            (repo / "gradle.properties").write_text("org.gradle.java.\\\nhome=/opt/x\n")      # a line continuation
+            self.assertTrue(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
             (repo / "gradle.properties").write_text("org.gradle.jvmargs=-Xmx1g\n")
             self.assertFalse(toolchain._selects_own_jdk(repo, {"gradle.properties": "x"}))
+            for args in (["-Dk=v"], ["-D", "k=v"], ["-g/x"], ["--system-prop", "k=v"], ["-p", "sub"], ["--init-script", "i.gradle"]):
+                self.assertTrue(toolchain._redirects_gradle(args), args)
+            self.assertFalse(toolchain._redirects_gradle(["test", "--parallel", "-i"]))
 
 
 if __name__ == "__main__":

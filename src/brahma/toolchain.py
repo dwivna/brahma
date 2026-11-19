@@ -153,7 +153,7 @@ def _selects_own_jdk(directory: Path, project_files: dict[str, str]) -> bool:
                 if path.stat().st_size >= 65536:
                     return True                                       # too large to scan: assume it might select a JDK
                 text = path.read_text(errors="replace")
-                if "java.home" in text or "\\u" in text:            # any mention, or a unicode escape that could spell it
+                if "java.home" in text or "\\" in text:            # any mention, or any backslash (escapes and line continuations can spell it)
                     return True
             except OSError:
                 return True       # unreadable: assume it might
@@ -234,11 +234,14 @@ def _relative_or_absolute(path: Path, directory: Path, relative: bool) -> str:
     return str(path)
 
 
+_GRADLE_VALUE_OPTIONS = ("-D", "-P", "-g", "-p", "-c", "-I", "-b", "-u", "--system-prop", "--project-prop", "--gradle-user-home",
+                         "--project-dir", "--settings-file", "--init-script", "--build-file", "--include-build")
+
+
 def _redirects_gradle(args: list[str]) -> bool:
-    """Command-line options that move Gradle's user home or choose its JDK, which the fingerprint cannot follow."""
-    return any(arg in ("-g", "--gradle-user-home") or arg.startswith(("--gradle-user-home=", "-Dorg.gradle.java.home", "-Porg.gradle.java.home",
-                                                                       "-Dorg.gradle.java.installations", "-Dgradle.user.home"))
-               for arg in args)
+    """Fail closed: any Gradle option that takes a value (properties, user home, project dir, settings, init scripts) could move the
+    JDK or the files Gradle reads, and the forms (`-Dk=v`, `-D k=v`, `-g<path>`, `--opt=value`) are too many to parse here."""
+    return any(arg.startswith(_GRADLE_VALUE_OPTIONS) for arg in args)
 
 
 def fingerprint_program(program: str, directory: Path, env: dict[str, str], args: list[str] | None = None) -> dict:

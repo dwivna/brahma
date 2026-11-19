@@ -36,8 +36,9 @@ decided by Abhinav. See `docs/decisions.md`.
   skips only cycles back to an ancestor.
 - Inputs that redirect Maven's startup are disabled for checks instead of enumerated: `MAVEN_SKIP_RC=1` is set (no `mavenrc` is read),
   and `MAVEN_BASEDIR` and `MAVEN_DEBUG_OPTS` are removed. Gradle is reported as having an unbound JDK whenever its command line
-  (`-g`, `--gradle-user-home`, `-Dorg.gradle.java.home`), a relative `GRADLE_USER_HOME`, or any `gradle.properties` that mentions
-  `java.home`, contains a unicode escape or is larger than 64 KB could redirect it; a redirect added after approval is refused.
+  (any option that takes a value: `-D`, `-P`, `-g`, `-p`, `-c`, `-I`, `--init-script`, ...), a relative `GRADLE_USER_HOME`, or any
+  `gradle.properties` that mentions `java.home`, contains a backslash or is larger than 64 KB could redirect it; a redirect added after
+  approval is refused.
 - A `java` that is not inside a real JDK (the macOS `/usr/bin/java` stub, a version-manager shim that reads `.java-version`) is a
   selector and is always reported as not bound. A Java build tool run without `JAVA_HOME` chooses its own
   JDK, which Brahma cannot know without running it, so the approval says the JDK is not bound; set `JAVA_HOME` to bind it.
