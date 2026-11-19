@@ -69,8 +69,10 @@ class Session:
         """Notes Abhinav left for this session; applied by the engine at its next checkpoint, never mid-run."""
         from .briefs import Note
         notes = []
-        for event in self.store.events_after(self.key, 0, 5000):
-            if event["kind"] != "user_note":
+        events = self.store.events_after(self.key, 0, 5000)
+        floor = max([e["seq"] for e in events if e["kind"] == "plan_created"], default=0)   # notes belong to one plan
+        for event in events:
+            if event["kind"] != "user_note" or event["seq"] < floor:
                 continue
             try:
                 data = json.loads(event["text"])
@@ -143,6 +145,8 @@ class Session:
 
     async def ask(self, request: str) -> Plan:
         from . import engine
+        if self.store.killed:
+            raise ValueError("Kill switch engaged: no planner starts. Lift it with `brahma kill --release`.")
         self.cancel.clear()
         self.emit(Event(role="user", kind="user", text=request))
         history = [r["text"] for r in self.store.events(self.key) if r["kind"] == "user"]
@@ -202,6 +206,8 @@ class Session:
         self.store.finish_job(self.key, "cancelled")
         self.store.set(self.key, plan=json.dumps(plan.to_dict()), status="awaiting_approval", stopped=0,
                        contract=contract, approved_digest=None)
+        for stale in self.store.open_attention(self.key):   # attention belongs to the plan generation that raised it
+            self.store.resolve_attention(stale["id"])
         self.emit(Event(kind="plan_created", text=self.generation))
 
     def approved_contract(self):
@@ -288,7 +294,7 @@ class Session:
         settings._shared_contract = contract
         settings._session_key = self.key
         settings._packet_home = self.store.home
-        settings._notes = self._notes()
+        settings._notes = self._notes      # a loader: the engine re-reads notes at each attempt
         try:
             memory, repo = self._memory()
             settings._routing_history = memory.routing_history(repo)
@@ -320,7 +326,7 @@ class Session:
                     try:
                         said = json.loads(event["text"])
                         if said.get("for") in ("reviewer", "author") and type(said.get("index")) is int:
-                            decisions[said["index"]] = said["for"]
+                            decisions[said["index"]] = (said["for"], said.get("digest"))
                     except (ValueError, TypeError, AttributeError):
                         pass
                 if event["kind"] == "native_session" and current_index in progress and event["role"] in ("builder", "reviewer"):
@@ -350,9 +356,10 @@ class Session:
                             completed.add(index)
                         else:
                             completed.discard(index)
-            for index, side in decisions.items():   # Abhinav's decision applies only to a dispute still waiting for it
+            for index, (side, digest) in decisions.items():
+                # A decision applies only to the exact dispute it was made on (same positions), in this plan generation.
                 waiting = (progress.get(index) or {}).get("dispute")
-                if waiting and waiting.get("state") == "escalated":
+                if waiting and waiting.get("state") == "escalated" and digest and digest == waiting.get("digest"):
                     progress[index]["dispute_decision"] = side
             async def monitor_stop():
                 while True:
@@ -372,6 +379,8 @@ class Session:
             try:
                 result = await engine.execute(self.plan, worktree, self.settings, self.emit, self.cancel,
                                               completed_indices=completed, task_progress=progress, provider_gate=gate)
+                if result.status == "ready" and self.halted():
+                    result = Result("brahma", "cancelled", self.halted() + "; checkpoint retained", result.usage)
                 if result.status == "ready":
                     ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files], ignored_allow=self.settings.ignored_allowlist)
                     if not ok:
@@ -379,7 +388,7 @@ class Session:
                     elif self.settings.auto_commit:
                         commit = gittools.commit_changes(worktree, self.plan.summary)
                         result.text += "\nLocal commit: " + commit
-                    if result.status == "ready" and self.settings.publish:
+                    if result.status == "ready" and self.settings.publish and not self.halted():
                         try:
                             result.text += "\nDraft PR: " + gittools.publish(worktree, self.plan.summary, result.text)
                         except ValueError as error:

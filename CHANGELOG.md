@@ -4,6 +4,33 @@ Brahma uses SemVer 0.x (decision Round 10): MINOR for new capabilities or any ch
 state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
 decided by Abhinav. See `docs/decisions.md`.
 
+## 0.11.0
+
+Fixes from the independent review of 0.3.0 to 0.10.0, plus the confirmed exit-code table.
+
+**Confirmed**
+- The exit-code table (0 ready, 10 waiting, 11 needs a human decision, 12 needs checks, 13 blocked, 14 cancelled/paused/killed,
+  20 usage error, 30 provider missing or not signed in) was confirmed by Abhinav on 2026-11-19.
+
+**Fixed**
+- High: `task_state` rows stored check output and reviewer text unredacted (and fed them into the next builder prompt). Their
+  `summary` and `feedback` fields are now redacted at the store and at the source.
+- A `blocked` dispute re-review that carried a high issue escalated and could be overruled. It now blocks the task.
+- Dispute decisions are bound to the exact escalated positions (digest), an unconsumed decision is cleared when the fresh review
+  has no high finding, and attention raised by an earlier plan is resolved when a new plan is made.
+- Withdrawing or overruling the high findings no longer drops the medium and low ones; they are still repaired.
+- The kill switch now does what the docs say: coordinator Git writes are refused while it is engaged (unlisted commands count
+  as writes), commit and publish re-check it, `/publish` checks it, and the planner will not start under it.
+- Notes: counted as applied only after a builder received them, re-read at each attempt, and only notes left after the current plan
+  apply. Board signals from earlier plans no longer notify when an old session is opened.
+- The spent author reply is persisted immediately. `git` global options (`-C`, `-c`) can no longer hide a blocked command.
+  Redaction now covers `sk_live_`, JWTs, `AIza`, `glpat-`, `npm_` and `hf_` tokens, and PR text is redacted before it goes to GitHub.
+
+**Known, not changed**
+- Packets containing a secret-shaped string silently fall back to a task-only brief; packet files are read-only only
+  nominally for the same user; `max_tokens=100000`-style names are over-redacted; concurrent first-run table creation by the
+  status-line tap and the UI is unverified.
+
 ## 0.10.0
 
 Terminal status board and decision-only attention (plan task 5).

@@ -418,6 +418,8 @@ class BrahmaApp(App):
                 from .gittools import publish
                 if not self.session or self.store.session(self.session.key)["status"] != "ready":
                     raise ValueError("Only a ready, verified plan can be published")
+                if self.store.killed or self.store.session(self.session.key)["stopped"] or self.store.session(self.session.key)["paused"]:
+                    raise ValueError("Not published: the kill switch is engaged or the session is stopped or paused")
                 saved = self.store.session(self.session.key)
                 self.write(Event(kind="publication", text=await asyncio.to_thread(
                     publish, Path(saved["worktree"]), self.session.plan.summary, "Brahma's approved plan passed configured checks and independent review.")))

@@ -26,6 +26,16 @@ def refuse(args: tuple[str, ...]) -> str | None:
     Brahma only ever commits to its own `brahma/*` branch and pushes that branch. Anything else is
     refused here, in code, whatever a plan or a model asks for. Returns the reason, or None if allowed.
     """
+    # Skip the values of git's own global options (`-C dir`, `-c k=v`) so they are never mistaken for the command.
+    cleaned, skip = [], False
+    for a in args:
+        if skip:
+            skip = False
+        elif a in ("-C", "-c", "--git-dir", "--work-tree", "--namespace"):
+            skip = True
+        else:
+            cleaned.append(a)
+    args = tuple(cleaned)
     words = [a for a in args if not a.startswith("-")]
     command = words[0] if words else ""
     if command in _FORBIDDEN_COMMANDS:
@@ -53,10 +63,29 @@ def refuse(args: tuple[str, ...]) -> str | None:
     return None
 
 
+_READ_ONLY = frozenset({"status", "diff", "rev-parse", "log", "show", "ls-files", "ls-tree", "cat-file", "check-ignore",
+                        "symbolic-ref", "merge-base", "rev-list", "for-each-ref", "describe", "blame", "grep", "config"})
+
+
+def _is_write(args: tuple[str, ...]) -> bool:
+    """Anything not on the read-only list counts as a write, so the kill switch fails closed."""
+    words = [a for a in args if not a.startswith("-")]
+    if not words:
+        return True
+    if words[0] == "branch" and "--show-current" in args:
+        return False
+    return words[0] not in _READ_ONLY
+
+
 def git(repo: Path, *args: str) -> str:
     reason = refuse(args)
     if reason:
         raise ValueError(reason)
+    if _is_write(args):
+        from . import halt
+        from .config import state_home
+        if halt.engaged(state_home()):
+            raise ValueError("Kill switch engaged: coordinator Git writes are refused")
     result = subprocess.run(["git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
                             text=True, capture_output=True, timeout=60)
     if result.returncode:
@@ -379,6 +408,8 @@ def commit_changes(worktree: Path, summary: str) -> str:
 
 def publish(worktree: Path, summary: str, body: str) -> str:
     import shutil
+    from . import safety
+    summary, body = safety.redact(summary), safety.redact(body)     # never send a secret-shaped string to GitHub
     if not shutil.which("gh"):
         raise ValueError("Draft PR publishing needs GitHub CLI: install gh and run gh auth login; local branch is preserved")
     branch = git(worktree, "branch", "--show-current")

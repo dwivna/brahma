@@ -360,8 +360,12 @@ def _main(argv):
             disputes = [e for e in store.events_after(args.session, 0, 5000) if e["kind"] == "disagreement"]
             if not waiting or not disputes:
                 raise ValueError("No disputed review is waiting for a decision")
-            index = json.loads(disputes[-1]["text"])["index"]
-            store.event(args.session, Event("brahma", "user", "dispute_decision", json.dumps({"index": index, "for": args.side})))
+            import hashlib
+            latest = json.loads(disputes[-1]["text"])
+            index = latest["index"]
+            digest = hashlib.sha256(latest["text"].encode()).hexdigest()[:32]   # binds the decision to these exact positions
+            store.event(args.session, Event("brahma", "user", "dispute_decision",
+                                            json.dumps({"index": index, "for": args.side, "digest": digest})))
             for item in waiting:
                 store.resolve_attention(item["id"])
             queued = False

@@ -70,6 +70,17 @@ class Store:
                                "user_note", "context_expansion", "checks_failing", "signin_lost"})
 
     def event(self, session: str, event) -> None:
+        if event.kind == "task_state" and isinstance(event.text, str):
+            # Structured, but its free-text fields carry check output and reviewer text: redact those fields only.
+            from . import safety
+            try:
+                row = json.loads(event.text)
+                for name in ("summary", "feedback"):
+                    if isinstance(row.get(name), str):
+                        row[name] = safety.redact(row[name])
+                event.text = json.dumps(row, ensure_ascii=False)
+            except (ValueError, TypeError, AttributeError):
+                event.text = safety.redact(event.text)
         if event.kind not in self.STRUCTURED_EVENTS and isinstance(event.text, str):
             from . import safety
             event.text = safety.redact(event.text)  # the one chokepoint before events reach logs and screens

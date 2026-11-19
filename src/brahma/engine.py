@@ -9,7 +9,7 @@ import time
 from dataclasses import replace
 from pathlib import Path
 
-from . import providers
+from . import providers, safety
 from .config import Settings
 from .models import Emit, Event, Plan, Result, Task, extract_json
 
@@ -42,6 +42,15 @@ def _packet(settings, task: Task, index: int, phase: str, worktree, check_result
         return None
 
 
+def _with_leftovers(kind: str, passed: dict, items: list[dict]):
+    """Withdrawing or overruling the high findings must not silently drop the medium and low ones: repair those."""
+    rest = [item for item in items if item["severity"] != "high"]
+    if not rest:
+        return kind, passed
+    return "repair", {"verdict": "changes_requested", "summary": passed["summary"] + " Remaining medium/low findings still need repair.",
+                      "issues": [{"id": i["id"], "severity": i["severity"], "text": i["text"]} for i in rest]}
+
+
 async def _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit, cancel, deadline, budgets,
                          provider_gate, usage, attempt):
     """Handle high-severity findings. Returns (kind, payload):
@@ -55,8 +64,8 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
     if decision == "author":
         state.update(dispute={"state": "resolved", "decision": "author"}, dispute_decision=None)
         _emit(emit, "dispute_overruled", f"Abhinav sided with the author on {len(top)} high-severity finding(s); recorded.")
-        return "overruled", {"verdict": "pass", "summary": review["summary"] + " (high-severity findings overruled by Abhinav)",
-                             "issues": []}
+        return _with_leftovers("overruled", {"verdict": "pass", "summary": review["summary"]
+                               + " (high-severity findings overruled by Abhinav)", "issues": []}, items)
     if decision == "reviewer":
         state.update(dispute={"state": "resolved", "decision": "reviewer"}, dispute_decision=None)
         return "repair", review
@@ -75,6 +84,7 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
     if replied.status != "ok":
         return "repair", review
     state["reply_used"] = True
+    _checkpoint(emit, index, task, "reviewing", attempt)   # persist the spent reply immediately, not at the next checkpoint
     replies = dispute.parse_reply(replied.text, top)
     _emit(emit, "dispute_reply", json.dumps({"index": index, "replies": replies}, ensure_ascii=False))
     if not dispute.disputed(replies):
@@ -93,13 +103,17 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
         second = _review(again.text)
     except (ValueError, TypeError):
         return "repair", review
+    if second["verdict"] == "blocked":
+        return "repair", second          # a blocked re-review is final: the caller blocks the task; no decision can override it
     if second["verdict"] == "pass":
         _emit(emit, "dispute_resolved", "Reviewer withdrew the disputed findings after the author's evidence.")
-        return "pass", second
+        return _with_leftovers("pass", second, items)
     if dispute.high(dispute.findings(second)):
         position = dispute.positions(top, replies, second)
         text = dispute.describe(position)
-        state["dispute"] = {"state": "escalated", "text": text, "position": position}
+        import hashlib
+        state["dispute"] = {"state": "escalated", "text": text, "position": position,
+                            "digest": hashlib.sha256(text.encode()).hexdigest()[:32]}
         _emit(emit, "disagreement", json.dumps({"index": index, "text": text, "position": position}, ensure_ascii=False))
         return "escalate", text
     return "repair", second
@@ -404,11 +418,11 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if extra:
                 widened, _, _ = briefs.expansion(worktree, extra, settings.context_chars)
                 prompt += "\nAdditional files you asked for (one-time expansion):\n" + widened
-            note_text, seen = briefs.notes_for(getattr(settings, "_notes", []), index, budgets[index]["notes_seen"])
+            notes = getattr(settings, "_notes", [])
+            notes = notes() if callable(notes) else notes          # reloaded each attempt, so a note left mid-run is picked up
+            note_text, seen = briefs.notes_for(notes, index, budgets[index]["notes_seen"])
             if note_text:
                 prompt += note_text
-                budgets[index]["notes_seen"] = seen
-                _emit(emit, "note_applied", f"Applied notes up to #{seen} at this checkpoint")
             if feedback:
                 prompt += "\nPrevious attempt feedback; repair within the same accepted scope:\n" + feedback[-12000:]
             prompt += ("\nIf you cannot proceed without reading specific repository files, end your reply with one line "
@@ -445,6 +459,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         _emit(emit, "signin_lost", json.dumps({"index": index, "provider": builder}))
                     _checkpoint(emit, index, task, state, attempt, f"Builder {built.status}")
                     return result(state, task, f"Builder {built.status}; draft retained")
+                if note_text:                                   # counted as applied only once a worker really received it
+                    budgets[index]["notes_seen"] = seen
+                    _emit(emit, "note_applied", f"Applied notes up to #{seen} at this checkpoint")
                 wanted = briefs.missing_context(built.text)
                 if wanted and not budgets[index].get("expansion"):
                     # One bounded widening on an explicit report; never a second, even after a restart.
@@ -481,7 +498,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _checkpoint(emit, index, task, "cancelled", attempt)
                 return result("cancelled", task, "Stopped during checks; draft retained")
             if not checked:
-                feedback = "Actual checks failed:\n" + checks_text[-12000:]
+                feedback = safety.redact("Actual checks failed:\n" + checks_text[-12000:])
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)
                 resume_phase = "build"
                 _checkpoint(emit, index, task, "changes_requested", attempt, feedback)
@@ -537,6 +554,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             except (ValueError, TypeError):
                 review = {"verdict": "changes_requested", "summary": "Reviewer returned invalid JSON; no pass recorded",
                           "issues": ["A valid structured independent review is still required"]}
+            from . import dispute as _dispute
+            if not (review["verdict"] == "changes_requested" and _dispute.high(_dispute.findings(review))):
+                budgets[index]["dispute_decision"] = None       # a decision applies only to the findings it was made on
             if review["verdict"] == "blocked":
                 _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
                 return result("blocked", task, review["summary"])
@@ -556,10 +576,10 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
                 return result("blocked", task, review["summary"])
             if review["verdict"] == "changes_requested":
-                feedback = "Independent review:\n" + json.dumps(review, ensure_ascii=False)
+                feedback = safety.redact("Independent review:\n" + json.dumps(review, ensure_ascii=False))
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)
                 resume_phase = "build"
-                _checkpoint(emit, index, task, "changes_requested", attempt, review["summary"])
+                _checkpoint(emit, index, task, "changes_requested", attempt, safety.redact(review["summary"]))
                 if attempt < min(3, settings.repair_cycles):
                     continue
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,

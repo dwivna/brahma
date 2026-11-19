@@ -156,14 +156,16 @@ def pending(store, key: str) -> list[tuple[str, str, str]]:
     from .cli import session_status
     code, status = session_status(store, key)
     out = []
-    if code == exitcodes.NEEDS_APPROVAL and not store.open_attention(key):
+    events = store.events_after(key, 0, 20000)
+    floor = max([e["seq"] for e in events if e["kind"] == "plan_created"], default=0)   # signals belong to the current plan
+    if code == exitcodes.NEEDS_APPROVAL and not [a for a in store.open_attention(key) if a["kind"] == "decision"]:
         if status["contract_digest"] and not status["approved"]:
             out.append((f"approval:{status['contract_digest']}", "approval", "A plan needs your approval"))
     for item in store.open_attention(key):
         if item["kind"] == "decision":
             out.append((f"disagreement:{item['id']}", "disagreement", _clean(item["text"], 200)))
-    for event in store.events_after(key, 0, 20000):
-        if event["kind"] in SIGNALS:
+    for event in events:
+        if event["kind"] in SIGNALS and event["seq"] >= floor:
             try:
                 value = json.loads(event["text"])
             except (ValueError, TypeError):

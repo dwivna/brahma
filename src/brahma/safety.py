@@ -19,6 +19,8 @@ _SECRET = re.compile(
     r"[\"']?\s*(?:[:=]\s*[\"']?|\s+(?=[^\s\"',;]*\d))(?:(?:bearer|basic)\s+)?(?P<value>[^\s\"',;]{6,})"
     r"|\bbearer\s+[A-Za-z0-9._~+/=-]{8,}"
     r"|sk-[A-Za-z0-9_-]{16,}|\bgh[pousr]_[A-Za-z0-9]{20,}|\bgithub_pat_[A-Za-z0-9_]{20,}|\bAKIA[0-9A-Z]{16}|\bxox[baprs]-[A-Za-z0-9-]{10,}"
+    r"|\bsk_(?:live|test)_[A-Za-z0-9]{16,}|\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"
+    r"|\bAIza[0-9A-Za-z_-]{30,}|\bglpat-[A-Za-z0-9_-]{20,}|\bnpm_[A-Za-z0-9]{30,}|\bhf_[A-Za-z0-9]{30,}"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)")
 # `NAME=value` lines from environment files, where the name suggests a credential.
 _ENV_LINE = re.compile(r"(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:KEY|SECRET|TOKEN|PASS|PASSWORD|CREDENTIAL|DSN)[A-Z0-9_]*\s*=\s*)\S.*$")
