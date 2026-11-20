@@ -319,3 +319,15 @@ Codex reviews independently, and every finding is fixed and closed before releas
    appeared and returned success; from an agent's shell macOS cancels it before it appears (LAError -4). Limit: it does not
    stop a process that can rewrite Brahma or drive the screen.
 6. **Lifting the kill switch and pausing hold work** (findings 8, 16): held jobs run again only after `brahma resume`.
+
+## Round 15 — 21 November 2026 (1.0.0 ship rule)
+
+Abhinav, after Codex review round 15 (asked: "wait for zero findings, or ship with MEDIUM/LOW listed as known limits?";
+answered "ok continue, ship 1.0.0", then "ok go ahead" to the stated interpretation). This amends Round 14, item 1.
+
+1. **Gate:** HIGH findings from the independent Codex review still block 1.0.0 and are fixed and re-reviewed. MEDIUM and
+   LOW findings open at release are listed in the CHANGELOG 1.0.0 "Known limits" with their scenario, and are fixed in
+   later releases. The suite on the release commit, the installed-tool smoke test (doctor, usage, models, demo start,
+   no model requests) and one real `brahma approve` by Abhinav still apply.
+2. **Unchanged:** merging to master and tagging `v1.0.0` are Abhinav's explicit decisions (Round 2); nothing is merged
+   or tagged without his instruction.
