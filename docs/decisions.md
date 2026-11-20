@@ -311,3 +311,11 @@ Codex reviews independently, and every finding is fixed and closed before releas
    enforce it. Writes stay enforced by ownership verification.
 4. **Versioning:** SemVer from 1.0.0. A breaking change to commands, JSON output, exit codes, state schema or contract format
    needs a MAJOR bump.
+5. **Human-only actions (review round 8, finding 1; Abhinav chose "Touch ID / password"):** approving a contract, deciding a
+   disputed review, publishing and lifting the kill switch require macOS device-owner authentication (LocalAuthentication
+   policy 2, run by `/usr/bin/osascript`). There is no flag, variable or setting that skips it; non-macOS systems refuse.
+   Running never approves. CLI approval first prints the whole contract in the person's terminal, reads the digest prefix
+   from `/dev/tty`, and binds the approval to that digest. Verified 20 November 2026: from Abhinav's own Terminal the dialog
+   appeared and returned success; from an agent's shell macOS cancels it before it appears (LAError -4). Limit: it does not
+   stop a process that can rewrite Brahma or drive the screen.
+6. **Lifting the kill switch and pausing hold work** (findings 8, 16): held jobs run again only after `brahma resume`.

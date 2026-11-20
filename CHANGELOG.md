@@ -6,7 +6,29 @@ decided by Abhinav. See `docs/decisions.md`.
 
 ## 1.0.0
 
-First release. No code change beyond 0.13.0; this version marks the release decision (docs/decisions.md, Round 14).
+First release (docs/decisions.md, Round 14). Includes the fixes from independent review round 8 and the automated
+security reviews that followed.
+
+**Changed (breaking against 0.13.0)**
+- **Approval is human-only.** `brahma approve SESSION [--queue]`, `run PLAN --approve` and `/approve` require Touch ID or the
+  login password (macOS LocalAuthentication). The CLI shows the whole contract first, reads the digest prefix from the
+  terminal and binds the approval to it. `run --session` runs an approved session and never approves. `decide`,
+  `/publish` and `kill --release` need the same confirmation. Other systems refuse these actions.
+- **JSON:** every command, with the global `--json` or its own, returns one object with `ok` and `exit_code`; `models`
+  and `usage` reports are nested under their name. Exit codes are locked; `needs_checks` exits 12.
+- **Kill switch and pause hold work:** lifting the switch, or pausing a running session, leaves its jobs `held` until
+  `brahma resume`; `resume` is refused while the switch is engaged.
+
+**Fixed**
+- Dispute decisions are bound to the exact findings and worktree state they were made on.
+- Ownership is verified against the Git identity taken at run start (branch, HEAD, Git directory); a worker commit, a
+  branch switch, hidden index flags or repository fsmonitor config cannot hide a change. Every worker exit is verified.
+- Check output is redacted before the reviewer sees it; nested `.env` files in ignored caches are detected.
+- Publication pushes only the commit recorded when the run became ready, from a clean worktree.
+- Worker and check process groups left by a dead coordinator are stopped before new work starts.
+- The state directory and database are private (0700/0600, symlinks refused); the schema migration is atomic.
+- The approval screen and board show the real locked settings and budget; a planner run halts on an external kill or stop.
+- The README no longer claims writes are confined to the worktree.
 
 **Known limits shipped with 1.0.0 (not hidden by the version number)**
 - Toolchain binding covers the check program, its JDK and the startup files and variables listed under 0.13.0. Other
