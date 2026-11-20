@@ -65,7 +65,7 @@ class Finding1DecisionsBoundToTheirEscalation(unittest.TestCase):
 
 class Finding2And3CredentialFields(unittest.TestCase):
     def test_file_name_keys_keep_their_fingerprints(self):
-        snapshot = {"snapshot": {"src/tokenizer.py": "100644:abc", "src/passwords.py": "100644:def"}}
+        snapshot = {"snapshot": {"src/tokenizer.py": "33188:" + "a" * 64, "src/passwords.py": "33188:" + "d" * 64}}
         self.assertEqual(safety.redact_deep(snapshot), snapshot)
 
     def test_numbers_under_credential_names_are_hidden_and_usage_counters_are_kept(self):

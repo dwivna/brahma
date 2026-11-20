@@ -147,12 +147,17 @@ class Finding7ResumeVerificationIsCharged(unittest.IsolatedAsyncioTestCase):
 
 class Finding8FingerprintMapsKeepTheirPaths(unittest.TestCase):
     def test_an_extensionless_file_named_like_a_credential_keeps_its_fingerprint(self):
-        row = {"baseline": {"tokenizer": "100644:aa", "secret": "100644:bb"}, "snapshot": {"password": "absent"},
-               "token": "hide-me"}
+        row = {"baseline": {"tokenizer": "33188:" + "a" * 64, "secret": "33261:" + "b" * 64},
+               "snapshot": {"password": "absent", "link": "symlink:../shared"}, "token": "hide-me"}
         cleaned = safety.redact_deep(row)
         self.assertEqual(cleaned["baseline"], row["baseline"])
         self.assertEqual(cleaned["snapshot"], row["snapshot"])
         self.assertEqual(cleaned["token"], safety.REDACTED)
+
+    def test_values_under_a_path_map_name_that_are_not_fingerprints_are_hidden(self):
+        # Automated security review of fb3d3c5: a worker's JSON can use the same field names at any depth.
+        cleaned = safety.redact_deep({"review": {"changes": {"password": "hunter2-plain", "nested": {"a": 1}}}})
+        self.assertEqual(cleaned["review"]["changes"], {"password": safety.REDACTED, "nested": safety.REDACTED})
 
 
 class Finding9FollowOnInstructions(unittest.TestCase):

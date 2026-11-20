@@ -109,6 +109,18 @@ def _hide_all(value):
 
 # Structured fields that map repository paths to content fingerprints (ownership baselines, ready snapshots, trees).
 PATH_MAPS = frozenset({"snapshot", "baseline", "changes", "uncommitted"})
+# The shapes gittools._fingerprint produces: "<mode>:<sha256>", "absent", "unreadable", "special:<mode>",
+# "changing:<ns>", or "symlink:<target>" (whose target text is still redacted).
+_FINGERPRINT = re.compile(r"\d{1,7}:[0-9a-f]{64}|absent|unreadable|special:\d{1,7}|changing:\d{1,25}")
+
+
+def _fingerprint_value(value):
+    if isinstance(value, str):
+        if _FINGERPRINT.fullmatch(value):
+            return value
+        if value.startswith("symlink:"):
+            return redact(value)
+    return REDACTED
 
 
 def redact_deep(value):
@@ -121,8 +133,9 @@ def redact_deep(value):
         for key, item in value.items():
             if str(key) in PATH_MAPS and isinstance(item, dict):
                 # A file-fingerprint map: its keys are repository paths, never field names, so they are kept as they
-                # are (a file called `tokenizer` keeps its fingerprint); the values still go through redact().
-                out[key] = {path: redact_deep(fingerprint) for path, fingerprint in item.items()}
+                # are (a file called `tokenizer` keeps its fingerprint). Only values shaped like the fingerprints Brahma
+                # computes are kept; anything else under such a name (worker-supplied JSON) is hidden.
+                out[key] = {path: _fingerprint_value(fingerprint) for path, fingerprint in item.items()}
             elif credential_field(str(key)) and not _usage_counter(str(key), item):
                 out[key] = _hide_all(item)
             else:
