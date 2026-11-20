@@ -161,7 +161,7 @@ class EngineRouting(unittest.IsolatedAsyncioTestCase):
         settings._routing_history = hist
         review = json.dumps({"verdict": "pass", "summary": "ok", "issues": []})
 
-        async def run(provider, prompt, cwd, role, selected, emit, cancel, timeout, native_session_id=None):
+        async def run(provider, prompt, cwd, role, selected, emit, cancel, timeout, native_session_id=None, **_extra):
             self.calls.append((provider, role))
             return Result(provider, "ok", review if role == "reviewer" else "done")
         with patch.object(engine.providers, "run", side_effect=run):

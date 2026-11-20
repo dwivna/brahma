@@ -221,7 +221,7 @@ class EngineBlocksAfterRestore(unittest.IsolatedAsyncioTestCase):
             plan = Plan("goal", [Task("t", "do", ["src/**"], ["ok"])], checks=[["true"]])
             events = []
 
-            async def fake_run(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id=None):
+            async def fake_run(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id=None, **_extra):
                 (Path(cwd) / "outside.txt").write_text("not owned\n")
                 (Path(cwd) / "src").mkdir(exist_ok=True)
                 (Path(cwd) / "src" / "a.py").write_text("x=1\n")
@@ -277,7 +277,7 @@ class PublishDestination(unittest.TestCase):
                     return "h1"
                 return "brahma/abc123def456" if args[:2] == ("branch", "--show-current") else ""
             fake_run = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1"})()
-            with patch("brahma.gittools.git", fake_git), patch("shutil.which", lambda name: "/usr/bin/gh"), \
+            with patch("brahma.gittools.git", fake_git), patch("shutil.which", lambda name, **kw: "/usr/bin/gh"), \
                     patch("brahma.gittools.status_paths", return_value=[]), \
                     patch("brahma.gittools.hidden_index_entries", return_value=[]), \
                     patch("brahma.gittools.subprocess.run", lambda *a, **k: fake_run):

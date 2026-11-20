@@ -45,24 +45,30 @@ def _hide(match: "re.Match[str]") -> str:
     return match.group(0).replace(value, REDACTED) if value else REDACTED
 
 
-# A JSON key that names a credential: its value is hidden whatever it looks like (`{"password": "hunter2"}` has no
-# recognisable shape once the name and value are separate fields).
-_CREDENTIAL_KEY = re.compile(r"(?i)api[_-]?key|apikey|secret|token|passw|authorization|credential|private[_-]?key|cookie")
+# A JSON field that names a credential: its value is hidden whatever it looks like (`{"password": "hunter2"}` has no
+# recognisable shape once the name and value are separate fields). Matched on whole name segments, so `tokenizer`,
+# `input_tokens` (a usage counter) and file paths used as keys (`src/passwords.py` -> fingerprint) are not credentials.
+_CREDENTIAL_WORDS = frozenset({"password", "passwd", "passphrase", "pwd", "secret", "secrets", "token", "apikey",
+                               "authorization", "auth", "credential", "credentials", "cookie", "cookies", "bearer"})
+_CREDENTIAL_PAIRS = frozenset({("api", "key"), ("private", "key"), ("access", "key"), ("secret", "key"),
+                               ("client", "secret"), ("session", "key"), ("access", "token"), ("refresh", "token")})
 
 
-def _hide_all(value, key: str):
+def credential_field(name: str) -> bool:
+    if "/" in name or "." in name:                    # a path or file name used as a key: never a field name
+        return False
+    words = [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)]
+    return any(w in _CREDENTIAL_WORDS for w in words) or any(pair in _CREDENTIAL_PAIRS for pair in zip(words, words[1:]))
+
+
+def _hide_all(value):
     if isinstance(value, bool) or value is None:
         return value
-    if isinstance(value, (int, float)):
-        # Provider usage counters (input_tokens, output_tokens, ...) are numbers named after tokens, not credentials.
-        return value if "token" in key.lower() else REDACTED
-    if isinstance(value, str):
-        return REDACTED if value else value
     if isinstance(value, dict):
-        return {k: _hide_all(item, key) for k, item in value.items()}
+        return {k: _hide_all(item) for k, item in value.items()}
     if isinstance(value, (list, tuple)):
-        return [_hide_all(item, key) for item in value]
-    return REDACTED
+        return [_hide_all(item) for item in value]
+    return REDACTED if value != "" else value
 
 
 def redact_deep(value):
@@ -71,11 +77,32 @@ def redact_deep(value):
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: _hide_all(item, str(key)) if _CREDENTIAL_KEY.search(str(key)) else redact_deep(item)
-                for key, item in value.items()}
+        return {key: _hide_all(item) if credential_field(str(key)) else redact_deep(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact_deep(item) for item in value]
     return value
+
+
+def read_regular(path, limit: int, *, follow: bool = True) -> bytes:
+    """Read at most `limit` bytes of a regular file without ever blocking. The file type is checked on the opened
+    descriptor (O_NONBLOCK), so a FIFO or device placed at the path, even after an earlier check, is refused instead of
+    hanging the coordinator. Raises OSError for anything else and ValueError when the file is larger than `limit`."""
+    import os
+    import stat
+    flags = os.O_RDONLY | os.O_NONBLOCK | (0 if follow else getattr(os, "O_NOFOLLOW", 0))
+    descriptor = os.open(path, flags)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"Not a regular file: {path}")
+        stream = os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+    with stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError(f"File exceeds its {limit}-byte limit: {path}")
+    return data
 
 
 def redact(text: str) -> str:

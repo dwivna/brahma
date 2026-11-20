@@ -180,6 +180,8 @@ def stream_events(store: Store, key: str, after: int, follow: bool) -> int:
                 from .safety import redact_deep
                 print(json.dumps(redact_deep(event), ensure_ascii=False), flush=True)
                 after = event["seq"]
+            if batch:
+                continue                       # drain everything already stored; --follow only decides about waiting
             if not follow:
                 break
             code = session_status(store, key)[0]
@@ -459,15 +461,17 @@ def _main(argv):
             latest = json.loads(disputes[-1]["text"])
             index = latest["index"]
             digest = hashlib.sha256(latest["text"].encode()).hexdigest()[:32]   # binds the decision to these exact positions
+            session = Session(store, Path(saved["repo"]), key=args.session)
             from . import presence
             presence.require(f"side with the {args.side} on a disputed high-severity review finding (task {index})")
+            # Bound to this plan generation and this exact escalation: it can never decide a later or another plan's dispute.
             store.event(args.session, Event("brahma", "user", "dispute_decision",
-                                            json.dumps({"index": index, "for": args.side, "digest": digest})))
+                                            json.dumps({"index": index, "for": args.side, "digest": digest,
+                                                        "generation": session.generation, "escalation": disputes[-1]["seq"]})))
             for item in waiting:
                 store.resolve_attention(item["id"])
             queued = False
             if saved["approved_digest"] and not saved["stopped"]:
-                session = Session(store, Path(saved["repo"]), key=args.session)
                 store.enqueue(args.session, session.generation, saved["approved_digest"], time.time(),
                               "Abhinav decided a disputed review")
                 queued = True

@@ -54,7 +54,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
     async def execute(self, responses, tasks=None, settings=None, completed=None, progress=None):
         responses = iter(responses)
         active = 0
-        async def run(provider, prompt, cwd, role, selected_settings, emit, cancel, timeout):
+        async def run(provider, prompt, cwd, role, selected_settings, emit, cancel, timeout, **_extra):
             nonlocal active
             active += 1
             self.assertEqual(active, 1, "Workers must never overlap")

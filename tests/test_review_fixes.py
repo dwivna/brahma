@@ -89,7 +89,7 @@ class Flow(unittest.IsolatedAsyncioTestCase):
     async def run_flow(self, script, progress=None, settings=None):
         queue = list(script)
 
-        async def run(provider, prompt, cwd, role, s, emit, cancel, timeout, native_session_id=None):
+        async def run(provider, prompt, cwd, role, s, emit, cancel, timeout, native_session_id=None, **_extra):
             self.calls.append((role, prompt))
             return queue.pop(0)[1]
         with patch.object(engine.providers, "run", side_effect=run):

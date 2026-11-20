@@ -230,7 +230,8 @@ async def probe_codex(cancel: asyncio.Event, timeout: float = 8) -> dict:
         auth = await doctor("codex")
         if not auth.get("available"):
             return unknown("codex", source, "Subscription sign-in unavailable")
-        executable = shutil.which("codex")
+        from .providers import find_executable
+        executable = find_executable("codex")
         if not executable:
             return unknown("codex", source, "Codex CLI is not installed")
         process = await asyncio.create_subprocess_exec(executable, "app-server", "--listen", "stdio://",

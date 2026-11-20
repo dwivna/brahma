@@ -40,8 +40,11 @@ class Settings:
         path = repo / "brahma.toml"
         if not path.exists():
             return cls()
-        with path.open("rb") as stream:
-            data = tomllib.load(stream).get("brahma", {})
+        from .safety import read_regular
+        try:
+            data = tomllib.loads(read_regular(path, 262144).decode("utf-8")).get("brahma", {})
+        except OSError as error:
+            raise ValueError("brahma.toml is not a readable regular file") from error
         if not isinstance(data, dict) or set(data) - set(cls.__dataclass_fields__):
             raise ValueError("Unknown Brahma configuration keys")
         result = cls(**data)

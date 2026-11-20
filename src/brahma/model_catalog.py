@@ -96,7 +96,7 @@ async def discover_models(provider: str, cancel=None, timeout=8) -> dict:
         auth = await providers.doctor(provider)
         if not isinstance(auth, dict) or auth.get("available") is not True:
             return report(error="Subscription sign-in unavailable; run brahma doctor")
-        executable = shutil.which(provider)
+        executable = providers.find_executable(provider)
         if not executable:
             return report(error=f"{provider} CLI is not installed")
         if provider == "codex":

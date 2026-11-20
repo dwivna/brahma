@@ -94,10 +94,13 @@ def _instructions(repo: Path, plan: Plan) -> dict[str, str]:
                     raise ValueError("Instruction symlinks cannot enter an approval")
                 if item == repo:
                     break
-            with path.open("rb") as stream:
-                content = stream.read(65537)
-            if len(content) > 65536:
-                raise ValueError("Instruction exceeds contract fingerprint limit")
+            from .safety import read_regular
+            try:
+                content = read_regular(path, 65536, follow=False)
+            except ValueError:
+                raise ValueError("Instruction exceeds contract fingerprint limit") from None
+            except OSError as error:
+                raise ValueError(f"Instruction file is not a readable regular file: {path.name}") from error
             result[path.relative_to(repo).as_posix()] = hashlib.sha256(content).hexdigest()
     return result
 
@@ -162,9 +165,14 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                 selected[identifier] = {"provider": entry.provider, "kind": entry.kind,
                                         "scope": entry.scope, "path": entry.path, "sha256": current,
                                         "state": "discovered", "enabled": False}
+    revision = base_revision if base_revision is not None else _revision(repo)
+    from .gitsafe import unsupported_repository
+    unsupported = unsupported_repository(repo, revision)     # refused before approval, not discovered during a run
+    if unsupported:
+        raise ValueError(unsupported)
     payload = {"plan": plan.to_dict(), "feature": render_feature(plan),
                "checks": selected_checks, "repository": str(repo),
-               "base_revision": base_revision if base_revision is not None else _revision(repo),
+               "base_revision": revision,
                "instructions": _instructions(repo, plan), "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,
                                "quota_wait_counts": False}, "models": model_profiles or {},
@@ -222,12 +230,11 @@ def _has_symlink(path: Path) -> bool:
 def _bounded_read(path: Path) -> bytes:
     if _has_symlink(path):
         raise ValueError("Contract symlinks cannot authorize execution")
-    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
-    with os.fdopen(fd, "rb") as stream:
-        content = stream.read(MAX_CONTRACT_BYTES + 1)
-    if len(content) > MAX_CONTRACT_BYTES:
-        raise ValueError("Contract artifact exceeds size limit")
-    return content
+    from .safety import read_regular
+    try:
+        return read_regular(path, MAX_CONTRACT_BYTES, follow=False)
+    except ValueError:
+        raise ValueError("Contract artifact exceeds size limit") from None
 
 
 def _write_once(path: Path, content: bytes) -> None:

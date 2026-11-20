@@ -34,6 +34,15 @@ def clean_text(value: Any) -> str:
     return _ESCAPES.sub("", value if isinstance(value, str) else str(value))
 
 
+def find_executable(name: str) -> str | None:
+    """One absolute path for a program, from absolute PATH entries only. A relative entry (`.venv/bin`) would resolve
+    against whatever directory a process starts in: the coordinator's when sign-in is checked, the worktree's (which
+    workers can write) when the worker is launched. The same absolute path is used for both."""
+    from .toolchain import trusted_path
+    found = shutil.which(name, path=trusted_path(dict(os.environ)))
+    return os.path.abspath(found) if found else None
+
+
 def child_env() -> dict[str, str]:
     """Keep local sign-in files, remove credential variables, agent sockets and alternate provider routing.
 
@@ -102,7 +111,7 @@ async def doctor(provider: str) -> dict[str, Any]:
     if provider not in ("codex", "claude"):
         result["error"] = "Unsupported provider"
         return result
-    executable = shutil.which(provider)
+    executable = find_executable(provider)
     if not executable:
         result["error"] = f"{provider} CLI is not installed"
         result["state"] = "missing"
@@ -316,8 +325,11 @@ OVERLOAD_MIN_BUDGET = 60.0
 
 async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
               emit: Emit, cancel: asyncio.Event, timeout: float,
-              native_session_id: str | None = None) -> Result:
+              native_session_id: str | None = None, between=None) -> Result:
     """Run one bounded worker, retrying a transient "overloaded" error inside the same attempt.
+
+    `between()` is called after an invocation exits and before a retry starts; a non-empty answer (a verification
+    problem) ends the attempt as "blocked" so the caller verifies and restores before anything else runs.
 
     Retries spend no repair cycle and never touch quota state; they stay inside the caller's
     time budget. If the provider is still overloaded the result status is "overloaded".
@@ -331,9 +343,15 @@ async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
     emit(Event(provider, role, "enforcement", report.describe()))
     started = time.monotonic()
     result = await _run_once(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id)
+    spent = dict(result.usage or {})                   # every physical invocation's usage is kept, not only the last
     for delay in OVERLOAD_DELAYS:
         if result.status != "overloaded":
             break
+        # An invocation that exited is verified before another starts: a retry must never hide the first one's changes.
+        problem = between() if between else None
+        if problem:
+            return Result(provider, "blocked", "Changes from the overloaded attempt failed verification: " + problem,
+                          usage=spent, seconds=time.monotonic() - started)
         remaining = timeout - (time.monotonic() - started)
         # Waiting is only worth it if a useful slice of the budget is left afterwards.
         if remaining <= delay + max(OVERLOAD_MIN_BUDGET, 0.25 * timeout):
@@ -342,12 +360,24 @@ async def run(provider: str, prompt: str, cwd: Path, role: str, settings,
                    f"Provider overloaded; retrying in {int(delay)}s within this attempt (no repair cycle used)"))
         try:
             await asyncio.wait_for(cancel.wait(), delay)
-            return Result(provider, "cancelled", seconds=time.monotonic() - started)
+            return Result(provider, "cancelled", usage=spent, seconds=time.monotonic() - started)
         except asyncio.TimeoutError:
             pass
         result = await _run_once(provider, prompt, cwd, role, settings, emit, cancel,
                                  timeout - (time.monotonic() - started), native_session_id)
+        spent = _add_usage(spent, result.usage or {})
+    result.usage = spent
     return result
+
+
+def _add_usage(total: dict, more: dict) -> dict:
+    """Sum provider-reported counters across invocations; non-numeric fields keep the latest value."""
+    out = dict(total)
+    for key, value in more.items():
+        number = isinstance(value, (int, float)) and not isinstance(value, bool)
+        previous = out.get(key)
+        out[key] = previous + value if number and isinstance(previous, (int, float)) and not isinstance(previous, bool) else value
+    return out
 
 
 async def _run_once(provider: str, prompt: str, cwd: Path, role: str, settings,
@@ -379,7 +409,7 @@ async def _run_once(provider: str, prompt: str, cwd: Path, role: str, settings,
         return Result(provider, "unavailable", auth["error"] or "Subscription unavailable", seconds=time.monotonic() - started)
     if cancel.is_set():
         return Result(provider, "cancelled", seconds=time.monotonic() - started)
-    executable = shutil.which(provider)
+    executable = find_executable(provider)
     parser = StreamParser(provider, role, emit)
     process = None
     record = None

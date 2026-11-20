@@ -291,7 +291,8 @@ class GitMetadataCannotHideChanges(Fixture):
     def test_assume_unchanged_cannot_hide_an_edit(self):
         self.write("src/keep.py", "x = 'tampered'\n")
         self.git("update-index", "--assume-unchanged", "src/keep.py")
-        self.assertEqual(gittools.status_paths(self.repo), [])
+        # Git's status hides it; Brahma's own content comparison does not (review round 12, finding 7).
+        self.assertEqual(gittools.status_paths(self.repo), ["src/keep.py"])
         ok, reason = gittools.ownership_changes(self.repo, ["other/**"], baseline={}, identity=self.identity)
         self.assertFalse(ok)
         self.assertIn("index flags", reason)

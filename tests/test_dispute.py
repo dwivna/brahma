@@ -80,7 +80,7 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         """script: list of (role, Result) in the order the engine should call providers."""
         queue = list(script)
 
-        async def run(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id=None):
+        async def run(provider, prompt, cwd, role, settings, emit, cancel, timeout, native_session_id=None, **_extra):
             self.calls.append((provider, role, prompt))
             expected_role, response = queue.pop(0)
             self.assertEqual(role, expected_role, f"unexpected call order: {[c[:2] for c in self.calls]}")

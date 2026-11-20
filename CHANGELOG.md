@@ -38,6 +38,17 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Independent review round 12: a dispute decision is bound to its plan generation and to the escalation it answers;
+  credential-field redaction matches whole name segments (file paths used as keys keep their fingerprints, `token` numbers
+  are hidden, usage counters kept); resume checks verify and restore ownership on every exit, including failure and
+  exceptions; ownership is verified between overload retries inside one provider call, and every retry's usage is kept;
+  a review with more findings than a dispute handles is repaired whole, never truncated; Brahma compares tracked file
+  contents itself rather than trusting Git's whole-second stat cache, and pins Git's strict change detection; repositories
+  with submodules or configured filter drivers are refused at approval and before checkout, and a commit must store
+  exactly the checked bytes; a changed directory (nested repository) is never accepted; rollback refuses to act through
+  moved Git metadata, and removes special files before reporting them restored; provider and `gh` programs are found on
+  absolute PATH entries only and launched by that absolute path; `brahma events` prints every stored event; instruction,
+  configuration and contract files are read without ever blocking on a FIFO.
 - Independent review round 11: a value stored under a credential-named field (`password`, `api_key`, ...) is hidden at
   any depth, while provider token counters are kept; every string in a plan, including its Gherkin feature, is checked
   for credentials before approval; every approved instruction file must be present in the run's checkout (one that is

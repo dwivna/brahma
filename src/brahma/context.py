@@ -10,7 +10,7 @@ def build_context(repo: Path, files: list[str], limit: int, approved: dict[str, 
     this plan's own workers and is sent marked as such. Recognisable secrets are always redacted."""
     import hashlib
     from . import ownership
-    from .safety import redact
+    from .safety import read_regular, redact
     root = repo.resolve()
     instructions = []
     candidates = {root / "AGENTS.md", root / "CLAUDE.md"}
@@ -43,7 +43,7 @@ def build_context(repo: Path, files: list[str], limit: int, approved: dict[str, 
             if path.is_symlink() or not path.resolve().is_relative_to(root):
                 raise ValueError("Repository instructions escaped the selected repository")
             relative = path.relative_to(root).as_posix()
-            content = path.read_bytes()
+            content = read_regular(path, 1 << 20, follow=False)
             label = relative
             if approved is not None and approved.get(relative) != hashlib.sha256(content).hexdigest():
                 if plan_owned(relative):
@@ -55,7 +55,7 @@ def build_context(repo: Path, files: list[str], limit: int, approved: dict[str, 
     if len(mandatory) > limit - 1000:
         raise ValueError("Mandatory repository instructions exceed context cap; raise cap instead of dropping them")
     reports = []
-    for args in (("status", "--short"), ("diff", "--stat")):
+    for args in (("status", "--short"), ("diff", "--stat", "--no-ext-diff", "--no-textconv")):
         from .gitsafe import run_git
         result = run_git(root, *args, timeout=15)
         reports.append(result.stdout[:2000])

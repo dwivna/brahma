@@ -121,6 +121,33 @@ class Session:
                 self.store.event(self.key, note)
                 self.callback(note)
 
+    def _decisions(self) -> dict[int, tuple[str, str | None]]:
+        """The person's dispute decisions that still apply: each is bound to this plan generation and to the newest
+        escalation of its task, so an earlier decision can never settle a later or another plan's dispute."""
+        decisions: dict[int, tuple[str, str | None]] = {}
+        escalations: dict[int, int] = {}          # the newest dispute escalation per task, in this plan only
+        plan_floor = self.store.latest_seq(self.key, "plan_created")
+        for event in self.store.events_since(self.key, 1):
+            if event["kind"] == "disagreement" and event["seq"] >= plan_floor:
+                try:
+                    escalated = json.loads(event["text"]).get("index")
+                except (ValueError, TypeError, AttributeError):
+                    escalated = None
+                if type(escalated) is int:
+                    escalations[escalated] = event["seq"]
+                    decisions.pop(escalated, None)          # a new escalation voids any earlier decision for the task
+            if event["kind"] == "dispute_decision":
+                try:
+                    said = json.loads(event["text"])
+                    index = said.get("index")
+                    if (said.get("for") in ("reviewer", "author") and type(index) is int
+                            and said.get("generation") == self.generation
+                            and type(said.get("escalation")) is int and said["escalation"] == escalations.get(index)):
+                        decisions[index] = (said["for"], said.get("digest"))
+                except (ValueError, TypeError, AttributeError):
+                    pass
+        return decisions
+
     def _notes(self):
         """Notes Abhinav left for this session; applied by the engine at its next checkpoint, never mid-run."""
         from .briefs import Note
@@ -519,15 +546,8 @@ class Session:
             current = gittools.snapshot_changes(worktree, self.settings.ignored_allowlist)
             head = gittools.git(worktree, "rev-parse", "HEAD")
             current_index = None
-            decisions: dict[int, str] = {}
+            decisions = self._decisions()
             for event in self.store.events(self.key):
-                if event["kind"] == "dispute_decision":
-                    try:
-                        said = json.loads(event["text"])
-                        if said.get("for") in ("reviewer", "author") and type(said.get("index")) is int:
-                            decisions[said["index"]] = (said["for"], said.get("digest"))
-                    except (ValueError, TypeError, AttributeError):
-                        pass
                 if event["kind"] == "native_session" and current_index in progress and event["role"] in ("builder", "reviewer"):
                     progress[current_index][event["role"] + "_session"] = event["text"]
                 if event["kind"] == "task_state":

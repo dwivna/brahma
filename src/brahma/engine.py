@@ -81,11 +81,15 @@ def _with_leftovers(kind: str, passed: dict, items: list[dict]):
 
 
 async def _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit, cancel, deadline, budgets,
-                         provider_gate, usage, attempt, postflight=None):
+                         provider_gate, usage, attempt, postflight=None, between=None):
     """Handle high-severity findings. Returns (kind, payload):
     ("repair", review) normal repair loop; ("pass", review) the reviewer withdrew; ("overruled", review) Abhinav sided
     with the author; ("escalate", text) stop and wait for Abhinav. Allows one author reply per task."""
     from . import dispute
+    if len(review.get("issues", [])) > dispute.MAX_FINDINGS:
+        # Disputes handle a bounded set of findings; a longer review is never shortened (a finding past the bound could
+        # never be reconsidered, yet a withdrawal of the rest would pass the task). It goes to repair whole.
+        return "repair", review
     items = dispute.findings(review)
     top = dispute.high(items)
     state = budgets[index]
@@ -113,7 +117,7 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
     prompt = _BOUNDARIES + "\n" + dispute.reply_prompt(brief, top)
     state["worker_ran"] = True
     replied = await providers.run(builder, prompt, worktree, "reply", author_settings, emit, cancel,
-                                  max(0, deadline - time.monotonic()))
+                                  max(0, deadline - time.monotonic()), between=between)
     usage[f"task_{index}_attempt_{attempt}_reply"] = replied.usage
     if postflight and (problem := postflight()):        # ownership is verified after every worker exit
         return "blocked", problem
@@ -131,7 +135,8 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
             return "repair", review
     reviewer_settings = _settings_for(settings, reviewer, task.complexity)
     again = await providers.run(reviewer, _BOUNDARIES + "\n" + dispute.rereview_prompt(brief, top, replies), worktree,
-                                "reviewer", reviewer_settings, emit, cancel, max(0, deadline - time.monotonic()))
+                                "reviewer", reviewer_settings, emit, cancel, max(0, deadline - time.monotonic()),
+                                between=between)
     usage[f"task_{index}_attempt_{attempt}_rereview"] = again.usage
     if postflight and (problem := postflight()):
         return "blocked", problem
@@ -162,6 +167,18 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
         _emit(emit, "disagreement", json.dumps({"index": index, "text": text, "position": position}, ensure_ascii=False))
         return "escalate", text
     return "repair", second
+
+
+def _violation(worktree, files, baseline, settings, identity):
+    """Detect-only ownership check between two invocations inside one provider call (verification and restore follow
+    in the caller). Returns the reason, or None when ownership holds."""
+    from .gittools import ownership_changes
+    try:
+        owned, reason = ownership_changes(worktree, files, baseline=baseline, ignored_allow=settings.ignored_allowlist,
+                                          identity=identity)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return "ownership could not be verified: " + str(error)
+    return None if owned else reason
 
 
 def _restore_note(worktree, files, baseline, settings, emit, identity=None) -> str:
@@ -541,9 +558,10 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                            f"Using {builder_settings.model_for(builder)} for {task.complexity} work; contract-locked profile."))
                 native = budgets[index].get("builder_session")
                 kwargs = {"native_session_id": native} if native else {}
+                between = lambda: _violation(worktree, task.files, baseline, settings, identity)   # noqa: E731
                 built = await providers.run(builder, prompt, worktree, "builder",
                             builder_settings, emit, cancel,
-                            max(0, deadline - time.monotonic()), **kwargs)
+                            max(0, deadline - time.monotonic()), between=between, **kwargs)
                 budgets[index]["builder_session"] = built.session_id or native
                 usage[f"task_{index}_attempt_{attempt}_builder"] = built.usage
                 if built.status != "ok":
@@ -576,7 +594,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                             return result("blocked", task, "File ownership check failed: " + reason)
                         again = await providers.run(builder, prompt + "\nAdditional files you asked for (one-time expansion):\n"
                                                     + widened, worktree, "builder", builder_settings, emit, cancel,
-                                                    max(0, deadline - time.monotonic()),
+                                                    max(0, deadline - time.monotonic()), between=between,
                                                     **({"native_session_id": budgets[index]["builder_session"]}
                                                        if budgets[index].get("builder_session") else {}))
                         budgets[index]["builder_session"] = again.session_id or budgets[index].get("builder_session")
@@ -669,8 +687,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                            f"Using {reviewer_settings.model_for(reviewer)} for independent {task.complexity} review; contract-locked profile."))
                 kwargs = {"native_session_id": native} if native else {}
                 reviewed = await providers.run(reviewer, review_prompt, worktree, "reviewer",
-                             reviewer_settings, emit, cancel,
-                             max(0, deadline - time.monotonic()), **kwargs)
+                             reviewer_settings, emit, cancel, max(0, deadline - time.monotonic()),
+                             between=lambda: _violation(worktree, task.files, baseline, settings, identity), **kwargs)
                 budgets[index]["reviewer_session"] = reviewed.session_id or native
                 usage[f"task_{index}_attempt_{attempt}_reviewer"] = reviewed.usage
                 if reviewed.status != "ok":
@@ -709,7 +727,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                                                           ignored_allow=settings.ignored_allowlist, identity=identity)
                         return None if owned else reason + _restore_note(worktree, task.files, baseline, settings, emit, identity)
                     kind, payload = await _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit,
-                                                         cancel, deadline, budgets, provider_gate, usage, attempt, postflight)
+                                                         cancel, deadline, budgets, provider_gate, usage, attempt, postflight,
+                                                         lambda: _violation(worktree, task.files, baseline, settings, identity))
                     if kind == "blocked":
                         _checkpoint(emit, index, task, "blocked", attempt, payload)
                         return result("blocked", task, "File ownership check failed: " + payload)
@@ -781,18 +800,30 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             reviewed = _tree(worktree, settings)     # the session accepted these completed tasks against these contents
         except (OSError, ValueError, subprocess.SubprocessError) as error:
             return result("blocked", detail="Reviewed files could not be fingerprinted: " + str(error))
+        def verify_after_checks() -> str | None:
+            """Ownership after the checks ran, whatever their outcome; violations are restored to the reviewed state."""
+            owned, reason = ownership_changes(worktree, everything, ignored_allow=settings.ignored_allowlist, identity=identity)
+            return None if owned else reason + _restore_note(worktree, everything, reviewed["changes"], settings, emit, identity)
+
         try:
             checked, checks_text = await run_checks(worktree, settings.checks, cancel,
                                                    min(3600, settings.task_timeout), emit, None,
                                                    getattr(settings, "bound_toolchain", None))
-        except toolchain.ToolchainChanged as error:
-            return result("blocked", detail=str(error))
+        except BaseException as error:
+            try:
+                problem = verify_after_checks()
+            except Exception as failure:
+                problem = "ownership could not be verified: " + str(failure)
+            if isinstance(error, toolchain.ToolchainChanged):
+                return result("blocked", detail=str(error) + (f"; resume ownership check failed: {problem}" if problem else ""))
+            if problem:
+                _emit(emit, "checkpoint", "Resume ownership check failed: " + problem)
+            raise
+        problem = verify_after_checks()
+        if problem:
+            return result("blocked", detail="Resume ownership check failed: " + problem)
         if not checked or cancel.is_set():
             return result("cancelled" if cancel.is_set() else "incomplete", detail=safety.redact(checks_text[-1000:]))
-        owned, reason = ownership_changes(worktree, everything, ignored_allow=settings.ignored_allowlist, identity=identity)
-        if not owned:
-            reason += _restore_note(worktree, everything, reviewed["changes"], settings, emit, identity)
-            return result("blocked", detail="Resume ownership check failed: " + reason)
         try:
             verified_tree = _tree(worktree, settings)
         except (OSError, ValueError, subprocess.SubprocessError) as error:

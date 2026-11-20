@@ -114,6 +114,10 @@ def create_worktree(repo: Path, home: Path, session: str, base_revision: str = "
         if left != right or git(path, "branch", "--show-current") != "brahma/" + session:
             raise ValueError("Saved worktree identity does not match this session")
         return path
+    from .gitsafe import unsupported_repository
+    unsupported = unsupported_repository(repo, base_revision)      # before checkout, which would run a smudge filter
+    if unsupported:
+        raise ValueError(unsupported)
     if git(repo, "status", "--porcelain", "--untracked-files=no"):
         raise ValueError("Tracked changes exist. Commit/stash them yourself or select a clean worktree first")
     git(repo, "worktree", "add", "-b", "brahma/" + session, str(path), base_revision)
@@ -176,8 +180,52 @@ def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
     return sorted(set(status_paths(repo)) | set(ignored_paths(repo, ignored_allow)))
 
 
+_BLOB_CACHE: dict[tuple, str] = {}
+
+
+def content_changed_tracked(repo: Path) -> list[str]:
+    """Tracked regular files whose current content is not their index blob, found without Git's stat cache.
+
+    Git decides "unchanged" from stat data compared at whole-second resolution, so an edit made in the same second as
+    its last refresh, with the modification time put back, is invisible to `git status`. Each file is hashed as
+    `git add` would store it; the hash is reused only while device, inode, size, mtime and the nanosecond inode change
+    time are all unchanged (any write changes ctime, and an unprivileged process cannot set it back)."""
+    listing = subprocess.run([*_GIT, "-C", str(repo), "ls-files", "-s", "-z"], capture_output=True, check=True,
+                             timeout=60, env=git_env()).stdout.decode("utf-8", "surrogateescape")
+    root = Path(repo).resolve()
+    expected, keys, missing = {}, {}, []
+    for row in listing.split("\0"):
+        if "\t" not in row:
+            continue
+        meta, name = row.split("\t", 1)
+        mode, blob, stage = meta.split()
+        if stage != "0" or mode not in ("100644", "100755"):
+            continue                           # conflicts, symlinks and gitlinks are reported by status itself
+        try:
+            info = os.lstat(root / name)
+        except OSError:
+            continue                           # deleted: status reports it
+        if not stat.S_ISREG(info.st_mode):
+            continue                           # type changed: status reports it
+        key = (str(root), name, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+        expected[name], keys[name] = blob, key
+        if key not in _BLOB_CACHE:
+            missing.append(name)
+    for start in range(0, len(missing), 2000):
+        chunk = missing[start:start + 2000]
+        hashed = subprocess.run([*_GIT, "-C", str(repo), "hash-object", "--stdin-paths"],
+                                input="\n".join(chunk).encode("utf-8", "surrogateescape"), capture_output=True,
+                                check=True, timeout=300, env=git_env()).stdout.decode().split()
+        if len(_BLOB_CACHE) > 200000:
+            _BLOB_CACHE.clear()
+        for name, blob in zip(chunk, hashed):
+            _BLOB_CACHE[keys[name]] = blob
+    return sorted(name for name in expected if _BLOB_CACHE.get(keys[name]) != expected[name])
+
+
 def status_paths(repo: Path) -> list[str]:
-    """Changes `git status` reports (never ignored files); these are the only paths git can stage."""
+    """Changes `git status` reports (never ignored files), plus tracked files whose content differs from the index
+    even where Git's stat cache says otherwise; these are the only paths git can stage."""
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
     result = subprocess.run([*_GIT, "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15, env=git_env())
@@ -191,7 +239,7 @@ def status_paths(repo: Path) -> list[str]:
             if index < len(chunks) and chunks[index]:
                 paths.append(chunks[index])
         index += 1
-    return sorted(set(paths))
+    return sorted(set(paths) | set(content_changed_tracked(repo)))
 
 
 _HASH_CACHE: dict[tuple, str] = {}
@@ -301,6 +349,8 @@ def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_a
                  _fingerprint(worktree / name) != baseline[name]]
     outside = [name for name in paths if not any(ownership.owns(pattern, name) for pattern in files)]
     sensitive = [name for name in paths if _sensitive(name)]
+    # A changed directory is a nested repository or submodule: its contents are not verified, so it is never accepted.
+    sensitive.extend(name for name in paths if (worktree / name).is_dir() and not (worktree / name).is_symlink())
     sensitive.extend(name for name in paths if (worktree / name).is_symlink() and
                      not (worktree / name).resolve().is_relative_to(worktree.resolve()))
     if outside or sensitive:
@@ -316,7 +366,8 @@ def violating_paths(worktree: Path, files: list[str], baseline=None, ignored_all
     bad = []
     for name in paths:
         link_escape = (worktree / name).is_symlink() and not (worktree / name).resolve().is_relative_to(worktree.resolve())
-        if not any(ownership.owns(pattern, name) for pattern in files) or _sensitive(name) or link_escape:
+        nested = (worktree / name).is_dir() and not (worktree / name).is_symlink()     # nested repository or submodule
+        if not any(ownership.owns(pattern, name) for pattern in files) or _sensitive(name) or link_escape or nested:
             bad.append(name)
     return bad
 
@@ -335,12 +386,22 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     """
     restored, kept = [], []
     root = worktree.resolve()
+    if identity:
+        # Rollback writes through Git. If the repository, its common directory or the branch moved, Git would act on
+        # whatever they now point to (perhaps another checkout), so nothing is restored and the run stays blocked.
+        try:
+            now = git_identity(worktree)
+            moved = [field for field in ("git_dir", "common_dir", "branch") if now.get(field) != identity.get(field)]
+        except (OSError, ValueError, subprocess.SubprocessError):
+            moved = ["git metadata unreadable"]
+        if moved:
+            return [], ["every change (Git metadata moved: " + ", ".join(moved) + "; nothing was restored)"]
     candidates = list(violating_paths(worktree, files, baseline, ignored_allow))
     source = "HEAD"
     original = (identity or {}).get("head")
     if original and git(worktree, "rev-parse", "HEAD") != original:
         source = original
-        committed = subprocess.run([*_GIT, "-C", str(worktree), "diff", "--name-only", "-z", original, "HEAD"],
+        committed = subprocess.run([*_GIT, "-C", str(worktree), "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", original, "HEAD"],
                                    capture_output=True, check=True, timeout=60, env=git_env()).stdout
         for name in committed.decode("utf-8", errors="surrogateescape").split("\0"):
             if name and name not in candidates and (not any(ownership.owns(p, name) for p in files) or _sensitive(name)):
@@ -361,13 +422,18 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
         try:
             if tracked:
                 git(worktree, "restore", "--source=" + source, "--staged", "--worktree", "--", name)
-            elif target.is_symlink() or target.is_file():
+            else:
+                try:
+                    kind = os.lstat(target).st_mode
+                except FileNotFoundError:
+                    kind = None                                  # already gone: nothing left to undo
+                if kind is not None and stat.S_ISDIR(kind):
+                    kept.append(name)                            # a nested repository is reported, never deleted
+                    continue
                 if source != "HEAD":
                     git(worktree, "rm", "-q", "--cached", "--ignore-unmatch", "--", name)   # added by a worker commit
-                target.unlink()
-            elif target.is_dir():
-                kept.append(name)
-                continue
+                if kind is not None:
+                    target.unlink()                              # regular file, symlink, FIFO, socket or device node
             restored.append(name)
         except (OSError, ValueError):
             kept.append(name)
@@ -466,7 +532,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
     """Run approved checks. If `results` is a list, one (argv, status, exit_code) per command is appended as the
     coordinator observed it (status passed|failed|not_run), for handoff packets."""
     deadline = time.monotonic() + timeout
-    commands = [[*_GIT, "diff", "--check"], *checks]
+    commands = [[*_GIT, "diff", "--check", "--no-ext-diff", "--no-textconv"], *checks]
     summaries = []
     for command in commands:
         if cancel.is_set() or time.monotonic() >= deadline:
@@ -524,6 +590,24 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
     return True, "\n".join(summaries)
 
 
+def _staged_differs(worktree: Path, paths: list[str]) -> list[str]:
+    """Staged paths whose index blob is not the file's raw bytes: the commit must contain exactly what was checked."""
+    staged = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-s", "-z", "--", *paths],
+                            capture_output=True, check=True, timeout=60, env=git_env()).stdout
+    index = {}
+    for row in staged.decode("utf-8", "surrogateescape").split("\0"):
+        if "\t" in row:
+            meta, name = row.split("\t", 1)
+            index[name] = meta.split()[1]
+    regular = [name for name in index if (worktree / name).is_file() and not (worktree / name).is_symlink()]
+    if not regular:
+        return []
+    raw = subprocess.run([*_GIT, "-C", str(worktree), "hash-object", "--no-filters", "--stdin-paths"],
+                         input="\n".join(regular).encode("utf-8", "surrogateescape"), capture_output=True, check=True,
+                         timeout=120, env=git_env()).stdout.decode().split()
+    return [name for name, blob in zip(regular, raw) if index[name] != blob]
+
+
 def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -> str:
     """Commit on the session's own branch only. With `identity`, the branch, HEAD and gitdir must still be the verified ones."""
     if not git(worktree, "branch", "--show-current").startswith("brahma/"):
@@ -535,7 +619,16 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
     paths = status_paths(worktree)
     if not paths:
         return git(worktree, "rev-parse", "HEAD")
+    from .gitsafe import filtered_paths
+    filtered = filtered_paths(worktree, paths)
+    if filtered:      # `git add` would run the filter's program and commit bytes other than the checked files
+        raise ValueError("Not committed: a Git filter driver applies to " + ", ".join(filtered[:5]))
     git(worktree, "add", "--", *paths)
+    staged_differs = _staged_differs(worktree, paths)
+    if staged_differs:
+        git(worktree, "restore", "--staged", "--", *paths)          # unstage; the files themselves are untouched
+        raise ValueError("Not committed: the staged content differs from the checked files (" + ", ".join(staged_differs[:5])
+                         + "); Git converted them (attributes such as eol or ident) or kept a stale index entry")
     git(worktree, "commit", "-m", "Brahma: " + summary[:120])
     return git(worktree, "rev-parse", "HEAD")
 
@@ -546,7 +639,9 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str) -> str:
     import shutil
     from . import safety
     summary, body = safety.redact(summary), safety.redact(body)     # never send a secret-shaped string to GitHub
-    if not shutil.which("gh"):
+    from .providers import find_executable
+    gh = find_executable("gh")
+    if not gh:
         raise ValueError("Draft PR publishing needs GitHub CLI: install gh and run gh auth login; local branch is preserved")
     branch = git(worktree, "branch", "--show-current")
     if not branch.startswith("brahma/"):
@@ -556,7 +651,7 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str) -> str:
     if status_paths(worktree) or hidden_index_entries(worktree):
         raise ValueError("Not published: the worktree has changes that were not part of the verified, committed result")
     git(worktree, "push", "--set-upstream", "origin", f"{branch}:{branch}")  # explicit destination: never a default branch
-    result = subprocess.run(["gh", "pr", "create", "--draft", "--head", branch,
+    result = subprocess.run([gh, "pr", "create", "--draft", "--head", branch,
                              "--title", summary[:120], "--body-file", "-"], cwd=worktree,
                              input=body, text=True, capture_output=True, timeout=60)
     if result.returncode:

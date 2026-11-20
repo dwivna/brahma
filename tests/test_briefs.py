@@ -119,7 +119,7 @@ class Engine(unittest.IsolatedAsyncioTestCase):
     async def run_flow(self, script, settings=None, progress=None):
         queue = list(script)
 
-        async def run(provider, prompt, cwd, role, s, emit, cancel, timeout, native_session_id=None):
+        async def run(provider, prompt, cwd, role, s, emit, cancel, timeout, native_session_id=None, **_extra):
             self.prompts.append((role, prompt))
             item = queue.pop(0)
             return item[1]
