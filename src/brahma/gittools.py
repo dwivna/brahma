@@ -220,6 +220,8 @@ def special_paths(repo: Path, allow=None) -> list[str]:
     # Inside a skipped cache only sensitive names (`.env*`) are inspected, as in ignored_paths(); Git never lists special
     # files, so a `.env` FIFO or socket there is found here. Only those names are stat'ed.
     for cache in caches:
+        if os.path.islink(cache):
+            continue                    # a symlink named like a cache is never walked (it may point outside)
         for directory, dirs, files in os.walk(cache, followlinks=False):
             for name in (*files, *dirs):
                 if not name.casefold().startswith(_CACHE_SENSITIVE_PREFIXES):
@@ -755,20 +757,28 @@ def _run_publication_step(argv: list[str], worktree: Path, stopped, *, input_tex
     process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
     deadline = time.monotonic() + timeout
-    while True:
-        try:
-            out, err = process.communicate(input_text, timeout=0.25)
-            return subprocess.CompletedProcess(argv, process.returncode, out, err)
-        except subprocess.TimeoutExpired:
-            reason = stopped()
-            if reason or time.monotonic() > deadline:
+    finished = False
+    try:
+        while True:
+            try:
+                out, err = process.communicate(input_text, timeout=0.25)
+                finished = True
+                return subprocess.CompletedProcess(argv, process.returncode, out, err)
+            except subprocess.TimeoutExpired:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-                process.communicate()
-                raise ValueError("Publication stopped: " + (reason or "it took too long")
-                                 + "; check the remote branch before publishing again") from None
+                    reason = stopped()
+                except Exception as error:          # a stop check that cannot answer is treated as a stop
+                    reason = "the stop check failed (" + type(error).__name__ + ")"
+                if reason or time.monotonic() > deadline:
+                    raise ValueError("Publication stopped: " + (reason or "it took too long")
+                                     + "; check the remote branch before publishing again") from None
+    finally:
+        if not finished:                            # any way out but a normal finish ends the whole step
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except (ProcessLookupError, PermissionError):
+                pass
+            process.communicate()
 
 
 def publish(worktree: Path, summary: str, body: str, expected_head: str, expected_uncommitted: dict | None = None,
@@ -780,10 +790,21 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
     of one worktree are serialized, and `stopped()` (kill switch, stop or pause) is checked before every external write
     and while each one runs."""
     import fcntl
-    with open(Path(git(worktree, "rev-parse", "--absolute-git-dir")) / "brahma-publish.lock", "a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+    from .config import state_home
+    # The lock lives in Brahma's own state directory (never in the worktree or its Git directory, which a worker can
+    # write), one per worktree, opened without following a link and only if it is a regular file.
+    locks = state_home() / "publish-locks"
+    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+    name = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:32] + ".lock"
+    descriptor = os.open(locks / name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise ValueError("Not published: the publication lock is not a regular file")
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
         return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow,
                         stopped or (lambda: None))
+    finally:
+        os.close(descriptor)
 
 
 def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped) -> str:

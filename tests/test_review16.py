@@ -70,6 +70,31 @@ class Finding2StopReachesPublication(unittest.TestCase):
                                                lambda: "Stopped by user" if time.monotonic() > stop_at else None)
             self.assertLess(time.monotonic() - started, 5)
 
+    def test_a_stop_check_that_fails_ends_the_step(self):
+        # Automated security review of 72effcd: an exception from stopped() left the process group running.
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "survived"
+
+            def broken():
+                raise OSError("state unreadable")
+            with self.assertRaisesRegex(ValueError, "stop check failed"):
+                gittools._run_publication_step(["sh", "-c", f"sleep 2; touch {marker}"], Path(tmp), broken)
+            time.sleep(2.5)
+            self.assertFalse(marker.exists())
+
+    def test_the_publication_lock_is_kept_in_brahma_state_not_the_worktree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, head, snapshot = verified_branch(tmp)
+            state = Path(tmp) / "state"
+            git_dir = Path(git(repo, "rev-parse", "--absolute-git-dir"))
+            os.symlink("/etc/hosts", git_dir / "brahma-publish.lock")      # a planted link is never opened
+            with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(state)}), \
+                    patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
+                    patch.object(gittools, "_run_publication_step",
+                                 return_value=type("R", (), {"returncode": 0, "stdout": "u", "stderr": ""})()):
+                gittools.publish(repo, "s", "b", head, snapshot)
+            self.assertEqual(len(list((state / "publish-locks").glob("*.lock"))), 1)
+
     def test_session_controls_are_read_safely_from_another_thread(self):
         with tempfile.TemporaryDirectory() as tmp:
             store = Store(Path(tmp) / "state")
@@ -112,6 +137,17 @@ class Finding4SensitiveSpecialFilesInCaches(unittest.TestCase):
             ok, reason = gittools.ownership_changes(repo, ["src/**"], baseline={})
             self.assertFalse(ok)
             self.assertIn(".venv/lib/.env", reason)
+
+    def test_a_symlinked_cache_is_never_walked(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            os.mkfifo(outside / ".env")
+            (repo / ".gitignore").write_text("build/\n")
+            (repo / "build").mkdir()
+            os.symlink(outside, repo / "build" / ".venv")     # a cache-named link inside an ignored directory
+            self.assertEqual([p for p in gittools.special_paths(repo) if p.startswith("build/")], [])
 
 
 class Finding5OwnedUnreadableFiles(unittest.TestCase):
