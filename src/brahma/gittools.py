@@ -129,15 +129,25 @@ DEFAULT_IGNORED_ALLOWLIST = (".venv", "venv", "__pycache__", ".pytest_cache", ".
                              "node_modules", "dist", "*.egg-info")
 
 
-def _allowed_ignored(path: str, allow, is_dir: bool = False) -> bool:
-    """True when `path` lies inside an allowlisted build-cache directory.
+def _ignored_directories(repo: Path) -> set[str]:
+    """Directories Git ignores as a whole (listed once by `ls-files --directory`), without the trailing slash."""
+    return {name.rstrip("/") for name in _ls_ignored(repo, "--directory") if name.endswith("/")}
+
+
+def _allowed_ignored(path: str, allow, ignored_dirs: set[str], is_dir: bool = False) -> bool:
+    """True when `path` lies inside an allowlisted build-cache directory that Git really ignores (the directory or one
+    of its parents is an ignored directory). One rule for the ignored-file scan and the special-file walk: an ordinary
+    tracked `dist/` gives no exemption to anything in it.
 
     The allowlist names directories: a *file* or symlink that merely carries an allowlisted
     name (for example a symlink called `.venv`) is never tolerated.
     """
     parts = Path(path).parts
-    candidates = parts if is_dir else parts[:-1]
-    return any(fnmatch.fnmatchcase(part, pattern) for part in candidates for pattern in allow)
+    for end in range(1, len(parts) + (1 if is_dir else 0)):
+        if any(fnmatch.fnmatchcase(parts[end - 1], pattern) for pattern in allow) and \
+                any("/".join(parts[:k]) in ignored_dirs for k in range(1, end + 1)):
+            return True
+    return False
 
 
 # Inside an allowlisted cache directory only these names are still inspected. A broader scan
@@ -161,13 +171,16 @@ def ignored_paths(repo: Path, allow=None) -> list[str]:
     hidden inside an allowlisted directory are not inspected.
     """
     allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
+    listed = _ls_ignored(repo, "--directory")
+    ignored_dirs = {name.rstrip("/") for name in listed if name.endswith("/")}
 
     def kept(item: str) -> bool:
         # A `.env*` file is inspected wherever it is, including inside an allowlisted cache nested in another ignored directory.
-        return not _allowed_ignored(item, allow) or Path(item).name.casefold().startswith(_CACHE_SENSITIVE_PREFIXES)
+        return (not _allowed_ignored(item, allow, ignored_dirs)
+                or Path(item).name.casefold().startswith(_CACHE_SENSITIVE_PREFIXES))
 
     found = []
-    for name in _ls_ignored(repo, "--directory"):
+    for name in listed:
         if name.endswith("/"):
             found.extend(item for item in _ls_ignored(repo, "--", name) if kept(item))
         elif kept(name):
@@ -181,13 +194,10 @@ def special_paths(repo: Path, allow=None) -> list[str]:
     when Git really ignores it (it or a parent is an ignored directory): an ordinary `dist/` is walked like any other."""
     allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
     root = Path(repo)
-    ignored_dirs = {name.rstrip("/") for name in _ls_ignored(repo, "--directory") if name.endswith("/")}
+    ignored_dirs = _ignored_directories(repo)
 
     def skipped(relative: str) -> bool:
-        if not any(fnmatch.fnmatchcase(Path(relative).name, pattern) for pattern in allow):
-            return False
-        parts = Path(relative).parts
-        return any("/".join(parts[:end]) in ignored_dirs for end in range(1, len(parts) + 1))
+        return _allowed_ignored(relative, allow, ignored_dirs, is_dir=True)
 
     found = []
     for directory, dirs, files in os.walk(root, followlinks=False):
@@ -314,10 +324,18 @@ def _fingerprint(path: Path) -> str:
     """Content fingerprint of one path. Every file is hashed in full: metadata alone (size, mtime) can be preserved
     across a content change, so it never stands in for contents. A large file's hash is reused only while its inode
     change time (ctime) is unchanged; any write updates ctime and an unprivileged process cannot set it back."""
-    if path.is_symlink():
-        return "symlink:" + os.readlink(path)
-    if not path.is_file():
+    try:
+        kind = os.lstat(path).st_mode                   # the entry itself, never what a symlink points to
+    except FileNotFoundError:
         return "absent"
+    except OSError:
+        return "unreadable"
+    if stat.S_ISLNK(kind):
+        return "symlink:" + os.readlink(path)
+    if stat.S_ISDIR(kind):
+        return "absent"                                  # a directory holds no content of its own; its files are listed
+    if not stat.S_ISREG(kind):
+        return f"special:{kind}"                         # FIFO, socket or device: never verifiable (see unverifiable())
     try:
         descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)   # a FIFO swapped in never blocks us
     except OSError:
@@ -340,6 +358,38 @@ def _fingerprint(path: Path) -> str:
             _HASH_CACHE.clear()
         _HASH_CACHE[key] = digest.hexdigest()
     return str(before.st_mode) + ":" + digest.hexdigest()
+
+
+def unverifiable(fingerprint: str | None) -> bool:
+    """A fingerprint that cannot show whether content changed: an unreadable file, one written while being read, or a
+    special file (FIFO, socket, device). Comparisons fail closed: such a path always counts as changed."""
+    return isinstance(fingerprint, str) and (fingerprint == "unreadable" or fingerprint.startswith(("changing:", "special:")))
+
+
+def _changed_since(worktree: Path, current: list[str], baseline: dict | None) -> list[str]:
+    if baseline is None:
+        return list(current)
+    out = []
+    for name in sorted(set(current) | set(baseline)):
+        now = _fingerprint(worktree / name)
+        if name not in baseline or now != baseline[name] or unverifiable(now) or unverifiable(baseline[name]):
+            out.append(name)
+    return out
+
+
+def _never_acceptable(worktree: Path, name: str) -> bool:
+    """Changed paths that no ownership can make acceptable: sensitive names, a nested repository or submodule (a
+    directory), a symlink leaving the worktree, and special files."""
+    path = worktree / name
+    try:
+        kind = os.lstat(path).st_mode
+    except FileNotFoundError:
+        return _sensitive(name)
+    except OSError:
+        return True
+    if stat.S_ISLNK(kind):
+        return _sensitive(name) or not path.resolve().is_relative_to(worktree.resolve())
+    return _sensitive(name) or stat.S_ISDIR(kind) or not stat.S_ISREG(kind)
 
 
 def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:
@@ -405,18 +455,10 @@ def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_a
     moved = identity_problems(worktree, identity)
     if moved:
         return False, "Git metadata changed during the run, so changes cannot be attributed: " + "; ".join(moved)
-    current = changed_paths(worktree, ignored_allow)
-    if baseline is None:
-        paths = current
-    else:
-        paths = [name for name in sorted(set(current) | set(baseline)) if name not in baseline or
-                 _fingerprint(worktree / name) != baseline[name]]
+    paths = _changed_since(worktree, changed_paths(worktree, ignored_allow), baseline)
     outside = [name for name in paths if not any(ownership.owns(pattern, name) for pattern in files)]
-    sensitive = [name for name in paths if _sensitive(name)]
-    # A changed directory is a nested repository or submodule: its contents are not verified, so it is never accepted.
-    sensitive.extend(name for name in paths if (worktree / name).is_dir() and not (worktree / name).is_symlink())
-    sensitive.extend(name for name in paths if (worktree / name).is_symlink() and
-                     not (worktree / name).resolve().is_relative_to(worktree.resolve()))
+    # Sensitive names, nested repositories (directories), escaping symlinks and special files: never accepted.
+    sensitive = [name for name in paths if _never_acceptable(worktree, name)]
     if outside or sensitive:
         return False, f"File ownership/sensitive-path review required: {', '.join(sorted(set(outside+sensitive)))}"
     return True, f"{len(paths)} changed paths fit approved ownership"
@@ -424,16 +466,9 @@ def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_a
 
 def violating_paths(worktree: Path, files: list[str], baseline=None, ignored_allow=None) -> list[str]:
     """Paths changed since the prelaunch baseline that fall outside ownership or are sensitive/escaping."""
-    current = changed_paths(worktree, ignored_allow)
-    paths = current if baseline is None else [name for name in sorted(set(current) | set(baseline)) if name not in baseline
-                                              or _fingerprint(worktree / name) != baseline[name]]
-    bad = []
-    for name in paths:
-        link_escape = (worktree / name).is_symlink() and not (worktree / name).resolve().is_relative_to(worktree.resolve())
-        nested = (worktree / name).is_dir() and not (worktree / name).is_symlink()     # nested repository or submodule
-        if not any(ownership.owns(pattern, name) for pattern in files) or _sensitive(name) or link_escape or nested:
-            bad.append(name)
-    return bad
+    paths = _changed_since(worktree, changed_paths(worktree, ignored_allow), baseline)
+    return [name for name in paths
+            if not any(ownership.owns(pattern, name) for pattern in files) or _never_acceptable(worktree, name)]
 
 
 def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored_allow=None,
@@ -690,7 +725,7 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
         git(worktree, "restore", "--staged", "--", *paths)          # unstage; the files themselves are untouched
         raise ValueError("Not committed: the staged content differs from the checked files (" + ", ".join(staged_differs[:5])
                          + "); Git converted them (attributes such as eol or ident) or kept a stale index entry")
-    git(worktree, "commit", "-m", "Brahma: " + summary[:120])
+    git(worktree, "commit", "--no-gpg-sign", "-m", "Brahma: " + summary[:120])
     return git(worktree, "rev-parse", "HEAD")
 
 
@@ -712,7 +747,9 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
         raise ValueError("Not published: the branch has moved since it was verified ready; run and verify it again")
     if status_paths(worktree) or hidden_index_entries(worktree):
         raise ValueError("Not published: the worktree has changes that were not part of the verified, committed result")
-    if expected_uncommitted is None or snapshot_changes(worktree, ignored_allow) != expected_uncommitted:
+    now = snapshot_changes(worktree, ignored_allow)
+    if (expected_uncommitted is None or now != expected_uncommitted
+            or any(unverifiable(value) for value in now.values())):
         # Ignored files (a new `.env`, a planted script) and special files are compared with the verified receipt too.
         raise ValueError("Not published: ignored or special files changed after the work was verified ready")
     git(worktree, "push", "--set-upstream", "origin", f"{branch}:{branch}")  # explicit destination: never a default branch

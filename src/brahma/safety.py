@@ -111,7 +111,7 @@ def _hide_all(value):
 PATH_MAPS = frozenset({"snapshot", "baseline", "changes", "uncommitted"})
 # The shapes gittools._fingerprint produces: "<mode>:<sha256>", "absent", "unreadable", "special:<mode>",
 # "changing:<ns>", or "symlink:<target>" (whose target text is still redacted).
-_FINGERPRINT = re.compile(r"\d{1,7}:[0-9a-f]{64}|absent|unreadable|special:\d{1,7}|changing:\d{1,25}")
+_FINGERPRINT = re.compile(r"\d{1,7}:[0-9a-f]{64}|absent|unreadable|special:\d{1,7}|changing:\d{1,25}|unverifiable:[0-9a-f]{32}")
 
 
 def _fingerprint_value(value):

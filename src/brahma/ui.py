@@ -419,9 +419,8 @@ class BrahmaApp(App):
                 receipt = self.session.ready_receipt()
                 await asyncio.to_thread(presence.require, f"publish branch brahma/{self.session.key} as a draft PR")
                 receipt = self.session.ready_receipt()          # re-checked after the prompt
-                self.write(Event(kind="publication", text=await asyncio.to_thread(
-                    self.session.publish_ready, receipt,
-                    "Brahma's approved plan passed configured checks and independent review.")))
+                self.write(Event(kind="publication", text=await self.session.publish_ready_in_thread(
+                    receipt, "Brahma's approved plan passed configured checks and independent review.")))
             elif value == "/approve":
                 if self.demo:
                     self.write(Event(text="DEMO complete: execution is simulated, no changes were made."))

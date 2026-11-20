@@ -38,6 +38,13 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Independent review round 15: `/publish` reads session state on the event loop and publishes in a worker thread;
+  an approved plan may edit or delete the instruction files it owns without invalidating its own contract (others must
+  still match); the ignored-file scan exempts cache-named directories only when Git ignores them (one rule with the
+  special-file walk); unreadable, changing and special files always count as changed and are never accepted, and a
+  readiness tree holding one never matches; proposals with open questions are checked for credentials before they are
+  saved, exported or reused; Brahma's Git calls ignore replacement objects (grafts are refused), never sign commits and
+  never start background gc or maintenance.
 - The background worker loads all of Brahma at start and restarts itself (through the service's KeepAlive) when the
   installed code changes, between jobs. Found in real use: an approved run resumed by a worker started before an
   upgrade failed with an ImportError, because one new module was loaded beside old ones already in memory.

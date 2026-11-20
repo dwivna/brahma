@@ -311,9 +311,12 @@ class Session:
         return None, "repo"
 
     def set_plan(self, plan: Plan, *, model_selection: dict | None = None):
-        from .contracts import prepare_contract, write_contract
+        from .contracts import prepare_contract, refuse_credentials, write_contract
         from .discovery import discover
         settings = Settings.load(self.repo)
+        # Before anything is stored: a proposal with open questions is saved and its questions go into the next
+        # planner prompt, so it is checked exactly like one that is ready for approval.
+        refuse_credentials(plan, plan.checks or settings.checks)
         profiles = asdict(settings)
         settings = self.selected_settings(settings, model_selection)
         if model_selection is not None:
@@ -384,6 +387,9 @@ class Session:
                         repair_cycles=fresh.repair_cycles, definitions=catalog.entries,
                         model_profiles=profiles, base_revision=contract["payload"]["base_revision"],
                         instruction_root=instruction_root,
+                        # Once this exact contract is approved, instruction files the plan owns may change in the run.
+                        approved_instructions=(contract["payload"].get("instructions")
+                                               if saved["approved_digest"] == contract["digest"] else None),
                         toolchain_directory=Path(saved["worktree"]) if basis == "worktree" and saved["worktree"] else None,
                         toolchain_basis=basis)
         selected.checks = checks
@@ -458,11 +464,19 @@ class Session:
             raise ValueError("The readiness receipt does not record the verified ignored files; run and verify it again")
         return receipts[-1]
 
+    def _publish_arguments(self, receipt: dict, body: str) -> tuple:
+        # Read on the caller's thread: the store's SQLite connection belongs to the thread that opened it.
+        worktree = Path(self.store.session(self.key)["worktree"])
+        return (worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"])
+
     def publish_ready(self, receipt: dict, body: str) -> str:
         """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
-        worktree = Path(self.store.session(self.key)["worktree"])
-        return gittools.publish(worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"],
-                                receipt["ignored_allowlist"])
+        return gittools.publish(*self._publish_arguments(receipt, body))
+
+    async def publish_ready_in_thread(self, receipt: dict, body: str) -> str:
+        """publish_ready for an event loop: the state is read here, only the Git/GitHub work runs in a thread."""
+        arguments = self._publish_arguments(receipt, body)
+        return await asyncio.to_thread(gittools.publish, *arguments)
 
     def stop(self):
         self.store.stop(self.key)
@@ -616,7 +630,8 @@ class Session:
                         owned = self.plan.tasks[index - 1].files
                         relevant = {p for p in set(snapshot) | set(current)
                                     if any(ownership.owns(glob, p) for glob in owned)}
-                        if all(snapshot.get(p) == current.get(p) for p in relevant):
+                        if all(snapshot.get(p) == current.get(p) and not gittools.unverifiable(current.get(p))
+                               for p in relevant):
                             completed.add(index)
                         else:
                             completed.discard(index)

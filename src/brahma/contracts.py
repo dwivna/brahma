@@ -68,7 +68,12 @@ def validate_ownership(plan: Plan) -> None:
                         raise ValueError(f"Ownership overlaps between {other.title!r} and {task.title!r}: {right} / {left}")
 
 
-def _instructions(repo: Path, plan: Plan) -> dict[str, str]:
+def _instructions(repo: Path, plan: Plan, approved: dict | None = None) -> dict[str, str]:
+    """Fingerprints of the instruction files that apply. With `approved` (a run of an approved plan re-verifying its
+    contract), instruction files the plan itself owns keep their approved fingerprints: the plan is authorised to edit
+    or delete them, and dispatch sends such files marked as edited within the plan. Every other file must match."""
+    def plan_owned(relative: str) -> bool:
+        return any(ownership.owns(pattern, relative) for task in plan.tasks for pattern in task.files)
     directories = {repo}
     for task in plan.tasks:
         for owned in task.files:
@@ -87,6 +92,8 @@ def _instructions(repo: Path, plan: Plan) -> dict[str, str]:
     for directory in sorted(directories):
         for name in ("AGENTS.md", "CLAUDE.md"):
             path = directory / name
+            if approved is not None and plan_owned(path.relative_to(repo).as_posix()):
+                continue                                  # taken from the approval below
             if not path.exists() and not path.is_symlink():
                 continue
             for item in (path, *path.parents):
@@ -102,7 +109,9 @@ def _instructions(repo: Path, plan: Plan) -> dict[str, str]:
             except OSError as error:
                 raise ValueError(f"Instruction file is not a readable regular file: {path.name}") from error
             result[path.relative_to(repo).as_posix()] = hashlib.sha256(content).hexdigest()
-    return result
+    if approved is not None:
+        result.update({relative: digest for relative, digest in approved.items() if plan_owned(relative)})
+    return dict(sorted(result.items()))
 
 
 def _revision(repo: Path) -> str:
@@ -113,22 +122,12 @@ def _revision(repo: Path) -> str:
     return process.stdout.strip()
 
 
-def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = None, *,
-                     task_timeout: float = 3600, repair_cycles: int = 3,
-                     definitions: Iterable[Definition] = (), model_profiles: dict | None = None,
-                     base_revision: str | None = None, toolchain_directory: Path | None = None,
-                     toolchain_basis: str = "repo", instruction_root: Path | None = None) -> dict:
-    # Revalidate objects built directly, not just planner JSON.
-    plan = Plan.parse(json.dumps(plan.to_dict(), ensure_ascii=False))
-    if plan.questions:
-        raise ValueError("Unanswered questions cannot be locked")
-    validate_ownership(plan)
-    if isinstance(task_timeout, bool) or not isinstance(task_timeout, (int, float)) or not 0 < task_timeout <= 3600:
-        raise ValueError("Active task budget must be at most sixty minutes")
-    if type(repair_cycles) is not int or not 0 <= repair_cycles <= 3:
-        raise ValueError("At most three repair cycles are permitted")
-    selected_checks = checks if checks is not None else plan.checks
+def refuse_credentials(plan: Plan, checks: list[list[str]] | None = None) -> None:
+    """Refuse a plan carrying a credential-shaped value anywhere: the whole plan (tasks, feature, questions, ...), the
+    rendered feature and the checks. Applied to every proposal before it is saved, exported or reused in a prompt,
+    whether or not it still has open questions."""
     from .safety import argv_looks_secret, looks_secret
+
     def strings(value):
         if isinstance(value, str):
             yield value
@@ -139,11 +138,29 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
         elif isinstance(value, (list, tuple)):
             for item in value:
                 yield from strings(item)
-    # Every string the contract stores or forwards: the whole plan (feature, questions, ...) and the rendered feature.
     plan_text = [*strings(plan.to_dict()), render_feature(plan)]
-    if any(looks_secret(value) for value in plan_text) or any(argv_looks_secret(command) for command in selected_checks or []):
-        raise ValueError("The plan or its checks contain a credential-shaped value; remove it before approval "
-                         "(it would be stored in the contract and sent to workers)")
+    if any(looks_secret(value) for value in plan_text) or any(argv_looks_secret(command) for command in checks or []):
+        raise ValueError("The plan or its checks contain a credential-shaped value; nothing was saved. Remove it "
+                         "(it would be stored, shown and sent to workers)")
+
+
+def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = None, *,
+                     task_timeout: float = 3600, repair_cycles: int = 3,
+                     definitions: Iterable[Definition] = (), model_profiles: dict | None = None,
+                     base_revision: str | None = None, toolchain_directory: Path | None = None,
+                     toolchain_basis: str = "repo", instruction_root: Path | None = None,
+                     approved_instructions: dict | None = None) -> dict:
+    # Revalidate objects built directly, not just planner JSON.
+    plan = Plan.parse(json.dumps(plan.to_dict(), ensure_ascii=False))
+    if plan.questions:
+        raise ValueError("Unanswered questions cannot be locked")
+    validate_ownership(plan)
+    if isinstance(task_timeout, bool) or not isinstance(task_timeout, (int, float)) or not 0 < task_timeout <= 3600:
+        raise ValueError("Active task budget must be at most sixty minutes")
+    if type(repair_cycles) is not int or not 0 <= repair_cycles <= 3:
+        raise ValueError("At most three repair cycles are permitted")
+    selected_checks = checks if checks is not None else plan.checks
+    refuse_credentials(plan, selected_checks)
     # Reuse the argv schema validator; no shell-string conversion is accepted.
     Plan.parse(json.dumps({**plan.to_dict(), "checks": selected_checks}))
     if checks is not None and plan.checks and selected_checks != plan.checks:
@@ -174,7 +191,8 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                "checks": selected_checks, "repository": str(repo),
                "base_revision": revision,
                # Fingerprinted from the checkout the run will use (an existing worktree for a follow-on plan).
-               "instructions": _instructions(Path(instruction_root).resolve() if instruction_root else repo, plan),
+               "instructions": _instructions(Path(instruction_root).resolve() if instruction_root else repo, plan,
+                                             approved_instructions),
                "instruction_basis": "worktree" if instruction_root else "repo",
                "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,

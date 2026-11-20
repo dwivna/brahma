@@ -65,10 +65,15 @@ class _Invocations(dict):
 
 
 def _tree(worktree: Path, settings: Settings) -> dict:
-    """What the reviewer saw: HEAD plus every changed path's content fingerprint."""
-    from .gittools import git, snapshot_changes
+    """What the reviewer saw: HEAD plus every changed path's content fingerprint. A fingerprint that cannot show content
+    (unreadable, changing, special file) gets a one-off marker, so a tree holding one never equals another: readiness
+    is never bound to contents nobody could verify."""
+    import uuid
+    from .gittools import git, snapshot_changes, unverifiable
+    changes = snapshot_changes(Path(worktree), settings.ignored_allowlist)
     return {"head": git(Path(worktree), "rev-parse", "HEAD"),
-            "changes": snapshot_changes(Path(worktree), settings.ignored_allowlist)}
+            "changes": {path: "unverifiable:" + uuid.uuid4().hex if unverifiable(value) else value
+                        for path, value in changes.items()}}
 
 
 def _with_leftovers(kind: str, passed: dict, items: list[dict]):

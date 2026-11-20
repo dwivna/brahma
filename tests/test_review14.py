@@ -113,8 +113,8 @@ class Finding3PublishFromTheInterface(unittest.TestCase):
                                  side_effect=lambda argv, *a, **k: done if argv[0] == "/usr/bin/gh" else real_run(argv, *a, **k)):
                 self.assertEqual(session.publish_ready(receipt, "body"), "https://example.invalid/pr/1")
             self.assertEqual(len(pushed), 1)
-        source = (ROOT / "src" / "brahma" / "ui.py").read_text()
-        self.assertIn("self.session.publish_ready, receipt", source)   # /publish uses the same receipt-bound path
+        # /publish uses the same receipt-bound path (from the event loop since round 15).
+        self.assertTrue("self.session.publish_ready_in_thread(" in (ROOT / "src" / "brahma" / "ui.py").read_text())
 
 
 class Finding4OneTimeLedger(unittest.TestCase):

@@ -463,7 +463,9 @@ These are deliberate limits of the first release, not hidden defects:
   ownership-checked, and a filter runs its own program and commits bytes other than the files that were checked.
   Brahma's own Git calls ignore `.gitattributes` (attributes are read from the empty tree, with no system or global
   attributes file), so no filter program or line-ending/`ident` conversion ever runs on them and a commit stores exactly
-  the checked bytes. `.git/info/attributes`, which Git always reads, must be empty or absent.
+  the checked bytes. `.git/info/attributes`, which Git always reads, and `.git/info/grafts` must be empty or absent.
+  Brahma's Git calls ignore replacement objects (`refs/replace/`), sign no commits and start no background gc.
+  FIFOs, sockets, devices and files Brahma cannot read are never accepted as verified changes.
 - **No sandbox.** Workers and approved checks run as you. They can read anything your user can read (secret protection
   on reads is a prompt instruction; neither provider CLI can enforce it), and a check can change files outside the
   worktree. Brahma verifies and restores changes *inside* the worktree only.

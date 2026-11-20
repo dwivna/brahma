@@ -19,10 +19,15 @@ from pathlib import Path
 # Brahma Git call (status, add, diff, checkout), whatever .gitattributes a worker writes, and no line-ending or ident
 # conversion applies, so Git compares and stores exactly the bytes that were checked. File modes are always compared.
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"     # SHA-1 repositories only (SHA-256 ones are refused)
-_GIT = ("git", "--literal-pathspecs", f"--attr-source={EMPTY_TREE}", "-c", "core.attributesFile=/dev/null",
+# Replacement objects (`refs/replace/`) are never used: one could swap the tree of the recorded starting commit while
+# HEAD, branch and Git directory all stay the same, making unowned edits look clean.
+_GIT = ("git", "--literal-pathspecs", "--no-replace-objects", f"--attr-source={EMPTY_TREE}", "-c", "core.attributesFile=/dev/null",
         "-c", "core.autocrlf=false", "-c", "core.fileMode=true", "-c", "core.symlinks=true", "-c", "core.hooksPath=/dev/null",
         "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.trustctime=true",
-        "-c", "core.checkStat=default", "-c", "core.ignoreStat=false", "-c", "diff.ignoreSubmodules=none")
+        "-c", "core.checkStat=default", "-c", "core.ignoreStat=false", "-c", "diff.ignoreSubmodules=none",
+        # No signing helper (gpg, ssh-keygen, x509) and no automatic background gc/maintenance: Brahma's commits run
+        # no program the approval did not cover.
+        "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false")
 
 
 # Environment variables that would inject Git configuration (which can name a program to run) or point Git at another
@@ -39,6 +44,7 @@ def git_env(base: dict[str, str] | None = None) -> dict[str, str]:
             env.pop(name)
     env["GIT_TERMINAL_PROMPT"] = "0"
     env["GIT_ATTR_NOSYSTEM"] = "1"           # no system-wide attributes file: attributes come only from the empty tree
+    env["GIT_NO_REPLACE_OBJECTS"] = "1"      # also for any Git a check runs: replacement objects never apply
     return env
 
 
@@ -56,16 +62,19 @@ def attribute_override(repo: Path) -> str | None:
         return None                          # not a repository: the Git command itself reports that
     common = Path(lines[1]) if Path(lines[1]).is_absolute() else Path(key) / lines[1]
     for directory in (Path(lines[0]), common.resolve()):
-        path = directory / "info" / "attributes"
-        try:
-            info = os.lstat(path)
-        except FileNotFoundError:
-            continue
-        except OSError:
-            return f"{path} could not be inspected"
-        if info.st_size or not os.path.isfile(path) or os.path.islink(path):
-            return (f"{path} sets Git attributes for this repository; Brahma 1.0 does not support repository-local "
-                    "attributes (they can run a filter program or change committed bytes). Empty or remove that file")
+        for name, what in (("attributes", "sets Git attributes for this repository; Brahma 1.0 does not support "
+                                          "repository-local attributes (they can run a filter program or change "
+                                          "committed bytes)"),
+                           ("grafts", "rewrites commit history (grafts); Brahma 1.0 does not support it")):
+            path = directory / "info" / name
+            try:
+                info = os.lstat(path)
+            except FileNotFoundError:
+                continue
+            except OSError:
+                return f"{path} could not be inspected"
+            if info.st_size or not os.path.isfile(path) or os.path.islink(path):
+                return f"{path} {what}. Empty or remove that file"
     return None
 
 
