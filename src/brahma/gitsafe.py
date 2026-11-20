@@ -20,7 +20,7 @@ from pathlib import Path
 # conversion applies, so Git compares and stores exactly the bytes that were checked. File modes are always compared.
 EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"     # SHA-1 repositories only (SHA-256 ones are refused)
 _GIT = ("git", "--literal-pathspecs", f"--attr-source={EMPTY_TREE}", "-c", "core.attributesFile=/dev/null",
-        "-c", "core.autocrlf=false", "-c", "core.fileMode=true", "-c", "core.hooksPath=/dev/null",
+        "-c", "core.autocrlf=false", "-c", "core.fileMode=true", "-c", "core.symlinks=true", "-c", "core.hooksPath=/dev/null",
         "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.trustctime=true",
         "-c", "core.checkStat=default", "-c", "core.ignoreStat=false", "-c", "diff.ignoreSubmodules=none")
 
@@ -38,12 +38,52 @@ def git_env(base: dict[str, str] | None = None) -> dict[str, str]:
         if name in _GIT_ENV_OVERRIDES or name.startswith(("GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_")):
             env.pop(name)
     env["GIT_TERMINAL_PROMPT"] = "0"
+    env["GIT_ATTR_NOSYSTEM"] = "1"           # no system-wide attributes file: attributes come only from the empty tree
     return env
+
+
+_GIT_DIRS: dict[str, tuple[Path, ...]] = {}
+
+
+def attribute_override(repo: Path) -> str | None:
+    """`$GIT_DIR/info/attributes` is read by every Git command whatever `--attr-source` says, so a filter or conversion
+    attribute there (written after approval) would run a program or change bytes on Brahma's own Git calls. Brahma
+    1.0 refuses to operate while that file has any content."""
+    key = str(Path(repo).absolute())
+    if key not in _GIT_DIRS:
+        # rev-parse reads no attributes. Both the worktree's own Git directory and the shared one are checked.
+        found = subprocess.run(["git", "-C", key, "rev-parse", "--absolute-git-dir", "--git-common-dir"], text=True,
+                               capture_output=True, timeout=30, env=git_env())
+        lines = found.stdout.splitlines()
+        if found.returncode or len(lines) != 2:
+            return None                      # not a repository: the Git command itself reports that
+        common = Path(lines[1]) if Path(lines[1]).is_absolute() else Path(key) / lines[1]
+        _GIT_DIRS[key] = (Path(lines[0]), common.resolve())
+    for directory in _GIT_DIRS[key]:
+        path = directory / "info" / "attributes"
+        try:
+            info = os.lstat(path)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            return f"{path} could not be inspected"
+        if info.st_size or not os.path.isfile(path) or os.path.islink(path):
+            return (f"{path} sets Git attributes for this repository; Brahma 1.0 does not support repository-local "
+                    "attributes (they can run a filter program or change committed bytes). Empty or remove that file")
+    return None
+
+
+def guarded(repo: Path) -> list[str]:
+    """The protected Git command prefix for `repo`, after refusing repository-local attribute overrides."""
+    problem = attribute_override(repo)
+    if problem:
+        raise ValueError(problem)
+    return [*_GIT, "-C", str(repo)]
 
 
 def run_git(repo: Path, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
     """A read-only Git query with the same protections as git(): for modules that need the raw result."""
-    return subprocess.run([*_GIT, "-C", str(repo), *args], text=True, capture_output=True, timeout=timeout, env=git_env())
+    return subprocess.run([*guarded(repo), *args], text=True, capture_output=True, timeout=timeout, env=git_env())
 
 
 def _filter_drivers(repo: Path) -> set[str]:
@@ -65,7 +105,7 @@ def filtered_paths(repo: Path, paths: list[str], revision: str | None = None) ->
         return []
     # With `revision`, the attributes are those of that revision (what a checkout of it would apply), not the working tree.
     source = [f"--source={revision}"] if revision else []
-    result = subprocess.run([*_GIT, "-C", str(repo), "check-attr", *source, "-z", "--stdin", "filter"],
+    result = subprocess.run([*guarded(repo), "check-attr", *source, "-z", "--stdin", "filter"],
                             input="\0".join(paths).encode("utf-8", "surrogateescape"), capture_output=True,
                             timeout=60, env=git_env())
     if result.returncode:
@@ -78,9 +118,12 @@ def unsupported_repository(repo: Path, revision: str = "HEAD") -> str | None:
     """Repository features Brahma 1.0 cannot verify, or None. Submodules: their contents are another repository's and
     are not ownership-checked. Filter drivers (Git LFS and similar): Git runs their helper programs outside the approved
     checks, and the committed bytes differ from the checked files."""
+    override = attribute_override(repo)
+    if override:
+        return override
     if run_git(repo, "rev-parse", "--show-object-format").stdout.strip() not in ("", "sha1"):
         return "This repository uses the SHA-256 object format, which Brahma 1.0 does not support"
-    listing = subprocess.run([*_GIT, "-C", str(repo), "ls-tree", "-r", "-z", "--full-tree", revision],
+    listing = subprocess.run([*guarded(repo), "ls-tree", "-r", "-z", "--full-tree", revision],
                              capture_output=True, timeout=60, env=git_env())
     if listing.returncode:
         raise ValueError("The repository revision could not be listed: " + listing.stderr.decode(errors="replace")[:300])

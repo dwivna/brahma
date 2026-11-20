@@ -50,7 +50,7 @@ class ContractFormat(unittest.TestCase):
     def test_new_contracts_carry_the_current_format(self):
         contract = self.make()
         self.assertEqual(contract["version"], contracts.CONTRACT_VERSION)
-        self.assertEqual(contracts.CONTRACT_VERSION, 3)
+        self.assertEqual(contracts.CONTRACT_VERSION, 4)
         contracts._validate(contract)
 
     def test_old_format_is_refused_not_reinterpreted(self):
@@ -61,7 +61,7 @@ class ContractFormat(unittest.TestCase):
 
     def test_unknown_future_and_malformed_formats_are_refused(self):
         contract = self.make()
-        for version in (0, 2, 4, 99):
+        for version in (0, 2, 3, 5, 99):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 contracts._validate({**contract, "version": version})
         for bad in ("3", 3.0, None, True):

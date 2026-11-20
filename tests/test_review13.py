@@ -135,8 +135,6 @@ class Finding7ResumeVerificationIsCharged(unittest.IsolatedAsyncioTestCase):
         result, checks, _ = await self.run_resume({"state": "ready", "remaining_seconds": 0})
         self.assertEqual(result.status, "incomplete")
         checks.assert_not_awaited()
-        result, checks, _ = await self.run_resume({"state": "ready", "remaining_seconds": 100, "verification_spent": 100})
-        self.assertEqual(result.status, "incomplete")
 
     async def test_verification_runs_within_what_is_left_and_records_its_time(self):
         result, checks, events = await self.run_resume({"state": "ready", "remaining_seconds": 42})

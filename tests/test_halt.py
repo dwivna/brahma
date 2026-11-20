@@ -66,6 +66,10 @@ class KillFlag(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "not committed"):
                 session.ready_receipt()
             session.emit(Event(kind="ready_receipt", text=json.dumps({"digest": digest, "head": "h", "committed": True})))
+            with self.assertRaisesRegex(ValueError, "ignored files"):
+                session.ready_receipt()                           # round 14: the ignored-file snapshot is required
+            session.emit(Event(kind="ready_receipt", text=json.dumps({"digest": digest, "head": "h", "committed": True,
+                                                                      "uncommitted": {}, "ignored_allowlist": []})))
             self.assertEqual(session.ready_receipt()["head"], "h")
             store.pause(session.key)
             with self.assertRaisesRegex(ValueError, "paused"):

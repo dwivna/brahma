@@ -1,8 +1,8 @@
 # Changelog
 
-Brahma uses SemVer from 1.0.0 (decision Round 14; 0.x before): MINOR for new capabilities or any change to commands, JSON output,
-state schema or contract format; PATCH for fixes. Each merged PR bumps the version; a tag is a separate release
-decided by Abhinav. See `docs/decisions.md`.
+Brahma uses SemVer from 1.0.0 (decision Round 14; 0.x before): MAJOR for any breaking change to commands, JSON output,
+exit codes, state schema or contract format; MINOR for new capabilities and backward-compatible additions; PATCH for
+fixes. Each merged PR bumps the version; a tag is a separate release decided by Abhinav. See `docs/decisions.md`.
 
 ## 1.0.0
 
@@ -38,6 +38,14 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Independent review round 14: `$GIT_DIR/info/attributes` (read by Git whatever `--attr-source` says) must be empty,
+  or the repository is refused at approval and every Brahma Git call stops; system attributes are off; tracked symlinks
+  are verified as symlinks with their committed target (`core.symlinks=true` pinned); an allowlisted cache name is
+  skipped by the special-file walk only when Git ignores it; the hash cache is evicted before it is consulted; `/publish`
+  passes the verified ignored-file snapshot (and the receipt records its allowlist); follow-on plans validate context and
+  verify their approval against the worktree's instructions (contract format 4 records where instructions are read);
+  resume verification time is deducted once from the task's remaining budget whatever happens next; a JVM startup
+  variable that sets a Gradle property marks the Gradle JDK unbound.
 - Independent review round 13: ownership compares raw file bytes and executable bits (line-ending conversion and
   `core.fileMode=false` no longer hide a change); Brahma's Git calls read attributes from the empty tree, so no filter
   driver program can run during inspection, restoration or commit, whatever `.gitattributes` a worker writes; FIFOs,

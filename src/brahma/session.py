@@ -5,6 +5,7 @@ import contextlib
 import fcntl
 import os
 import json
+import math
 import sqlite3
 import subprocess
 from pathlib import Path
@@ -77,6 +78,27 @@ def approval_view(contract: dict) -> list[str]:
     return [safety.redact(displayable(line)) for line in lines]
 
 
+def verification_charges(events: list[dict], generation: str) -> dict[int, float]:
+    """Resume-verification seconds per task not yet reflected in its latest budget checkpoint. A task checkpoint that
+    carries a budget starts from the already charged time, so only charges recorded after it still apply: each
+    verification is deducted exactly once, whether the task stays complete or is worked on again."""
+    charges: dict[int, float] = {}
+    for event in events:
+        if event["kind"] not in ("verification_spent", "task_state"):
+            continue
+        try:
+            row = json.loads(event["text"])
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(row, dict) or row.get("generation") != generation or type(row.get("index")) is not int:
+            continue
+        if event["kind"] == "task_state":
+            if "deadline_epoch" in row:
+                charges.pop(row["index"], None)
+        elif isinstance(row.get("seconds"), (int, float)) and not isinstance(row["seconds"], bool) and math.isfinite(row["seconds"]):
+            charges[row["index"]] = charges.get(row["index"], 0.0) + max(0.0, row["seconds"])
+    return charges
+
 class Session:
     def __init__(self, store: Store, repo: Path, emit=lambda event: None, key: str | None = None):
         self.store, self.repo, self.callback = store, gittools.repository(repo), emit
@@ -100,6 +122,8 @@ class Session:
             self._record_outcome(json.loads(event.text))
         if event.kind == "check":
             self._record_check_failure(event.text)
+        if event.kind == "verification_spent":
+            event.text = json.dumps(dict(json.loads(event.text), generation=self.generation))
         if event.kind == "task_state":
             state = json.loads(event.text)
             state["generation"] = self.generation
@@ -318,7 +342,9 @@ class Session:
                 for builder in builders:
                     reviewer = "claude" if builder == "codex" else "codex"
                     for provider, role in ((builder, "builder"), (reviewer, "reviewer")):
-                        required = _BOUNDARIES + _brief(task) + _task_context(self.repo, task, settings, provider, role)
+                        # Context is checked in the checkout the run will use (the existing worktree for a follow-on plan).
+                        required = _BOUNDARIES + _brief(task) + _task_context(Path(existing) if existing else self.repo,
+                                                                              task, settings, provider, role)
                         if len(required) > settings.context_chars:
                             raise ValueError("Required contract context exceeds budget before approval; split this plan")
             contract = str(write_contract(self.store.home / "contracts" / self.key, candidate))
@@ -349,9 +375,15 @@ class Session:
         checks = self.plan.checks or fresh.checks
         catalog = discover(self.repo)
         basis = (contract["payload"].get("toolchain") or {}).get("basis", "repo")
+        instruction_root = None
+        if contract["payload"].get("instruction_basis") == "worktree":
+            if not saved["worktree"]:
+                raise ValueError("This approval reads instructions from a worktree that no longer exists; approve a new plan")
+            instruction_root = Path(saved["worktree"])
         verify_contract(contract, self.plan, self.repo, checks, task_timeout=fresh.task_timeout,
                         repair_cycles=fresh.repair_cycles, definitions=catalog.entries,
                         model_profiles=profiles, base_revision=contract["payload"]["base_revision"],
+                        instruction_root=instruction_root,
                         toolchain_directory=Path(saved["worktree"]) if basis == "worktree" and saved["worktree"] else None,
                         toolchain_basis=basis)
         selected.checks = checks
@@ -422,7 +454,15 @@ class Session:
             raise ValueError("No readiness receipt for the current approval; run and verify it again")
         if not receipts[-1].get("committed"):
             raise ValueError("The ready result was not committed (auto_commit is off); commit it yourself or enable auto_commit")
+        if not isinstance(receipts[-1].get("uncommitted"), dict) or not isinstance(receipts[-1].get("ignored_allowlist"), list):
+            raise ValueError("The readiness receipt does not record the verified ignored files; run and verify it again")
         return receipts[-1]
+
+    def publish_ready(self, receipt: dict, body: str) -> str:
+        """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
+        worktree = Path(self.store.session(self.key)["worktree"])
+        return gittools.publish(worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"],
+                                receipt["ignored_allowlist"])
 
     def stop(self):
         self.store.stop(self.key)
@@ -549,15 +589,9 @@ class Session:
             head = gittools.git(worktree, "rev-parse", "HEAD")
             current_index = None
             decisions = self._decisions()
-            verification_spent: dict[int, float] = {}      # resume verifications charged to a task's approved budget
-            for event in self.store.events_since(self.key, self.store.latest_seq(self.key, "plan_created")):
-                if event["kind"] == "verification_spent":
-                    try:
-                        spent = json.loads(event["text"])
-                        if type(spent.get("index")) is int and isinstance(spent.get("seconds"), (int, float)):
-                            verification_spent[spent["index"]] = verification_spent.get(spent["index"], 0) + max(0, spent["seconds"])
-                    except (ValueError, TypeError, AttributeError):
-                        pass
+            # One ledger: a resume verification is charged to the task's remaining approved time, once. A later
+            # checkpoint of that task already starts from the charged budget, so only charges after it still apply.
+            charges = verification_charges(self.store.events(self.key), self.generation)
             for event in self.store.events(self.key):
                 if event["kind"] == "native_session" and current_index in progress and event["role"] in ("builder", "reviewer"):
                     progress[current_index][event["role"] + "_session"] = event["text"]
@@ -586,9 +620,10 @@ class Session:
                             completed.add(index)
                         else:
                             completed.discard(index)
-            for index, spent in verification_spent.items():
-                if index in progress:
-                    progress[index] = dict(progress[index], verification_spent=spent)
+            for index, spent in charges.items():
+                left = (progress.get(index) or {}).get("remaining_seconds")
+                if isinstance(left, (int, float)) and not isinstance(left, bool) and math.isfinite(left):
+                    progress[index] = dict(progress[index], remaining_seconds=max(0.0, left - spent))
             for index, (side, digest) in decisions.items():
                 # A decision applies only to the exact dispute it was made on (same positions), in this plan generation.
                 waiting = (progress.get(index) or {}).get("dispute")
@@ -640,15 +675,14 @@ class Session:
                         receipt = {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
                                    "committed": not gittools.status_paths(worktree),
                                    # Ignored and special files as verified: publication refuses if any of them changed.
-                                   "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist)}
+                                   "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist),
+                                   "ignored_allowlist": list(self.settings.ignored_allowlist)}
                         self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
                     if receipt and self.settings.publish and not self.halted():
                         try:
                             if not receipt["committed"]:
                                 raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
-                            result.text += "\nDraft PR: " + gittools.publish(worktree, self.plan.summary, result.text,
-                                                                              receipt["head"], receipt["uncommitted"],
-                                                                              self.settings.ignored_allowlist)
+                            result.text += "\nDraft PR: " + self.publish_ready(receipt, result.text)
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                             result.text += "\nNot published: " + str(error)

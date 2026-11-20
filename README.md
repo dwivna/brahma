@@ -461,8 +461,9 @@ These are deliberate limits of the first release, not hidden defects:
 - **No submodules, Git filter drivers or SHA-256 repositories; Git 2.42 or newer.** A repository with submodules, or
   whose files use a configured filter driver (Git LFS and similar), is refused at approval: submodule contents cannot be
   ownership-checked, and a filter runs its own program and commits bytes other than the files that were checked.
-  Brahma's own Git calls ignore `.gitattributes` (attributes are read from the empty tree), so no filter program or
-  line-ending/`ident` conversion ever runs on them and a commit stores exactly the checked bytes.
+  Brahma's own Git calls ignore `.gitattributes` (attributes are read from the empty tree, with no system or global
+  attributes file), so no filter program or line-ending/`ident` conversion ever runs on them and a commit stores exactly
+  the checked bytes. `.git/info/attributes`, which Git always reads, must be empty or absent.
 - **No sandbox.** Workers and approved checks run as you. They can read anything your user can read (secret protection
   on reads is a prompt instruction; neither provider CLI can enforce it), and a check can change files outside the
   worktree. Brahma verifies and restores changes *inside* the worktree only.

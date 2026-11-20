@@ -15,7 +15,7 @@ from .models import Plan
 
 MAX_CONTRACT_BYTES = 512 * 1024
 # 2: gitignore-style ownership patterns, ignored-file detection, ignored_allowlist in models (0.2.0).
-CONTRACT_VERSION = 3          # 3: the payload binds the toolchain that runs the checks
+CONTRACT_VERSION = 4          # 3: the payload binds the toolchain that runs the checks; 4: and where instructions are read
 
 
 def _canonical(value: object) -> bytes:
@@ -175,6 +175,7 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                "base_revision": revision,
                # Fingerprinted from the checkout the run will use (an existing worktree for a follow-on plan).
                "instructions": _instructions(Path(instruction_root).resolve() if instruction_root else repo, plan),
+               "instruction_basis": "worktree" if instruction_root else "repo",
                "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,
                                "quota_wait_counts": False}, "models": model_profiles or {},

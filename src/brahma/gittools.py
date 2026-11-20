@@ -10,7 +10,7 @@ import signal
 import subprocess
 import time
 
-from . import ownership, toolchain
+from . import gitsafe, ownership, toolchain
 from .models import Event
 
 
@@ -64,7 +64,7 @@ def refuse(args: tuple[str, ...]) -> str | None:
     return None
 
 
-from .gitsafe import _GIT, git_env, run_git  # noqa: F401  (re-exported)
+from .gitsafe import _GIT, git_env, guarded, run_git  # noqa: F401  (re-exported)
 
 
 _READ_ONLY = frozenset({"status", "diff", "rev-parse", "log", "show", "ls-files", "ls-tree", "cat-file", "check-ignore",
@@ -90,7 +90,7 @@ def git(repo: Path, *args: str) -> str:
         from .config import state_home
         if halt.engaged(state_home()):
             raise ValueError("Kill switch engaged: coordinator Git writes are refused")
-    result = subprocess.run([*_GIT, "-C", str(repo), *args],
+    result = subprocess.run([*guarded(repo), *args],
                             text=True, capture_output=True, timeout=60, env=git_env())
     if result.returncode:
         raise ValueError(result.stderr.strip() or "Git command failed")
@@ -146,7 +146,7 @@ _CACHE_SENSITIVE_PREFIXES = (".env",)
 
 
 def _ls_ignored(repo: Path, *extra: str) -> list[str]:
-    result = subprocess.run([*_GIT, "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
+    result = subprocess.run([*guarded(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
                             capture_output=True, check=True, timeout=60, env=git_env())
     return [name for name in result.stdout.decode("utf-8", errors="surrogateescape").split("\0") if name]
 
@@ -177,13 +177,24 @@ def ignored_paths(repo: Path, allow=None) -> list[str]:
 
 def special_paths(repo: Path, allow=None) -> list[str]:
     """FIFOs, sockets and device nodes in the worktree. Git lists none of them (tracked, untracked or ignored), so they
-    are found by a walk that never follows symlinks; `.git` and allowlisted cache directories are skipped."""
+    are found by a walk that never follows symlinks. `.git` is skipped, and so is an allowlisted cache directory, but only
+    when Git really ignores it (it or a parent is an ignored directory): an ordinary `dist/` is walked like any other."""
     allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
     root = Path(repo)
+    ignored_dirs = {name.rstrip("/") for name in _ls_ignored(repo, "--directory") if name.endswith("/")}
+
+    def skipped(relative: str) -> bool:
+        if not any(fnmatch.fnmatchcase(Path(relative).name, pattern) for pattern in allow):
+            return False
+        parts = Path(relative).parts
+        return any("/".join(parts[:end]) in ignored_dirs for end in range(1, len(parts) + 1))
+
     found = []
     for directory, dirs, files in os.walk(root, followlinks=False):
         base = Path(directory)
-        dirs[:] = [d for d in dirs if d != ".git" and not any(fnmatch.fnmatchcase(d, pattern) for pattern in allow)]
+        prefix = base.relative_to(root).as_posix()
+        prefix = "" if prefix == "." else prefix + "/"
+        dirs[:] = [d for d in dirs if d != ".git" and not skipped(prefix + d)]
         for name in files:
             try:
                 kind = os.lstat(base / name).st_mode
@@ -213,14 +224,14 @@ def _hash_paths(repo: Path, names: list[str], *options: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for start in range(0, len(plain), 2000):
         chunk = plain[start:start + 2000]
-        hashed = subprocess.run([*_GIT, "-C", str(repo), "hash-object", *options, "--stdin-paths"],
+        hashed = subprocess.run([*guarded(repo), "hash-object", *options, "--stdin-paths"],
                                 input="\n".join(chunk).encode("utf-8", "surrogateescape"), capture_output=True,
                                 check=True, timeout=300, env=git_env()).stdout.decode().split()
         if len(hashed) != len(chunk):
             raise ValueError("File contents could not be hashed one-to-one; nothing is accepted")
         out.update(zip(chunk, hashed))
     for name in odd:
-        out[name] = subprocess.run([*_GIT, "-C", str(repo), "hash-object", *options, "--", name], capture_output=True,
+        out[name] = subprocess.run([*guarded(repo), "hash-object", *options, "--", name], capture_output=True,
                                    check=True, timeout=300, env=git_env()).stdout.decode().strip()
     return out
 
@@ -232,17 +243,32 @@ def content_changed_tracked(repo: Path) -> list[str]:
     its last refresh, with the modification time put back, is invisible to `git status`. Each file is hashed as
     `git add` would store it; the hash is reused only while device, inode, size, mtime and the nanosecond inode change
     time are all unchanged (any write changes ctime, and an unprivileged process cannot set it back)."""
-    listing = subprocess.run([*_GIT, "-C", str(repo), "ls-files", "-s", "-z"], capture_output=True, check=True,
+    listing = subprocess.run([*guarded(repo), "ls-files", "-s", "-z"], capture_output=True, check=True,
                              timeout=60, env=git_env()).stdout.decode("utf-8", "surrogateescape")
     root = Path(repo).resolve()
-    expected, keys, missing, mode_changed = {}, {}, [], []
+    if len(_BLOB_CACHE) > 200000:
+        _BLOB_CACHE.clear()                    # before deciding what to hash: every needed hash is then recomputed
+    expected, keys, missing, mode_changed, symlinks = {}, {}, [], [], []
     for row in listing.split("\0"):
         if "\t" not in row:
             continue
         meta, name = row.split("\t", 1)
         mode, blob, stage = meta.split()
+        if stage == "0" and mode == "120000":
+            # A tracked symlink must still be a symlink with exactly the committed target bytes, whatever
+            # core.symlinks says (with it false, Git accepts a regular file holding the target text as unchanged).
+            try:
+                target = os.readlink(os.fsencode(root / name))
+            except FileNotFoundError:
+                continue                       # deleted: status reports it
+            except OSError:
+                symlinks.append(name)          # not a symlink any more (or unreadable): a change
+                continue
+            if hashlib.sha1(b"blob %d\0" % len(target) + target).hexdigest() != blob:
+                symlinks.append(name)
+            continue
         if stage != "0" or mode not in ("100644", "100755"):
-            continue                           # conflicts, symlinks and gitlinks are reported by status itself
+            continue                           # conflicts and gitlinks are reported by status itself
         try:
             info = os.lstat(root / name)
         except OSError:
@@ -255,18 +281,17 @@ def content_changed_tracked(repo: Path) -> list[str]:
         expected[name], keys[name] = blob, key
         if key not in _BLOB_CACHE:
             missing.append(name)
-    if len(_BLOB_CACHE) > 200000:
-        _BLOB_CACHE.clear()
     for name, blob in _hash_paths(repo, missing, "--no-filters").items():     # raw bytes: what was really checked
         _BLOB_CACHE[keys[name]] = blob
-    return sorted({name for name in expected if _BLOB_CACHE.get(keys[name]) != expected[name]} | set(mode_changed))
+    return sorted({name for name in expected if _BLOB_CACHE.get(keys[name]) != expected[name]}
+                  | set(mode_changed) | set(symlinks))
 
 
 def status_paths(repo: Path) -> list[str]:
     """Changes `git status` reports (never ignored files), plus tracked files whose content differs from the index
     even where Git's stat cache says otherwise; these are the only paths git can stage."""
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
-    result = subprocess.run([*_GIT, "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    result = subprocess.run([*guarded(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15, env=git_env())
     chunks = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
     paths, index = [], 0
@@ -323,7 +348,7 @@ def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:
 
 def hidden_index_entries(worktree: Path) -> list[str]:
     """Tracked paths whose changes `git status` would not show: assume-unchanged (lower-case tag) or skip-worktree (S)."""
-    result = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-v", "-z"], capture_output=True, check=True, timeout=60, env=git_env())
+    result = subprocess.run([*guarded(worktree), "ls-files", "-v", "-z"], capture_output=True, check=True, timeout=60, env=git_env())
     hidden = []
     for row in result.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
         if len(row) > 2 and (row[0].islower() or row[0] == "S"):
@@ -440,13 +465,13 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     original = (identity or {}).get("head")
     if original and git(worktree, "rev-parse", "HEAD") != original:
         source = original
-        committed = subprocess.run([*_GIT, "-C", str(worktree), "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", original, "HEAD"],
+        committed = subprocess.run([*guarded(worktree), "diff", "--no-ext-diff", "--no-textconv", "--name-only", "-z", original, "HEAD"],
                                    capture_output=True, check=True, timeout=60, env=git_env()).stdout
         for name in committed.decode("utf-8", errors="surrogateescape").split("\0"):
             if name and name not in candidates and (not any(ownership.owns(p, name) for p in files) or _sensitive(name)):
                 candidates.append(name)
     # Exact comparison against the source revision's file list: a worker-chosen name is never a pathspec (`:(glob)**`).
-    listing = subprocess.run([*_GIT, "-C", str(worktree), "ls-tree", "-r", "--name-only", "-z", source],
+    listing = subprocess.run([*guarded(worktree), "ls-tree", "-r", "--name-only", "-z", source],
                              capture_output=True, check=True, timeout=60, env=git_env()).stdout
     tracked_files = set(listing.decode("utf-8", errors="surrogateescape").split("\0"))
     for name in candidates:
@@ -571,6 +596,9 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
     """Run approved checks. If `results` is a list, one (argv, status, exit_code) per command is appended as the
     coordinator observed it (status passed|failed|not_run), for handoff packets."""
     deadline = time.monotonic() + timeout
+    override = gitsafe.attribute_override(Path(worktree))     # before the implicit `git diff --check` runs
+    if override:
+        raise toolchain.ToolchainChanged(override)           # an environment change after approval: no repair is spent
     commands = [[*_GIT, "diff", "--check", "--no-ext-diff", "--no-textconv"], *checks]
     summaries = []
     for command in commands:
@@ -631,7 +659,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
 
 def _staged_differs(worktree: Path, paths: list[str]) -> list[str]:
     """Staged paths whose index blob is not the file's raw bytes: the commit must contain exactly what was checked."""
-    staged = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-s", "-z", "--", *paths],
+    staged = subprocess.run([*guarded(worktree), "ls-files", "-s", "-z", "--", *paths],
                             capture_output=True, check=True, timeout=60, env=git_env()).stdout
     index = {}
     for row in staged.decode("utf-8", "surrogateescape").split("\0"):

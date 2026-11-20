@@ -414,16 +414,14 @@ class BrahmaApp(App):
                 if self.demo:
                     raise ValueError("Demo mode cannot publish a branch or create a PR")
                 from . import presence
-                from .gittools import publish
                 if not self.session:
                     raise ValueError("Only a ready, verified plan can be published")
                 receipt = self.session.ready_receipt()
                 await asyncio.to_thread(presence.require, f"publish branch brahma/{self.session.key} as a draft PR")
                 receipt = self.session.ready_receipt()          # re-checked after the prompt
-                saved = self.store.session(self.session.key)
                 self.write(Event(kind="publication", text=await asyncio.to_thread(
-                    publish, Path(saved["worktree"]), self.session.plan.summary,
-                    "Brahma's approved plan passed configured checks and independent review.", receipt["head"])))
+                    self.session.publish_ready, receipt,
+                    "Brahma's approved plan passed configured checks and independent review.")))
             elif value == "/approve":
                 if self.demo:
                     self.write(Event(text="DEMO complete: execution is simulated, no changes were made."))

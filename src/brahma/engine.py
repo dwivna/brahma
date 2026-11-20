@@ -812,17 +812,15 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             owned, reason = ownership_changes(worktree, everything, ignored_allow=settings.ignored_allowlist, identity=identity)
             return None if owned else reason + _restore_note(worktree, everything, reviewed["changes"], settings, emit, identity)
 
-        # Verification is charged to the approved budget of the last completed task: what its checkpoint had left,
-        # minus earlier resume verifications. An exhausted budget never gets a fresh allowance.
+        # Verification is charged to the approved budget of the last completed task: what its checkpoint had left, less
+        # earlier resume verifications (the session deducts those from remaining_seconds, the one ledger). An exhausted
+        # budget never gets a fresh allowance.
         last = max(completed_indices)
         saved_last = (task_progress or {}).get(last) or {}
         left = saved_last.get("remaining_seconds")
         allowance = min(3600, settings.task_timeout)
         if isinstance(left, (int, float)) and not isinstance(left, bool) and math.isfinite(left):
             allowance = min(allowance, left)
-        spent_before = saved_last.get("verification_spent", 0)
-        if isinstance(spent_before, (int, float)) and not isinstance(spent_before, bool) and math.isfinite(spent_before):
-            allowance -= max(0.0, spent_before)
         if allowance <= 0:
             return result("incomplete", detail="No active time is left in the approved budget to verify the completed "
                                                "work again; approve a new plan to continue")

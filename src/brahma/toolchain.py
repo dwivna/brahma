@@ -259,6 +259,17 @@ _GRADLE_VALUE_OPTIONS = ("-D", "-P", "-g", "-p", "-c", "-I", "-b", "-u", "--syst
                          "--project-dir", "--settings-file", "--init-script", "--build-file", "--include-build")
 
 
+def _gradle_redirect_in_environment(env: dict[str, str]) -> bool:
+    """Fail closed: a JVM startup variable that sets a Gradle property (`-Dorg.gradle.java.home=...` picks another daemon
+    JDK, `-Dgradle.user.home=...` another properties file) or loads an argument file. The launcher script's own word
+    splitting removes quotes and backslashes, so they are removed here before looking."""
+    for key in _JAVA_STARTUP_VARIABLES:
+        value = re.sub(r"[\"'\\]", "", env.get(key, "")).casefold()
+        if "org.gradle." in value or "gradle.user.home" in value or re.search(r"(^|\s)@", value):
+            return True
+    return False
+
+
 def _redirects_gradle(args: list[str]) -> bool:
     """Fail closed: any Gradle option that takes a value (properties, user home, project dir, settings, init scripts) could move the
     JDK or the files Gradle reads, and the forms (`-Dk=v`, `-D k=v`, `-g<path>`, `--opt=value`) are too many to parse here."""
@@ -303,6 +314,9 @@ def fingerprint_program(program: str, directory: Path, env: dict[str, str], args
                 if info["redirected_by_args"] or not (env.get("GRADLE_USER_HOME") or "/").startswith("/"):
                     info["runtime"], info["runtime_unbound"] = None, True  # -g / -Dorg.gradle.java.home / relative GRADLE_USER_HOME
                     info["unbound_reason"] = "gradle-arguments" if info["redirected_by_args"] else "relative-gradle-user-home"
+                elif _gradle_redirect_in_environment(env):
+                    info["runtime"], info["runtime_unbound"] = None, True  # GRADLE_OPTS=-Dorg.gradle.java.home=... and similar
+                    info["unbound_reason"] = "gradle-environment"
             if name in ("mvn", "mvnw") and any(path.endswith("mavenrc") for path in present):
                 info["runtime"], info["runtime_unbound"] = None, True      # a mavenrc is shell code that may override JAVA_HOME
                 info["unbound_reason"] = "mavenrc"
@@ -332,6 +346,7 @@ _UNBOUND_REASONS = {
     "unreadable-startup-file": "an external startup file of {program} could not be read, so the JDK it selects is not bound.",
     "gradle-properties": "{program} may use a JDK chosen in a gradle.properties file (org.gradle.java.home, or content Brahma cannot parse safely); the JDK is not bound.",
     "gradle-arguments": "{program} is given options that can redirect its JDK or user home; the JDK is not bound.",
+    "gradle-environment": "a JVM startup variable (GRADLE_OPTS, JAVA_OPTS, ...) sets a Gradle property or loads an argument file for {program}, which can select another JDK; the JDK is not bound.",
     "relative-gradle-user-home": "GRADLE_USER_HOME is relative, so {program}'s user home and JDK are not bound.",
     "mavenrc": "a mavenrc file is present and can override JAVA_HOME for {program}; the JDK is not bound.",
     "unknown": "the JDK used by {program} is not bound.",
