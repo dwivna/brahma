@@ -470,6 +470,10 @@ These are deliberate limits of the first release, not hidden defects:
   its digest prefix, and refuses a caller without a terminal; a program can fake a terminal, so treat that step as a
   guard, not a barrier. **Confirm Touch ID only when you started the approval yourself**, and check that the digest in
   the system dialog matches the contract you read.
+- **Same-user processes.** Brahma's state (its database, contracts and kill switch) is private to your account, not to
+  Brahma. A program running as you can write an approval into the database directly, or edit Brahma's code, without any
+  prompt. The approval prompt protects Brahma's own commands from being used to approve; it is not a boundary against
+  software you already run with your account's full rights.
 - **Not implemented:** signed-policy approval (every 1.0.0 approval needs a person), read-side secret enforcement, and
   confinement of the provider CLIs.
 

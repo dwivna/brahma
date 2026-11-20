@@ -304,10 +304,20 @@ class Session:
         from .config import run_settings_line
         contract, _ = self._approval_target()
         payload = contract["payload"]
-        lines = [f"Contract {contract['digest']}", f"Repository: {self.repo}", "Goal: " + self.plan.summary]
+        lines = [f"Contract {contract['digest']}", f"Repository: {payload['repository']}",
+                 f"Base revision: {payload['base_revision']}", "Goal: " + self.plan.summary]
         for number, task in enumerate(self.plan.tasks, 1):
             lines += [f"{number}. {task.title} [{task.provider}/{task.complexity}]", "   Owns: " + ", ".join(task.files),
                       "   Acceptance: " + "; ".join(task.acceptance)]
+            for kind, ids in (("skills", task.allowed_skills), ("agents", task.allowed_agents)):
+                if ids:
+                    lines.append(f"   Loads {kind}: " + ", ".join(ids))
+        for identifier, entry in sorted(payload.get("definitions", {}).items()):
+            lines.append(f"Definition {identifier}: {entry['scope']} {entry['path']} sha256:{entry['sha256'][:16]}")
+        instructions = payload.get("instructions", {})
+        lines.append("Repository instructions: " + (", ".join(sorted(instructions)) if instructions else "none"))
+        lines.append("Gherkin feature:")
+        lines += ["   " + line for line in payload["feature"].splitlines() if line.strip()]
         lines.append("Checks: " + (json.dumps(payload["checks"]) if payload["checks"] else "none (cannot become ready)"))
         lines += toolchain.describe(payload.get("toolchain", {}))
         lines.append(run_settings_line(payload["models"]))
@@ -320,6 +330,9 @@ class Session:
         if again["digest"] != digest or self.store.killed:
             raise ValueError("The contract or the kill switch changed while approval was being confirmed; nothing was approved")
         self.store.set(self.key, stopped=0, paused=0, approved_digest=digest)
+        job = self.store.job(self.key)
+        if job and job["state"] == "held":
+            self.store.finish_job(self.key, "superseded")
         self.emit(Event(role="user", kind="approval", text="Approved by the device owner: contract " + digest))
         return digest
 
@@ -456,6 +469,9 @@ class Session:
         if saved["stopped"] or saved["paused"]:
             raise ValueError("Scheduled approval is no longer valid" if scheduled else
                              "This session is stopped or paused; `brahma resume " + self.key + "`, or approve a new plan")
+        job = self.store.job(self.key)
+        if job and job["state"] == "held" and not scheduled:
+            raise ValueError("This session's work is held (pause or kill switch); `brahma resume " + self.key + "` queues it again")
         self.cancel.clear()
         with self.lock():
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
@@ -519,9 +535,12 @@ class Session:
                 waiting = (progress.get(index) or {}).get("dispute")
                 if waiting and waiting.get("state") == "escalated" and digest and digest == waiting.get("digest"):
                     progress[index]["dispute_decision"] = side
+            seen_halt: list[str] = []
             async def monitor_stop():
                 while True:
-                    if self.halted():
+                    reason = self.halted()
+                    if reason:
+                        seen_halt.append(reason)
                         self.cancel.set()
                         return
                     await asyncio.sleep(.2)
@@ -531,6 +550,7 @@ class Session:
                 self.approved_contract()
                 reason = self.halted()
                 if reason:
+                    seen_halt.append(reason)
                     self.cancel.set()
                     return {"state": "unavailable", "next_at": None, "reason": reason}
                 return await capacity(provider)
@@ -547,17 +567,21 @@ class Session:
                     elif self.settings.auto_commit:
                         commit = gittools.commit_changes(worktree, self.plan.summary, identity)
                         result.text += "\nLocal commit: " + commit
+                    receipt = None
                     if result.status == "ready":
                         # What was verified, bound to the exact commit: publication may push this and nothing else.
-                        self.emit(Event(kind="ready_receipt", text=json.dumps({
-                            "digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
-                            "committed": not gittools.status_paths(worktree)})))
-                    if result.status == "ready" and self.settings.publish and not self.halted():
+                        receipt = {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
+                                   "committed": not gittools.status_paths(worktree)}
+                        self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
+                    if receipt and self.settings.publish and not self.halted():
                         try:
+                            if not receipt["committed"]:
+                                raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
                             result.text += "\nDraft PR: " + gittools.publish(worktree, self.plan.summary, result.text,
-                                                                              self.ready_receipt()["head"])
+                                                                              receipt["head"])
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
+                            result.text += "\nNot published: " + str(error)
                 # A durable stop takes precedence over an automatic restart.
                 reason = self.halted()
                 if reason:
@@ -566,6 +590,10 @@ class Session:
                 if reason and not self.store.session(self.key)["stopped"]:
                     # A pause or the kill switch keeps the approved continuation; only `resume` queues it again.
                     self.store.hold(self.key, self.generation, contract["digest"], reason + "; resume to continue")
+                elif seen_halt and result.status == "cancelled" and not self.store.session(self.key)["stopped"]:
+                    # Paused, then resumed before this run wound down: the resume asked for the work to continue.
+                    self.store.enqueue(self.key, self.generation, contract["digest"], time.time(),
+                                       "Resumed after " + seen_halt[0])
                 elif result.status == "waiting":
                     waits = [json.loads(e["text"]) for e in self.store.events(self.key) if e["kind"] == "wait"]
                     latest = waits[-1] if waits else {}

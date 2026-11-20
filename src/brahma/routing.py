@@ -123,9 +123,8 @@ def from_feedback(feedback: str | None) -> list[Proposal]:
 
 def stale_branches(repo: Path, now: float | None = None, days: int = STALE_BRANCH_DAYS) -> list[Proposal]:
     """Local brahma/* branches untouched for a while (a read-only listing; nothing is deleted or merged)."""
-    result = subprocess.run(["git", "--literal-pathspecs", "-C", str(repo), "for-each-ref",
-                             "--format=%(refname:short)%09%(committerdate:unix)", "refs/heads/brahma/"],
-                            text=True, capture_output=True, timeout=30)
+    from .gitsafe import run_git
+    result = run_git(repo, "for-each-ref", "--format=%(refname:short)%09%(committerdate:unix)", "refs/heads/brahma/")
     if result.returncode:
         return []
     now = time.time() if now is None else now

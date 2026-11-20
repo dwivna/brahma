@@ -22,8 +22,8 @@ MIN_SAMPLES = 5  # below this, routing must say "no data yet" instead of present
 
 def repo_id(repo: Path) -> str:
     """Canonical identity: the repository's real common Git directory, so every worktree of one repo agrees."""
-    common = subprocess.run(["git", "-C", str(repo), "rev-parse", "--path-format=absolute", "--git-common-dir"],
-                            text=True, capture_output=True, timeout=30)
+    from .gitsafe import run_git
+    common = run_git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir")
     if common.returncode:
         raise ValueError("Memory needs a Git repository")
     return hashlib.sha256(str(Path(common.stdout.strip()).resolve()).encode()).hexdigest()[:16]

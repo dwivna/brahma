@@ -162,8 +162,9 @@ class Tick(unittest.IsolatedAsyncioTestCase):
             with patch.object(Session, "execute", execute):
                 self.assertTrue(await scheduler.tick(store))
                 self.assertFalse(await scheduler.tick(store))
-            self.assertEqual(job(store, session.key), {"state": "queued", "next_at": later, "reason": "weekly reset"})
-            self.assertTrue(await scheduler.tick(store, now=later + 1) is True)
+                self.assertEqual(job(store, session.key), {"state": "queued", "next_at": later, "reason": "weekly reset"})
+                # Still patched: this tick used to run the real Session.execute and launch real provider CLIs.
+                self.assertTrue(await scheduler.tick(store, now=later + 1) is True)
             store.close()
 
     async def test_service_stop_cancels_child_work_and_requeues_once(self):

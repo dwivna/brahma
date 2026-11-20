@@ -26,7 +26,8 @@ def _packet(settings, task: Task, index: int, phase: str, worktree, check_result
     if phase == "review":
         try:
             import subprocess
-            head = subprocess.run(["git", "-C", str(worktree), "rev-parse", "HEAD"], text=True, capture_output=True, timeout=15)
+            from .gitsafe import run_git
+            head = run_git(worktree, "rev-parse", "HEAD", timeout=15)
             diff_ref = head.stdout.strip() if head.returncode == 0 else None
         except (OSError, subprocess.SubprocessError):
             diff_ref = None
@@ -322,7 +323,7 @@ async def _limited_wait(provider: str, role: str, gate, emit: Emit) -> dict:
 
 async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                   cancel: asyncio.Event, completed_indices: set[int] | None = None,
-                  task_progress: dict[int, dict] | None = None, provider_gate=None) -> Result:
+                  task_progress: dict[int, dict] | None = None, provider_gate=None, tracker: dict | None = None) -> Result:
     """Execute an accepted plan; root owns worktree lifecycle, lock and final commits.
 
     Only `ready` means configured checks, ownership and an independent review passed.
@@ -388,7 +389,10 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 return result("blocked", task, "File ownership check failed: " + reason)
         return result(status, task, detail)
 
+    tracker = {} if tracker is None else tracker
+    tracker["guard"] = guarded
     for index, task in enumerate(validated.tasks, 1):
+        tracker["current"] = (index, task)
         task_started = time.monotonic()
         if index in completed_indices:
             if needs_checks:
@@ -680,7 +684,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                      findings=len(review.get("issues", [])), usage=usage, seconds=time.monotonic() - task_started)
             _checkpoint(emit, index, task, state, attempt, review["summary"])
             completed.append(task.title)
+            tracker.pop("current", None)        # this task is done; a later failure must not verify against its baseline
             break
+    tracker.pop("current", None)
     # Recorded readiness is a checkpoint, not proof the worktree stayed unchanged.
     # Resume always reruns configured checks and validates the full accepted scope.
     if completed_indices:
@@ -706,12 +712,27 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
 async def execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                   cancel: asyncio.Event, completed_indices: set[int] | None = None,
                   task_progress: dict[int, dict] | None = None, provider_gate=None) -> Result:
-    """Checkpoint local context/Git/check setup failures without losing the draft."""
+    """Checkpoint failures without losing the draft. Whatever goes wrong while a task is active (an exception from a worker,
+    a parser, a check or Brahma itself), its ownership is verified and violations restored before the error is reported."""
     started = time.monotonic()
+    tracker: dict = {}
     try:
-        return await _execute(plan, worktree, settings, emit, cancel, completed_indices, task_progress, provider_gate)
-    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
-        detail = providers.clean_text(str(exc))[:2000]
+        return await _execute(plan, worktree, settings, emit, cancel, completed_indices, task_progress, provider_gate,
+                              tracker=tracker)
+    except BaseException as exc:
+        detail = providers.clean_text(f"{type(exc).__name__}: {exc}" if not isinstance(exc, (OSError, ValueError)) else str(exc))[:2000]
+        verified = None
+        if "current" in tracker:
+            index, task = tracker["current"]
+            try:
+                verified = tracker["guard"](index, "blocked", task, "Execution blocked; worktree retained: " + detail)
+            except Exception as error:      # the original failure is still reported; say verification also failed
+                detail += "; ownership could not be verified: " + providers.clean_text(str(error))[:300]
+        if not isinstance(exc, Exception):
+            raise                          # cancellation and interrupts propagate, after verification
         _emit(emit, "checkpoint", "Execution blocked; worktree retained: " + detail)
+        if verified is not None:
+            verified.seconds = time.monotonic() - started
+            return verified
         return Result("brahma", "blocked", "Execution blocked; worktree retained: " + detail,
                       seconds=time.monotonic() - started)

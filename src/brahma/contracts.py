@@ -103,8 +103,10 @@ def _instructions(repo: Path, plan: Plan) -> dict[str, str]:
 
 
 def _revision(repo: Path) -> str:
-    process = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True,
-                             text=True, timeout=8, check=True)
+    from .gitsafe import run_git
+    process = run_git(repo, "rev-parse", "HEAD", timeout=8)
+    if process.returncode:
+        raise subprocess.CalledProcessError(process.returncode, ["git", "rev-parse", "HEAD"], process.stdout, process.stderr)
     return process.stdout.strip()
 
 

@@ -208,6 +208,12 @@ class StreamParser:
             raise ValueError("Worker emitted invalid JSONL") from None
         if not isinstance(value, dict):
             raise ValueError("Worker emitted an invalid event")
+        try:
+            self._consume(value)
+        except (TypeError, AttributeError, KeyError, IndexError) as error:
+            raise ValueError("Worker emitted a malformed event: " + type(error).__name__) from None
+
+    def _consume(self, value: dict) -> None:
         kind = value.get("type")
         session = value.get("thread_id") if self.provider == "codex" else value.get("session_id")
         if isinstance(session, str) and session != self.session_id:

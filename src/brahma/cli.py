@@ -251,15 +251,27 @@ def confirm_in_terminal(session) -> str:
 def emit(payload: dict, text, code: int, as_json: bool) -> int:
     """Print one result. JSON output is always the envelope: the payload plus `ok` and `exit_code`.
     `text` may be a callable so human formatting is only done for humans."""
+    from .safety import redact
+
+    def clean(value):                   # worker and reviewer text can carry secret-shaped strings: never print them
+        if isinstance(value, str):
+            return redact(value)
+        if isinstance(value, dict):
+            return {key: clean(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [clean(item) for item in value]
+        return value
     if as_json:
-        print(json.dumps({**payload, "ok": code == exitcodes.READY, "exit_code": code}, ensure_ascii=False))
+        print(json.dumps({**clean(payload), "ok": code == exitcodes.READY, "exit_code": code}, ensure_ascii=False))
     else:
         text = text() if callable(text) else text
-        print(text if text is not None else json.dumps(payload, indent=2, ensure_ascii=False))
+        print(redact(text) if text is not None else json.dumps(clean(payload), indent=2, ensure_ascii=False))
     return code
 
 
 def fail(message: str, code: int, wants_json: bool) -> int:
+    from .safety import redact
+    message = redact(message)
     if wants_json:
         print(json.dumps({"ok": False, "error": message, "exit_code": code}))
     else:

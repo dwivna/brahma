@@ -63,10 +63,7 @@ def refuse(args: tuple[str, ...]) -> str | None:
     return None
 
 
-# Never let repository configuration run code or hide paths while Brahma inspects a worktree: no hooks, no fsmonitor
-# helper, no stale untracked cache.
-_GIT = ("git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-        "-c", "core.untrackedCache=false")
+from .gitsafe import _GIT, git_env, run_git  # noqa: F401  (re-exported)
 
 
 _READ_ONLY = frozenset({"status", "diff", "rev-parse", "log", "show", "ls-files", "ls-tree", "cat-file", "check-ignore",
@@ -93,7 +90,7 @@ def git(repo: Path, *args: str) -> str:
         if halt.engaged(state_home()):
             raise ValueError("Kill switch engaged: coordinator Git writes are refused")
     result = subprocess.run([*_GIT, "-C", str(repo), *args],
-                            text=True, capture_output=True, timeout=60)
+                            text=True, capture_output=True, timeout=60, env=git_env())
     if result.returncode:
         raise ValueError(result.stderr.strip() or "Git command failed")
     return result.stdout.strip()
@@ -410,17 +407,38 @@ def scrub_secrets(env: dict[str, str]) -> dict[str, str]:
     return env
 
 
+async def _end_group(process, grace: float = 1.0) -> None:
+    """End every process left in a check's group, even when the check itself already exited successfully."""
+    from . import procs
+    for sig in (signal.SIGTERM, signal.SIGKILL):
+        try:
+            os.killpg(process.pid, sig)
+        except ProcessLookupError:
+            break
+        except PermissionError:
+            pass
+        deadline = time.monotonic() + grace
+        while procs._group_alive(process.pid) and time.monotonic() < deadline:
+            await asyncio.sleep(.05)
+        if not procs._group_alive(process.pid):
+            break
+    if process.returncode is None:
+        await process.wait()
+
+
 async def run_checks(worktree, checks, cancel, timeout, emit, results=None, bound=None):
     """Run approved checks. If `results` is a list, one (argv, status, exit_code) per command is appended as the
     coordinator observed it (status passed|failed|not_run), for handoff packets."""
     deadline = time.monotonic() + timeout
-    commands = [["git", "-c", "core.hooksPath=/dev/null", "diff", "--check"], *checks]
+    commands = [[*_GIT, "diff", "--check"], *checks]
     summaries = []
     for command in commands:
         if cancel.is_set() or time.monotonic() >= deadline:
             return False, "Checks cancelled or time budget exhausted"
         emit(Event(kind="check", text="Running approved check: " + " ".join(command)))
         environment = check_env()
+        if command[0] == "git" and command is commands[0]:
+            environment = git_env(environment)        # the implicit check takes no Git config from the environment
         argv, problem = toolchain.verify_before_run(command, worktree, bound, environment)       # includes the implicit git diff --check
         if problem:
             emit(Event(kind="check", text=problem))
@@ -463,8 +481,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
                 return False, "\n".join(summaries)
         finally:
             stopped.cancel()
-            if process.returncode is None:
-                await _stop(process)
+            await _end_group(process)          # also any background process the check left behind after exiting
             procs.unregister(record)
             if not running.done():
                 running.cancel()

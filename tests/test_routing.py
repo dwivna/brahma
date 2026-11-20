@@ -124,7 +124,7 @@ class Proposals(unittest.TestCase):
         tree = ast.parse(Path(routing.__file__).read_text())
         imported = {n.module or "" for n in ast.walk(tree) if isinstance(n, ast.ImportFrom)}
         imported |= {a.name for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
-        self.assertEqual(imported - {"__future__", "json", "subprocess", "time", "dataclasses", "pathlib", "memory"}, set())
+        self.assertEqual(imported - {"__future__", "json", "subprocess", "time", "dataclasses", "pathlib", "memory", "gitsafe"}, set())   # gitsafe: read-only Git queries
         calls = {n.func.attr for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)}
         self.assertFalse(calls & {"enqueue", "execute", "set", "stop"})   # nothing that queues, runs or approves
 

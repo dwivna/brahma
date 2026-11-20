@@ -24,7 +24,8 @@ def build_context(repo: Path, files: list[str], limit: int) -> str:
         raise ValueError("Mandatory repository instructions exceed context cap; raise cap instead of dropping them")
     reports = []
     for args in (("status", "--short"), ("diff", "--stat")):
-        result = subprocess.run(["git", "-C", str(root), *args], text=True, capture_output=True, timeout=15)
+        from .gitsafe import run_git
+        result = run_git(root, *args, timeout=15)
         reports.append(result.stdout[:2000])
     return ("Selected repository instructions (mandatory):\n" + mandatory +
             "\nAssigned file ownership: " + ", ".join(files) +
