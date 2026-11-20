@@ -50,7 +50,8 @@ class Finding1PublishFromTheEventLoop(unittest.IsolatedAsyncioTestCase):
                 url = await session.publish_ready_in_thread(
                     {"head": "h1", "uncommitted": {}, "ignored_allowlist": ["node_modules"]}, "body")
             self.assertEqual(url, "https://example.invalid/pr/1")
-            self.assertEqual(seen, [(repo, "Goal", "body", "h1", {}, ["node_modules"])])
+            self.assertEqual(seen[0][:6], (repo, "Goal", "body", "h1", {}, ["node_modules"]))
+            self.assertIsNone(seen[0][6]())                     # the stop check works from the publication thread
         self.assertIn("self.session.publish_ready_in_thread(", (ROOT / "src" / "brahma" / "ui.py").read_text())
 
 

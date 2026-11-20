@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import hashlib
 import os
+import re
 import stat
 from pathlib import Path
 import signal
@@ -56,7 +57,10 @@ def refuse(args: tuple[str, ...]) -> str | None:
             return "Push needs an explicit brahma/* branch"
         for ref in targets:
             source, _, destination = ref.partition(":")
-            if ref.startswith(("+", ":")) or not source.startswith("brahma/") or (
+            destination = destination.removeprefix("refs/heads/")
+            # A brahma/* branch, or an exact commit (40 hex digits) sent to an explicit brahma/* destination.
+            exact = bool(re.fullmatch(r"[0-9a-f]{40}", source)) and destination.startswith("brahma/")
+            if ref.startswith(("+", ":")) or not (source.startswith("brahma/") or exact) or (
                     destination and not destination.startswith("brahma/")):
                 return "Only brahma/* branches may be pushed; default branches are never written"
     if command == "checkout" and any(a in ("-B", "--force", "-f") for a in args):
@@ -199,11 +203,12 @@ def special_paths(repo: Path, allow=None) -> list[str]:
     def skipped(relative: str) -> bool:
         return _allowed_ignored(relative, allow, ignored_dirs, is_dir=True)
 
-    found = []
+    found, caches = [], []
     for directory, dirs, files in os.walk(root, followlinks=False):
         base = Path(directory)
         prefix = base.relative_to(root).as_posix()
         prefix = "" if prefix == "." else prefix + "/"
+        caches.extend(base / d for d in dirs if d != ".git" and skipped(prefix + d))
         dirs[:] = [d for d in dirs if d != ".git" and not skipped(prefix + d)]
         for name in files:
             try:
@@ -212,6 +217,19 @@ def special_paths(repo: Path, allow=None) -> list[str]:
                 continue
             if not (stat.S_ISREG(kind) or stat.S_ISLNK(kind) or stat.S_ISDIR(kind)):
                 found.append((base / name).relative_to(root).as_posix())
+    # Inside a skipped cache only sensitive names (`.env*`) are inspected, as in ignored_paths(); Git never lists special
+    # files, so a `.env` FIFO or socket there is found here. Only those names are stat'ed.
+    for cache in caches:
+        for directory, dirs, files in os.walk(cache, followlinks=False):
+            for name in (*files, *dirs):
+                if not name.casefold().startswith(_CACHE_SENSITIVE_PREFIXES):
+                    continue
+                try:
+                    kind = os.lstat(Path(directory) / name).st_mode
+                except OSError:
+                    continue
+                if not (stat.S_ISREG(kind) or stat.S_ISLNK(kind) or stat.S_ISDIR(kind)):
+                    found.append((Path(directory) / name).relative_to(root).as_posix())
     return found
 
 
@@ -389,7 +407,8 @@ def _never_acceptable(worktree: Path, name: str) -> bool:
         return True
     if stat.S_ISLNK(kind):
         return _sensitive(name) or not path.resolve().is_relative_to(worktree.resolve())
-    return _sensitive(name) or stat.S_ISDIR(kind) or not stat.S_ISREG(kind)
+    # A regular file Brahma cannot read cannot be verified, owned or not.
+    return _sensitive(name) or stat.S_ISDIR(kind) or not stat.S_ISREG(kind) or unverifiable(_fingerprint(path))
 
 
 def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:
@@ -729,12 +748,53 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
     return git(worktree, "rev-parse", "HEAD")
 
 
+def _run_publication_step(argv: list[str], worktree: Path, stopped, *, input_text: str = "", env=None,
+                          timeout: float = 120) -> subprocess.CompletedProcess:
+    """One external write of a publication (push or PR creation), stopped at once if `stopped()` reports a stop,
+    pause or kill switch while it runs. Runs in its own process group so the whole step is ended."""
+    process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                               stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            out, err = process.communicate(input_text, timeout=0.25)
+            return subprocess.CompletedProcess(argv, process.returncode, out, err)
+        except subprocess.TimeoutExpired:
+            reason = stopped()
+            if reason or time.monotonic() > deadline:
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.communicate()
+                raise ValueError("Publication stopped: " + (reason or "it took too long")
+                                 + "; check the remote branch before publishing again") from None
+
+
 def publish(worktree: Path, summary: str, body: str, expected_head: str, expected_uncommitted: dict | None = None,
-            ignored_allow=None) -> str:
+            ignored_allow=None, stopped=None) -> str:
     """Push exactly the commit that was verified ready, and open a draft PR. Anything added after readiness (a commit, an
-    uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed."""
-    import shutil
-    from . import safety
+    uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed.
+
+    The push sends the verified commit itself (its SHA), never whatever the branch name points to by then. Publications
+    of one worktree are serialized, and `stopped()` (kill switch, stop or pause) is checked before every external write
+    and while each one runs."""
+    import fcntl
+    with open(Path(git(worktree, "rev-parse", "--absolute-git-dir")) / "brahma-publish.lock", "a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow,
+                        stopped or (lambda: None))
+
+
+def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped) -> str:
+    from . import halt, safety
+    from .config import state_home
+
+    def halted() -> str | None:
+        return "Kill switch engaged" if halt.engaged(state_home()) else stopped()
+    reason = halted()
+    if reason:
+        raise ValueError("Not published: " + reason)
     summary, body = safety.redact(summary), safety.redact(body)     # never send a secret-shaped string to GitHub
     from .providers import find_executable
     gh = find_executable("gh")
@@ -752,10 +812,20 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
             or any(unverifiable(value) for value in now.values())):
         # Ignored files (a new `.env`, a planted script) and special files are compared with the verified receipt too.
         raise ValueError("Not published: ignored or special files changed after the work was verified ready")
-    git(worktree, "push", "--set-upstream", "origin", f"{branch}:{branch}")  # explicit destination: never a default branch
-    result = subprocess.run([gh, "pr", "create", "--draft", "--head", branch,
-                             "--title", summary[:120], "--body-file", "-"], cwd=worktree,
-                             input=body, text=True, capture_output=True, timeout=60)
+    if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
+        raise ValueError("Not published: the verified commit is not a full commit id")
+    push = ("push", "origin", f"{expected_head}:refs/heads/{branch}")    # the verified commit, to its own brahma/* branch
+    reason = refuse(push) or halted()
+    if reason:
+        raise ValueError("Not published: " + reason)
+    pushed = _run_publication_step([*guarded(worktree), *push], worktree, halted, env=git_env())
+    if pushed.returncode:
+        raise ValueError(pushed.stderr.strip() or "Push failed; nothing was published")
+    reason = halted()
+    if reason:
+        raise ValueError(f"Not published as a PR: {reason}. The verified commit was pushed to {branch}")
+    result = _run_publication_step([gh, "pr", "create", "--draft", "--head", branch, "--title", summary[:120],
+                                    "--body-file", "-"], worktree, halted, input_text=body, timeout=60)
     if result.returncode:
         raise ValueError("Draft PR creation failed; pushed branch is preserved. Check gh auth and repository access")
     return result.stdout.strip()

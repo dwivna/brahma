@@ -135,7 +135,9 @@ def redact_deep(value):
                 # A file-fingerprint map: its keys are repository paths, never field names, so they are kept as they
                 # are (a file called `tokenizer` keeps its fingerprint). Only values shaped like the fingerprints Brahma
                 # computes are kept; anything else under such a name (worker-supplied JSON) is hidden.
-                out[key] = {path: _fingerprint_value(fingerprint) for path, fingerprint in item.items()}
+                # A path that itself contains a credential-shaped string is redacted like any text: storage and live
+                # logs never hold it (comparisons against such a stored map then fail closed).
+                out[key] = {redact(str(path)): _fingerprint_value(fingerprint) for path, fingerprint in item.items()}
             elif credential_field(str(key)) and not _usage_counter(str(key), item):
                 out[key] = _hide_all(item)
             else:

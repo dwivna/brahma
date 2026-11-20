@@ -270,21 +270,15 @@ class PublishDestination(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r", "")
             subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "brahma/abc123def456"], check=True)
-            calls = []
-            def fake_git(worktree, *args):
-                calls.append(args)
-                if args[:2] == ("rev-parse", "HEAD"):
-                    return "h1"
-                return "brahma/abc123def456" if args[:2] == ("branch", "--show-current") else ""
-            fake_run = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1"})()
-            with patch("brahma.gittools.git", fake_git), patch("shutil.which", lambda name, **kw: "/usr/bin/gh"), \
-                    patch("brahma.gittools.status_paths", return_value=[]), \
-                    patch("brahma.gittools.hidden_index_entries", return_value=[]), \
-                    patch("brahma.gittools.snapshot_changes", return_value={}), \
-                    patch("brahma.gittools.subprocess.run", lambda *a, **k: fake_run):
-                gittools.publish(repo, "summary", "body", "h1", {})
-            push = [c for c in calls if c[0] == "push"][0]
-            self.assertEqual(push, ("push", "--set-upstream", "origin", "brahma/abc123def456:brahma/abc123def456"))
+            head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
+            steps = []
+            done = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1", "stderr": ""})()
+            with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
+                    patch("brahma.gittools._run_publication_step", lambda argv, *a, **k: steps.append(argv) or done):
+                gittools.publish(repo, "summary", "body", head, gittools.snapshot_changes(repo))
+            push = tuple(steps[0][steps[0].index("push"):])
+            # The verified commit itself, to the explicit brahma/* branch (round 16): never a default branch.
+            self.assertEqual(push, ("push", "origin", f"{head}:refs/heads/brahma/abc123def456"))
             self.assertIsNone(gittools.refuse(push))
             for dest in ("main", "master", "develop", "refs/heads/main"):
                 self.assertIsNotNone(gittools.refuse(("push", "origin", f"brahma/abc123def456:{dest}")))

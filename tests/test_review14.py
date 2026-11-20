@@ -104,15 +104,12 @@ class Finding3PublishFromTheInterface(unittest.TestCase):
             store.set(session.key, worktree=str(repo))
             receipt = {"head": git(repo, "rev-parse", "HEAD"), "uncommitted": gittools.snapshot_changes(repo),
                        "ignored_allowlist": list(gittools.DEFAULT_IGNORED_ALLOWLIST)}
-            pushed = []
-            real, real_run = gittools.git, subprocess.run
-            done = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1"})()
+            steps = []
+            done = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1", "stderr": ""})()
             with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
-                    patch.object(gittools, "git", side_effect=lambda r, *a: pushed.append(a) if a[0] == "push" else real(r, *a)), \
-                    patch.object(gittools.subprocess, "run",
-                                 side_effect=lambda argv, *a, **k: done if argv[0] == "/usr/bin/gh" else real_run(argv, *a, **k)):
+                    patch.object(gittools, "_run_publication_step", lambda argv, *a, **k: steps.append(argv) or done):
                 self.assertEqual(session.publish_ready(receipt, "body"), "https://example.invalid/pr/1")
-            self.assertEqual(len(pushed), 1)
+            self.assertEqual(len([argv for argv in steps if "push" in argv]), 1)
         # /publish uses the same receipt-bound path (from the event loop since round 15).
         self.assertTrue("self.session.publish_ready_in_thread(" in (ROOT / "src" / "brahma" / "ui.py").read_text())
 

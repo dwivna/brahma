@@ -38,6 +38,10 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
+  serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and
+  while the push or PR creation runs (which are ended at once); fingerprint-map path keys are redacted like any text;
+  `.env*` special files inside ignored caches are found; an owned file Brahma cannot read is not accepted.
 - Independent review round 15: `/publish` reads session state on the event loop and publishes in a worker thread;
   an approved plan may edit or delete the instruction files it owns without invalidating its own contract (others must
   still match); the ignored-file scan exempts cache-named directories only when Git ignores them (one rule with the

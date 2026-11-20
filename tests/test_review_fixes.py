@@ -48,13 +48,19 @@ class Redaction(unittest.TestCase):
                 self.assertNotIn(value, safety.redact("found " + value + " here"))
 
     def test_publish_text_is_redacted_before_it_is_sent(self):
-        with patch("shutil.which", return_value="/usr/bin/gh"), patch.object(gittools, "git", side_effect=["brahma/x", "h1", ""]), \
+        head = "1" * 40
+        answers = {("branch", "--show-current"): "brahma/x", ("rev-parse", "HEAD"): head}
+        sent = []
+        done = type("R", (), {"returncode": 0, "stdout": "url", "stderr": ""})()
+        with tempfile.TemporaryDirectory() as tmp, patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
+                patch.object(gittools, "git", lambda repo, *args: answers.get(args, tmp)), \
                 patch.object(gittools, "status_paths", return_value=[]), patch.object(gittools, "hidden_index_entries", return_value=[]), \
-                patch.object(gittools, "snapshot_changes", return_value={}), patch("subprocess.run") as run:
-            run.return_value.returncode, run.return_value.stdout = 0, "url"
-            gittools.publish(Path("/w"), "Fix " + SECRET, "body " + SECRET, "h1", {})
-            call = run.call_args
-            self.assertNotIn("SYNTHETIC", json.dumps(call.args[0]) + call.kwargs["input"])
+                patch.object(gittools, "snapshot_changes", return_value={}), \
+                patch.object(gittools, "_run_publication_step",
+                             lambda argv, worktree, stopped, **kw: sent.append((argv, kw.get("input_text", ""))) or done):
+            gittools.publish(Path(tmp), "Fix " + SECRET, "body " + SECRET, head, {})
+        self.assertEqual(len(sent), 2)                          # the push and the PR
+        self.assertNotIn("SYNTHETIC", json.dumps(sent))
 
 
 class GitSafety(unittest.TestCase):

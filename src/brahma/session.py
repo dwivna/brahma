@@ -467,7 +467,13 @@ class Session:
     def _publish_arguments(self, receipt: dict, body: str) -> tuple:
         # Read on the caller's thread: the store's SQLite connection belongs to the thread that opened it.
         worktree = Path(self.store.session(self.key)["worktree"])
-        return (worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"])
+        home, key, cancel = self.store.home, self.key, self.cancel
+
+        def stopped() -> str | None:
+            # Called from the publication thread: no use of this session's own database connection.
+            return "Stopped by user" if cancel.is_set() else Store.halt_reason(home, key)
+        return (worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
+                stopped)
 
     def publish_ready(self, receipt: dict, body: str) -> str:
         """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
