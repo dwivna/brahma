@@ -5,6 +5,7 @@ import json
 import tempfile
 import time
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from brahma import exitcodes
@@ -256,6 +257,37 @@ class OnlyAPersonApproves(unittest.TestCase):
         self.assertEqual(code, 20)
         self.assertIn("interactive terminal", json.loads(out)["error"])
         self.assertIsNone(self.approved())
+
+    def test_a_contract_that_changes_after_it_was_read_is_not_approved(self):
+        # Automated security review: the approval must be bound to the digest the person confirmed.
+        from brahma.session import Session
+        # The person read and confirmed contract eeee…; by the time the dialog would open, the contract is another one.
+        with owner_confirms() as prompt, at_terminal("e" * 8), \
+                patch.object(Session, "approval_summary", return_value=("e" * 64, ["Contract " + "e" * 64])):
+            code, out, _ = run_cli("--json", "approve", self.session.key, state=self.state)
+        prompt.assert_not_called()
+        self.assertEqual(code, 20)
+        self.assertIn("changed after you read it", json.loads(out)["error"])
+        self.assertIsNone(self.approved())
+
+    def test_the_session_refuses_an_expected_digest_that_is_not_the_current_contract(self):
+        from brahma.session import Session
+        from brahma.store import Store
+        store = Store(self.state)
+        try:
+            session = Session(store, Path(store.session(self.session.key)["repo"]), key=self.session.key)
+            with owner_confirms() as prompt, self.assertRaisesRegex(ValueError, "changed after you read it"):
+                session.approve("0" * 64)
+            prompt.assert_not_called()
+            with owner_confirms():
+                self.assertEqual(session.approve(self.digest()), self.digest())
+        finally:
+            store.close()
+
+    def test_contract_text_cannot_fake_lines_or_reorder_what_is_shown(self):
+        from brahma.session import displayable
+        shown = displayable("Owns: a.txt\nChecks: none\r\t\x85\u202eexe.txt\u200b\x1b[2Jdone")
+        self.assertEqual(shown, "Owns: a.txtChecks: noneexe.txtdone")
 
     def test_a_wrong_digest_prefix_approves_nothing(self):
         with owner_confirms() as prompt, at_terminal("00000000"):

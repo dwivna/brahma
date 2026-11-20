@@ -20,6 +20,15 @@ from . import gittools
 from .store import Store
 
 
+# Bidi overrides, zero-width and other format characters (Unicode Cf) can make a line read differently from what it holds.
+def displayable(text: str) -> str:
+    """One line safe to show a person who is about to approve it: escapes and controls (C0, C1, DEL), line breaks, tabs and
+    Unicode format characters are removed, so no field can fake another line or reorder what is shown."""
+    import unicodedata
+    text = CONTROL.sub("", text)
+    return "".join(ch for ch in text if not (unicodedata.category(ch) in ("Cc", "Cf", "Zl", "Zp") or "\x80" <= ch <= "\x9f"))
+
+
 CONTROL = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))|[\x00-\x08\x0b-\x1f\x7f]")
 
 
@@ -274,7 +283,7 @@ class Session:
         selected.bound_toolchain = contract["payload"].get("toolchain")    # re-verified before every check
         return contract, selected, catalog
 
-    def _approval_target(self) -> tuple[dict, str]:
+    def _approval_target(self, expected: str | None = None) -> tuple[dict, str]:
         if self.store.killed:
             raise ValueError("Kill switch engaged: nothing can be approved until it is lifted")
         if self.plan is None or self.plan.questions:
@@ -282,6 +291,8 @@ class Session:
         if self.store.session(self.key)["status"] == "ready":
             raise ValueError("This plan is already complete; use /new for another goal")
         contract, _, _ = self.approved_contract()
+        if expected is not None and contract["digest"] != expected:
+            raise ValueError("The contract changed after you read it; nothing was approved. Read it again.")
         # Only values Brahma controls go into the system prompt; the repository name is reduced to a safe, quoted label.
         label = re.sub(r"[^A-Za-z0-9._-]", "_", self.repo.name)[:40] or "repository"
         return contract, (f"approve contract {contract['digest'][:12]} ({len(self.plan.tasks)} task(s)) "
@@ -302,7 +313,7 @@ class Session:
         lines.append(run_settings_line(payload["models"]))
         budget = payload["task_budget"]
         lines.append(f"Budget: {budget['active_seconds'] / 60:g} active minutes per task, at most {budget['repair_cycles']} repairs")
-        return contract["digest"], [safety.redact(CONTROL.sub("", line)) for line in lines]
+        return contract["digest"], [safety.redact(displayable(line)) for line in lines]
 
     def _record_approval(self, digest: str) -> str:
         again, _, _ = self.approved_contract()           # nothing may change while the prompt was open
@@ -312,18 +323,18 @@ class Session:
         self.emit(Event(role="user", kind="approval", text="Approved by the device owner: contract " + digest))
         return digest
 
-    def approve(self) -> str:
+    def approve(self, expected_digest: str | None = None) -> str:
         """Human-only: approve the current locked contract. The device owner confirms with Touch ID or the login password
         (presence.require); there is no other way to create an approval. Returns the approved digest."""
         from . import presence
-        contract, reason = self._approval_target()
+        contract, reason = self._approval_target(expected_digest)
         presence.require(reason)
         return self._record_approval(contract["digest"])
 
-    async def approve_async(self) -> str:
+    async def approve_async(self, expected_digest: str | None = None) -> str:
         """approve() for an event loop: only the system prompt waits in a thread; the database stays on this one."""
         from . import presence
-        contract, reason = self._approval_target()
+        contract, reason = self._approval_target(expected_digest)
         await asyncio.to_thread(presence.require, reason)
         return self._record_approval(contract["digest"])
 

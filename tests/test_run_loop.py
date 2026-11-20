@@ -40,12 +40,12 @@ class RunLoop(unittest.TestCase):
             async def execute(self, **kwargs):
                 await touch_cancel(self)
                 return Result("brahma", "ready", "done")
-            async def approve(self):
+            async def approve(self, expected_digest=None):
                 await touch_cancel(self)
                 return "d" * 64
             with patch.object(Session, "discover_model_profiles", discover), patch.object(Session, "execute", execute), \
                     patch.object(Session, "set_plan", lambda self, plan, **kw: None), patch.object(Session, "approve_async", approve), \
-                    patch("brahma.cli.confirm_in_terminal", lambda session: None):
+                    patch("brahma.cli.confirm_in_terminal", lambda session: "d" * 64):
                 code, out, err = run_cli("run", "--repo", str(root), "--approve", str(plan_file), state=Path(tmp) / "state")
             self.assertEqual(code, 0, out + err)
             self.assertEqual(json.loads(out)["status"], "ready")

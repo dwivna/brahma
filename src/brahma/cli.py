@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -216,10 +217,24 @@ def main(argv=None):
 
 
 def _interactive() -> bool:
-    return sys.stdin.isatty() and sys.stderr.isatty()
+    if not (sys.stdin.isatty() and sys.stderr.isatty()):
+        return False
+    try:
+        os.close(os.open("/dev/tty", os.O_RDWR))
+        return True
+    except OSError:
+        return False
 
 
-def confirm_in_terminal(session) -> None:
+def _read_typed(prompt: str) -> str:
+    """Read the answer from the controlling terminal itself, not from whatever was piped into the command."""
+    with open("/dev/tty", "r+") as tty:
+        tty.write(prompt)
+        tty.flush()
+        return tty.readline().strip()
+
+
+def confirm_in_terminal(session) -> str:
     """Before the system prompt: the person sees the whole contract in their own terminal and types its digest prefix.
     A caller without an interactive terminal (an agent, a script) is refused here, so it can never raise a prompt that a
     person might confirm without seeing what it approves."""
@@ -227,9 +242,10 @@ def confirm_in_terminal(session) -> None:
         raise ValueError("Approval needs your interactive terminal: run this yourself, read the contract, then confirm")
     digest, lines = session.approval_summary()
     print("\n".join(lines), file=sys.stderr)
-    typed = input(f"Type the first 8 characters of the contract digest to approve it ({digest[:4]}…): ").strip()
+    typed = _read_typed(f"Type the first 8 characters of the contract digest to approve it ({digest[:4]}…): ")
     if typed != digest[:8]:
         raise ValueError("Digest not confirmed; nothing was approved")
+    return digest                      # approval is bound to exactly this contract (approve(expected_digest=...))
 
 
 def emit(payload: dict, text, code: int, as_json: bool) -> int:
@@ -474,8 +490,7 @@ def _main(argv):
         try:
             saved = store.session(args.session)
             session = Session(store, Path(saved["repo"]), key=args.session)
-            confirm_in_terminal(session)
-            digest = session.approve()
+            digest = session.approve(confirm_in_terminal(session))
             if args.queue:
                 store.enqueue(args.session, session.generation, digest, time.time(), "Approved by the device owner")
             return report({"session": args.session, "approved": True, "contract_digest": digest, "queued": bool(args.queue)},
@@ -517,8 +532,7 @@ def _main(argv):
                 # One event loop for the whole run: the session's cancel Event binds to the loop it first awaits on.
                 selection = await session.discover_model_profiles()
                 session.set_plan(plan, model_selection=selection)
-                confirm_in_terminal(session)
-                await session.approve_async()          # the device owner confirms; nothing runs otherwise
+                await session.approve_async(confirm_in_terminal(session))          # the device owner confirms; nothing runs otherwise
                 return await session.execute()
             result = asyncio.run(approve_and_execute())
             code = exitcodes.for_result_status(result.status)

@@ -19,5 +19,5 @@ def approve(session) -> str:
 @contextmanager
 def at_terminal(typed: str | None):
     """A person at an interactive terminal who types `typed` when asked for the digest prefix."""
-    with patch("brahma.cli._interactive", return_value=True), patch("builtins.input", return_value=typed or "") as asked:
+    with patch("brahma.cli._interactive", return_value=True), patch("brahma.cli._read_typed", return_value=typed or "") as asked:
         yield asked
