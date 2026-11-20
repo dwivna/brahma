@@ -54,11 +54,29 @@ _CREDENTIAL_PAIRS = frozenset({("api", "key"), ("private", "key"), ("access", "k
                                ("client", "secret"), ("session", "key"), ("access", "token"), ("refresh", "token")})
 
 
+_CREDENTIAL_SUBSTRING = re.compile(r"(?i)api[_-]?key|apikey|secret|token|passw|authorization|credential|private[_-]?key|cookie")
+_FILE_NAME = re.compile(r"^[\w.-]*\.[A-Za-z0-9]{1,5}$")
+
+
+def _words(name: str) -> list[str]:
+    return [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)]
+
+
 def credential_field(name: str) -> bool:
-    if "/" in name or "." in name:                    # a path or file name used as a key: never a field name
+    """A field name that marks its value as a credential. Broad on purpose (substring or whole-word match); only keys
+    that are file paths or file names (`src/tokenizer.py`, `passwords.py` -> fingerprint) are exempt."""
+    words = _words(name)
+    if "/" in name or (_FILE_NAME.match(name) and words and words[-1] not in _CREDENTIAL_WORDS):
         return False
-    words = [w.lower() for w in re.findall(r"[A-Z]?[a-z]+|[A-Z]+(?![a-z])|\d+", name)]
-    return any(w in _CREDENTIAL_WORDS for w in words) or any(pair in _CREDENTIAL_PAIRS for pair in zip(words, words[1:]))
+    return (bool(_CREDENTIAL_SUBSTRING.search(name)) or any(w in _CREDENTIAL_WORDS for w in words)
+            or any(pair in _CREDENTIAL_PAIRS for pair in zip(words, words[1:])))
+
+
+def _usage_counter(name: str, value) -> bool:
+    """Provider usage counters (`input_tokens`, `cache_read_input_tokens`, ...): numbers whose name ends in "tokens"."""
+    words = _words(name)
+    return (isinstance(value, (int, float)) and not isinstance(value, bool) and bool(words) and words[-1] == "tokens"
+            and "token" not in words)
 
 
 def _hide_all(value):
@@ -77,7 +95,8 @@ def redact_deep(value):
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: _hide_all(item) if credential_field(str(key)) else redact_deep(item) for key, item in value.items()}
+        return {key: _hide_all(item) if credential_field(str(key)) and not _usage_counter(str(key), item)
+                else redact_deep(item) for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact_deep(item) for item in value]
     return value

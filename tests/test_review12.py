@@ -260,3 +260,40 @@ class Finding15SpecialFilesRollback(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AutomatedSecurityReviewOfE2d7d15(unittest.TestCase):
+    def test_dotted_credential_names_are_hidden_and_only_numeric_token_counters_kept(self):
+        value = safety.redact_deep({"db.password": "plain", "max_tokens": "zz-not-a-number", "input_tokens": 4,
+                                    "passwords.py": "100644:abc"})
+        self.assertEqual(value, {"db.password": safety.REDACTED, "max_tokens": safety.REDACTED, "input_tokens": 4,
+                                 "passwords.py": "100644:abc"})
+
+    def test_paths_that_line_based_hashing_would_misread_are_hashed_exactly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            for name in ("odd\nname.txt", '"quoted.txt', "cr\r.txt"):
+                (repo / name).write_text("one\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "odd names")
+            self.assertEqual(gittools.content_changed_tracked(repo), [])
+            (repo / "odd\nname.txt").write_text("two\n")
+            self.assertEqual(gittools.content_changed_tracked(repo), ["odd\nname.txt"])
+
+    def test_the_filter_check_reads_the_revision_being_checked_out_not_the_working_tree(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            git(repo, "config", "filter.demo.clean", "cat")
+            (repo / ".gitattributes").write_text("*.bin filter=demo\n")
+            (repo / "a.bin").write_text("data\n")
+            git(repo, "add", "-A")
+            git(repo, "commit", "-qm", "filtered")
+            revision = git(repo, "rev-parse", "HEAD")
+            (repo / ".gitattributes").unlink()                   # the working tree no longer shows the attribute
+            self.assertIn("filter driver", gitsafe.unsupported_repository(repo, revision))
+            git(repo, "rm", "-q", "--cached", ".gitattributes")
+            (repo / ".gitmodules").write_text("x")
+            git(repo, "add", ".gitmodules")
+            git(repo, "commit", "-qm", "modules")
+            (repo / ".gitmodules").unlink()                      # present in the revision only
+            self.assertIn("submodules", gitsafe.unsupported_repository(repo, git(repo, "rev-parse", "HEAD")))

@@ -52,13 +52,15 @@ def _filter_drivers(repo: Path) -> set[str]:
     return names
 
 
-def filtered_paths(repo: Path, paths: list[str]) -> list[str]:
+def filtered_paths(repo: Path, paths: list[str], revision: str | None = None) -> list[str]:
     """Paths whose `filter` attribute selects a configured driver: Git would run a helper program on them (clean on add
     or status, smudge on checkout) and their committed bytes would differ from the files that were checked."""
     drivers = _filter_drivers(repo)
     if not drivers or not paths:
         return []
-    result = subprocess.run([*_GIT, "-C", str(repo), "check-attr", "-z", "--stdin", "filter"],
+    # With `revision`, the attributes are those of that revision (what a checkout of it would apply), not the working tree.
+    source = [f"--source={revision}"] if revision else []
+    result = subprocess.run([*_GIT, "-C", str(repo), "check-attr", *source, "-z", "--stdin", "filter"],
                             input="\0".join(paths).encode("utf-8", "surrogateescape"), capture_output=True,
                             timeout=60, env=git_env())
     if result.returncode:
@@ -76,9 +78,10 @@ def unsupported_repository(repo: Path, revision: str = "HEAD") -> str | None:
     if listing.returncode:
         raise ValueError("The repository revision could not be listed: " + listing.stderr.decode(errors="replace")[:300])
     entries = [row for row in listing.stdout.decode("utf-8", "surrogateescape").split("\0") if row]
-    if any(row.startswith("160000 ") for row in entries) or (repo / ".gitmodules").exists():
+    gitmodules = run_git(repo, "cat-file", "-e", f"{revision}:.gitmodules").returncode == 0
+    if any(row.startswith("160000 ") for row in entries) or gitmodules or (repo / ".gitmodules").exists():
         return "This repository uses Git submodules, which Brahma 1.0 does not support (their contents cannot be verified)"
-    filtered = filtered_paths(repo, [row.split("\t", 1)[1] for row in entries if "\t" in row])
+    filtered = filtered_paths(repo, [row.split("\t", 1)[1] for row in entries if "\t" in row], revision)
     if filtered:
         return ("This repository uses a Git filter driver (for example Git LFS) on " + ", ".join(filtered[:5])
                 + ("…" if len(filtered) > 5 else "") + "; Brahma 1.0 does not support filter drivers")

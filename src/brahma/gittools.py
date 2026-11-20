@@ -183,6 +183,27 @@ def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
 _BLOB_CACHE: dict[tuple, str] = {}
 
 
+def _hash_paths(repo: Path, names: list[str], *options: str) -> dict[str, str]:
+    """`git hash-object` for each path. `--stdin-paths` is line-based and unquotes a leading `"`, so a name containing a
+    line break or starting with a quote is hashed on its own as an argument instead; every name must get exactly one
+    hash, or nothing is trusted."""
+    plain = [n for n in names if "\n" not in n and "\r" not in n and not n.startswith('"')]
+    odd = [n for n in names if n not in set(plain)]
+    out: dict[str, str] = {}
+    for start in range(0, len(plain), 2000):
+        chunk = plain[start:start + 2000]
+        hashed = subprocess.run([*_GIT, "-C", str(repo), "hash-object", *options, "--stdin-paths"],
+                                input="\n".join(chunk).encode("utf-8", "surrogateescape"), capture_output=True,
+                                check=True, timeout=300, env=git_env()).stdout.decode().split()
+        if len(hashed) != len(chunk):
+            raise ValueError("File contents could not be hashed one-to-one; nothing is accepted")
+        out.update(zip(chunk, hashed))
+    for name in odd:
+        out[name] = subprocess.run([*_GIT, "-C", str(repo), "hash-object", *options, "--", name], capture_output=True,
+                                   check=True, timeout=300, env=git_env()).stdout.decode().strip()
+    return out
+
+
 def content_changed_tracked(repo: Path) -> list[str]:
     """Tracked regular files whose current content is not their index blob, found without Git's stat cache.
 
@@ -211,15 +232,10 @@ def content_changed_tracked(repo: Path) -> list[str]:
         expected[name], keys[name] = blob, key
         if key not in _BLOB_CACHE:
             missing.append(name)
-    for start in range(0, len(missing), 2000):
-        chunk = missing[start:start + 2000]
-        hashed = subprocess.run([*_GIT, "-C", str(repo), "hash-object", "--stdin-paths"],
-                                input="\n".join(chunk).encode("utf-8", "surrogateescape"), capture_output=True,
-                                check=True, timeout=300, env=git_env()).stdout.decode().split()
-        if len(_BLOB_CACHE) > 200000:
-            _BLOB_CACHE.clear()
-        for name, blob in zip(chunk, hashed):
-            _BLOB_CACHE[keys[name]] = blob
+    if len(_BLOB_CACHE) > 200000:
+        _BLOB_CACHE.clear()
+    for name, blob in _hash_paths(repo, missing).items():
+        _BLOB_CACHE[keys[name]] = blob
     return sorted(name for name in expected if _BLOB_CACHE.get(keys[name]) != expected[name])
 
 
@@ -602,10 +618,8 @@ def _staged_differs(worktree: Path, paths: list[str]) -> list[str]:
     regular = [name for name in index if (worktree / name).is_file() and not (worktree / name).is_symlink()]
     if not regular:
         return []
-    raw = subprocess.run([*_GIT, "-C", str(worktree), "hash-object", "--no-filters", "--stdin-paths"],
-                         input="\n".join(regular).encode("utf-8", "surrogateescape"), capture_output=True, check=True,
-                         timeout=120, env=git_env()).stdout.decode().split()
-    return [name for name, blob in zip(regular, raw) if index[name] != blob]
+    raw = _hash_paths(worktree, regular, "--no-filters")
+    return [name for name in regular if index[name] != raw[name]]
 
 
 def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -> str:
