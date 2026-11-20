@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock, patch
 from brahma import dispute, engine, gittools
 from brahma.config import Settings
 from brahma.models import Plan, Result, Task
+from tests.approval import owner_confirms
 
 HIGH = {"id": "F1", "severity": "high", "text": "Header row missing", "path": "src/t.py"}
 LOW = {"id": "F2", "severity": "low", "text": "Naming nit"}
@@ -242,7 +243,9 @@ class SessionAndCli(unittest.TestCase):
         store.attention(session.key, "decision", "disputed")
         store.close()
         state = Path(self.tmp.name) / "state"
-        code, out, _ = run_cli("--json", "decide", session.key, "--for", "author", state=state)
+        with owner_confirms() as prompt:
+            code, out, _ = run_cli("--json", "decide", session.key, "--for", "author", state=state)
+        prompt.assert_called_once()                       # deciding a dispute is a human-only action
         data = json.loads(out)
         self.assertEqual((code, data["decided_for"], data["task"], data["queued"]), (0, "author", 1, True))
         check = Store(state)

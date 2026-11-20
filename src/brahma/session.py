@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import fcntl
+import os
 import json
 import sqlite3
 import subprocess
@@ -110,15 +111,27 @@ class Session:
 
     @contextlib.contextmanager
     def lock(self):
-        with (self.store.home / "worker.lock").open("a") as stream:
-            try:
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            except BlockingIOError as error:
-                raise ValueError("Another Brahma worker is active; wait or stop it first") from error
+        """The one-worker lock. A coordinator that died leaves its lock free but its worker groups may survive it: those are
+        stopped (procs.reap) before anything new starts, and if one cannot be stopped nothing starts."""
+        from . import procs
+        descriptor = os.open(self.store.home / "worker.lock", os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as error:
+            os.close(descriptor)
+            raise ValueError("Another Brahma worker is active; wait or stop it first") from error
+        try:
+            _, survivors = procs.reap(self.store.home)
+            if survivors:
+                raise ValueError("A worker left by a coordinator that stopped is still running (process groups "
+                                 + ", ".join(map(str, survivors)) + ") and could not be stopped; nothing was started")
+            procs.holding(self.store.home)
             try:
                 yield
             finally:
-                fcntl.flock(stream, fcntl.LOCK_UN)
+                procs.holding(None)
+        finally:
+            os.close(descriptor)
 
     async def discover_model_profiles(self) -> dict:
         from .model_catalog import discover_models, select_profiles
@@ -261,6 +274,59 @@ class Session:
         selected.bound_toolchain = contract["payload"].get("toolchain")    # re-verified before every check
         return contract, selected, catalog
 
+    def _approval_target(self) -> tuple[dict, str]:
+        if self.store.killed:
+            raise ValueError("Kill switch engaged: nothing can be approved until it is lifted")
+        if self.plan is None or self.plan.questions:
+            raise ValueError("Resolve plan questions before approval")
+        if self.store.session(self.key)["status"] == "ready":
+            raise ValueError("This plan is already complete; use /new for another goal")
+        contract, _, _ = self.approved_contract()
+        return contract, f"approve contract {contract['digest'][:12]} ({len(self.plan.tasks)} task(s)) in {self.repo.name}"
+
+    def _record_approval(self, digest: str) -> str:
+        again, _, _ = self.approved_contract()           # nothing may change while the prompt was open
+        if again["digest"] != digest or self.store.killed:
+            raise ValueError("The contract or the kill switch changed while approval was being confirmed; nothing was approved")
+        self.store.set(self.key, stopped=0, paused=0, approved_digest=digest)
+        self.emit(Event(role="user", kind="approval", text="Approved by the device owner: contract " + digest))
+        return digest
+
+    def approve(self) -> str:
+        """Human-only: approve the current locked contract. The device owner confirms with Touch ID or the login password
+        (presence.require); there is no other way to create an approval. Returns the approved digest."""
+        from . import presence
+        contract, reason = self._approval_target()
+        presence.require(reason)
+        return self._record_approval(contract["digest"])
+
+    async def approve_async(self) -> str:
+        """approve() for an event loop: only the system prompt waits in a thread; the database stays on this one."""
+        from . import presence
+        contract, reason = self._approval_target()
+        await asyncio.to_thread(presence.require, reason)
+        return self._record_approval(contract["digest"])
+
+    def ready_receipt(self) -> dict:
+        """The verified-ready result of the current approval, or ValueError. Publication is bound to it."""
+        saved = self.store.session(self.key)
+        if saved["status"] != "ready" or not saved["approved_digest"]:
+            raise ValueError("Only a ready, verified plan can be published")
+        if self.store.killed or saved["stopped"] or saved["paused"]:
+            raise ValueError("Not published: the kill switch is engaged or the session is stopped or paused")
+        receipts = []
+        for event in self.store.events(self.key):
+            if event["kind"] == "ready_receipt":
+                try:
+                    receipts.append(json.loads(event["text"]))
+                except (ValueError, TypeError):
+                    continue
+        if not receipts or receipts[-1].get("digest") != saved["approved_digest"] or not isinstance(receipts[-1].get("head"), str):
+            raise ValueError("No readiness receipt for the current approval; run and verify it again")
+        if not receipts[-1].get("committed"):
+            raise ValueError("The ready result was not committed (auto_commit is off); commit it yourself or enable auto_commit")
+        return receipts[-1]
+
     def stop(self):
         self.store.stop(self.key)
         self.cancel.set()
@@ -350,12 +416,15 @@ class Session:
         except (ValueError, sqlite3.Error):
             settings._routing_history = {}
         self.settings = settings
-        if scheduled:
-            saved = self.store.session(self.key)
-            if saved["stopped"] or saved["paused"] or saved["approved_digest"] != contract["digest"]:
-                raise ValueError("Scheduled approval is no longer valid")
-        else:
-            self.store.set(self.key, stopped=0, paused=0, approved_digest=contract["digest"])
+        # Running never approves: only Session.approve() (a person, confirmed by the OS) records an approval.
+        saved = self.store.session(self.key)
+        if saved["approved_digest"] != contract["digest"]:
+            raise ValueError("Scheduled approval is no longer valid" if scheduled else
+                             "This contract has not been approved by a person; approve it first (`brahma approve "
+                             + self.key + "` or /approve)")
+        if saved["stopped"] or saved["paused"]:
+            raise ValueError("Scheduled approval is no longer valid" if scheduled else
+                             "This session is stopped or paused; `brahma resume " + self.key + "`, or approve a new plan")
         self.cancel.clear()
         with self.lock():
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
@@ -447,9 +516,15 @@ class Session:
                     elif self.settings.auto_commit:
                         commit = gittools.commit_changes(worktree, self.plan.summary, identity)
                         result.text += "\nLocal commit: " + commit
+                    if result.status == "ready":
+                        # What was verified, bound to the exact commit: publication may push this and nothing else.
+                        self.emit(Event(kind="ready_receipt", text=json.dumps({
+                            "digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
+                            "committed": not gittools.status_paths(worktree)})))
                     if result.status == "ready" and self.settings.publish and not self.halted():
                         try:
-                            result.text += "\nDraft PR: " + gittools.publish(worktree, self.plan.summary, result.text)
+                            result.text += "\nDraft PR: " + gittools.publish(worktree, self.plan.summary, result.text,
+                                                                              self.ready_receipt()["head"])
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                 # A durable stop takes precedence over an automatic restart.
@@ -457,7 +532,10 @@ class Session:
                 if reason:
                     result = Result("brahma", "cancelled", reason + "; checkpoint retained", result.usage)
                 self.store.set(self.key, status=result.status)
-                if result.status == "waiting":
+                if reason and not self.store.session(self.key)["stopped"]:
+                    # A pause or the kill switch keeps the approved continuation; only `resume` queues it again.
+                    self.store.hold(self.key, self.generation, contract["digest"], reason + "; resume to continue")
+                elif result.status == "waiting":
                     waits = [json.loads(e["text"]) for e in self.store.events(self.key) if e["kind"] == "wait"]
                     latest = waits[-1] if waits else {}
                     next_at = latest.get("next_at")

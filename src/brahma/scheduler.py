@@ -124,8 +124,8 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
     if error is None and result is not None:
         held = store.killed or store.session(key)["paused"]
         if result.status == "cancelled" and held and not store.session(key)["stopped"]:
-            # A pause or the kill switch holds the work; it is not a stop, so the approved job stays queued.
-            _requeue_interrupted(store, session, job)
+            # A pause or the kill switch holds the work; it is not a stop, so the approved job is kept, held until `resume`.
+            store.hold(key, session.generation, job["digest"], "Held by a pause or the kill switch; resume to continue")
             return True
         if result.status != "waiting":
             store.finish_job(key, "cancelled" if store.session(key)["stopped"] else "done")
@@ -173,6 +173,8 @@ async def serve(home: Path, *, once: bool = False) -> int:
             except BlockingIOError:
                 print("brahma: another scheduler already owns this state directory", file=sys.stderr)
                 return 0
+            from . import procs
+            procs.reap(home)                 # stop worker groups whose coordinator died, before their jobs are requeued
             store.recover_jobs()
             while not stop.is_set():
                 try:

@@ -438,20 +438,24 @@ class BrahmaApp(App):
             elif value == "/publish":
                 if self.demo:
                     raise ValueError("Demo mode cannot publish a branch or create a PR")
+                from . import presence
                 from .gittools import publish
-                if not self.session or self.store.session(self.session.key)["status"] != "ready":
+                if not self.session:
                     raise ValueError("Only a ready, verified plan can be published")
-                if self.store.killed or self.store.session(self.session.key)["stopped"] or self.store.session(self.session.key)["paused"]:
-                    raise ValueError("Not published: the kill switch is engaged or the session is stopped or paused")
+                receipt = self.session.ready_receipt()
+                await asyncio.to_thread(presence.require, f"publish branch brahma/{self.session.key} as a draft PR")
+                receipt = self.session.ready_receipt()          # re-checked after the prompt
                 saved = self.store.session(self.session.key)
                 self.write(Event(kind="publication", text=await asyncio.to_thread(
-                    publish, Path(saved["worktree"]), self.session.plan.summary, "Brahma's approved plan passed configured checks and independent review.")))
+                    publish, Path(saved["worktree"]), self.session.plan.summary,
+                    "Brahma's approved plan passed configured checks and independent review.", receipt["head"])))
             elif value == "/approve":
                 if self.demo:
                     self.write(Event(text="DEMO complete: execution is simulated, no changes were made."))
                 elif not self.session:
                     raise ValueError("Select a repository first")
                 else:
+                    await self.session.approve_async()        # Touch ID or the login password; refused otherwise
                     await self.session.execute()
             elif value.startswith("/"):
                 raise ValueError("Unknown command. Use /help")

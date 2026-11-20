@@ -229,7 +229,7 @@ class ModelsCommand(unittest.TestCase):
                 self.assertEqual((code, error), (0, ""))
                 self.assertEqual(read.await_args.args[1], names)
                 if "--json" in argv:
-                    self.assertEqual(json.loads(text), report)
+                    self.assertEqual(json.loads(text), {"models": report, "ok": True, "exit_code": 0})
                 else:
                     self.assertIn("Task model profiles", text)
                     self.assertIn("gpt-6.2-sol", text)

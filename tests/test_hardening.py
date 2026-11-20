@@ -324,6 +324,23 @@ class GitMetadataCannotHideChanges(Fixture):
         self.assertFalse(ok)
         self.assertIn("Git directory", reason)
 
+    def test_publication_pushes_only_the_verified_commit_from_a_clean_tree(self):
+        # Review round 8, finding 9: /publish pushed whatever the branch held, even commits added after readiness.
+        self.write("src/keep.py", "x = 3\n")
+        verified = gittools.commit_changes(self.repo, "ready", gittools.git_identity(self.repo))
+        pushed = []
+        with patch("shutil.which", return_value="/usr/bin/gh"), \
+                patch.object(gittools, "git", side_effect=lambda repo, *args: pushed.append(args) if args[0] == "push"
+                             else subprocess.run(["git", "-C", str(repo), *args], capture_output=True, text=True, check=True).stdout.strip()):
+            self.write("src/keep.py", "x = 'after readiness'\n")
+            with self.assertRaisesRegex(ValueError, "not part of the verified"):
+                gittools.publish(self.repo, "s", "b", verified)
+            self.git("add", "-A")
+            self.git("commit", "-q", "-m", "added after readiness")
+            with self.assertRaisesRegex(ValueError, "moved since it was verified"):
+                gittools.publish(self.repo, "s", "b", verified)
+        self.assertEqual(pushed, [])
+
     def test_repository_fsmonitor_config_is_never_run(self):
         marker = Path(self.tmp.name) / "ran"
         hook = Path(self.tmp.name) / "fsmonitor.sh"

@@ -11,6 +11,7 @@ from brahma import exitcodes
 from brahma.models import Event
 
 from tests.test_cli import repo_session, run_cli
+from tests.approval import owner_confirms
 
 
 def stored(tmp, **fields):
@@ -134,7 +135,7 @@ class JsonOnEveryCommand(unittest.TestCase):
             state = Path(tmp) / "state"
             for argv in (("pause", session.key), ("resume", session.key), ("stop", session.key), ("kill",),
                          ("kill", "--release"), ("sessions",)):
-                with self.subTest(argv=argv):
+                with self.subTest(argv=argv), owner_confirms():
                     code, out, err = run_cli("--json", *argv, state=state)
                     data = json.loads(out)
                     self.assertEqual((code, data["ok"], data["exit_code"], err), (0, True, 0, ""))
@@ -200,11 +201,64 @@ class MemoryCommand(unittest.TestCase):
             check.close()
 
 
-class ApprovalIsNotExposed(unittest.TestCase):
-    def test_there_is_no_command_for_an_ai_caller_to_approve_with(self):
-        from brahma import cli
-        names = set(cli.parser()._subparsers._group_actions[0].choices)
-        self.assertNotIn("approve", names)  # Round 9 item 3 / Round 11 item 2: only a human-signed policy may approve
+class OnlyAPersonApproves(unittest.TestCase):
+    """Review round 8, finding 1: `run --approve` let any caller create an approval. Approval now needs the device owner."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        from tests.test_cli import repo_session
+        from brahma.models import Plan, Task
+        self.store, self.session = repo_session(self.tmp.name)
+        self.session.set_plan(Plan("Goal", [Task("T", "do", ["a.txt"], ["ok"])], checks=[["true"]]))
+        self.store.close()
+        self.state = Path(self.tmp.name) / "state"
+
+    def approved(self):
+        from brahma.store import Store
+        store = Store(self.state)
+        try:
+            return store.session(self.session.key)["approved_digest"]
+        finally:
+            store.close()
+
+    def test_approve_without_the_device_owner_records_nothing(self):
+        with owner_confirms(False) as prompt:
+            code, out, _ = run_cli("--json", "approve", self.session.key, state=self.state)
+        prompt.assert_called_once()
+        self.assertEqual((code, json.loads(out)["ok"]), (20, False))
+        self.assertIn("Not confirmed by the device owner", json.loads(out)["error"])
+        self.assertIsNone(self.approved())
+
+    def test_approve_with_the_device_owner_records_the_digest(self):
+        with owner_confirms():
+            code, out, _ = run_cli("--json", "approve", self.session.key, state=self.state)
+        data = json.loads(out)
+        self.assertEqual((code, data["approved"]), (0, True))
+        self.assertEqual(self.approved(), data["contract_digest"])
+
+    def test_running_never_approves(self):
+        from unittest.mock import AsyncMock, patch
+        with patch("brahma.engine.execute", AsyncMock(side_effect=AssertionError("ran without approval"))):
+            code, out, _ = run_cli("--json", "run", "--session", self.session.key, state=self.state)
+        self.assertEqual(code, 20)
+        self.assertIn("has not been approved by a person", json.loads(out)["error"])
+        self.assertIsNone(self.approved())
+
+    def test_there_is_no_way_around_the_prompt(self):
+        from brahma import presence
+        import inspect
+        source = inspect.getsource(presence)
+        for bypass in ("os.environ", "getenv", "sys.argv", "Settings"):      # no variable, flag or setting skips the check
+            self.assertNotIn(bypass, source.split('"""', 2)[2])
+
+    def test_kill_release_and_decide_need_the_device_owner(self):
+        from brahma import halt
+        halt.engage(self.state)
+        with owner_confirms(False):
+            code, out, _ = run_cli("--json", "kill", "--release", state=self.state)
+        self.assertEqual(code, 20)
+        self.assertTrue(halt.engaged(self.state))
 
 
 if __name__ == "__main__":

@@ -36,10 +36,15 @@ def parser():
     p.add_argument("request")
     p.add_argument("--repo", type=Path, dest="target")
     p.add_argument("--output", type=Path, help="Save the plan JSON locally")
-    p = sub.add_parser("run", help="Execute an explicitly approved plan in an isolated branch")
-    p.add_argument("plan_file", type=Path)
+    p = sub.add_parser("run", help="Execute an approved contract in an isolated branch (a plan file with --approve, or --session)")
+    p.add_argument("plan_file", type=Path, nargs="?")
     p.add_argument("--repo", type=Path, dest="target")
-    p.add_argument("--approve", action="store_true", help="Approve this plan and the selected repository's configured checks")
+    p.add_argument("--approve", action="store_true",
+                   help="Approve this plan file first: you confirm with Touch ID or your login password")
+    p.add_argument("--session", help="Run a session whose contract a person has already approved (no approval happens)")
+    p = sub.add_parser("approve", help="Approve a session's locked contract: you confirm with Touch ID or your login password")
+    p.add_argument("session")
+    p.add_argument("--queue", action="store_true", help="Also queue it for the background service")
     p = sub.add_parser("worker", help="Run approved queued work (foreground scheduler)")
     p.add_argument("--home", type=Path, required=True, help="Brahma state directory")
     p.add_argument("--once", action="store_true", help="Run at most one due job, then exit")
@@ -309,12 +314,25 @@ def _main(argv):
     if args.command == "kill":
         from . import halt
         if args.release:
+            from . import presence
+            if not halt.engaged(home):
+                return report({"kill": False, "changed": False, "held_jobs": 0}, "Kill switch was not engaged.")
+            presence.require("lift the Brahma kill switch")
+            held = 0
+            if (home / "state.sqlite3").exists():
+                store = Store(home)            # hold first: if this fails the switch stays engaged
+                try:
+                    held = store.hold_all("Held when the kill switch was lifted; `brahma resume SESSION` to continue")
+                finally:
+                    store.close()
             changed = halt.release(home)
-            return report({"kill": False, "changed": changed},
-                          "Kill switch released. Nothing restarts by itself: use `brahma resume`/`run` as before."
-                          if changed else "Kill switch was not engaged.")
+            return report({"kill": False, "changed": changed, "held_jobs": held},
+                          f"Kill switch released. Nothing restarts by itself: {held} approved job(s) are held; "
+                          "`brahma resume SESSION` continues one.")
         halt.engage(home)
-        return report({"kill": True, "changed": True},
+        from . import procs
+        stopped, _ = procs.reap(home, everything=True)        # including workers whose coordinator already died
+        return report({"kill": True, "changed": True, "stopped_worker_groups": len(stopped)},
                       "Kill switch engaged: running workers stop at their next check (within seconds), "
                       "no new work starts, and Git writes are refused. Approvals are kept.")
     if args.command in ("pause", "resume", "stop"):
@@ -322,11 +340,13 @@ def _main(argv):
         try:
             action = {"pause": store.pause, "resume": store.resume, "stop": store.stop}[args.command]
             store.session(args.session)
-            action(args.session)
-            return report({"session": args.session, "action": args.command},
+            queued = action(args.session)
+            return report({"session": args.session, "action": args.command, **({"queued": bool(queued)} if args.command == "resume" else {})},
                           {"pause": f"Paused {args.session}: its approval and queue are kept, nothing runs until `brahma resume`. "
                                     "A running worker stops at its checkpoint.",
-                           "resume": f"Resumed {args.session}: it runs again only under its existing approval.",
+                           "resume": f"Resumed {args.session}: it runs again only under its existing approval"
+                                     + ("; its held work is queued for the service (`brahma service install`, or `brahma worker --once`)."
+                                        if queued else "."),
                            "stop": f"Stopped {args.session}: its queue is cancelled and running it again needs a new approval."}[args.command])
         finally:
             store.close()
@@ -382,6 +402,8 @@ def _main(argv):
             latest = json.loads(disputes[-1]["text"])
             index = latest["index"]
             digest = hashlib.sha256(latest["text"].encode()).hexdigest()[:32]   # binds the decision to these exact positions
+            from . import presence
+            presence.require(f"side with the {args.side} on a disputed high-severity review finding (task {index})")
             store.event(args.session, Event("brahma", "user", "dispute_decision",
                                             json.dumps({"index": index, "for": args.side, "digest": digest})))
             for item in waiting:
@@ -427,12 +449,38 @@ def _main(argv):
         finally:
             store.close()
         return emit({"sessions": sessions}, json.dumps(sessions, indent=2), exitcodes.READY, as_json)
+    if args.command == "approve":
+        import time
+        if not (home / "state.sqlite3").exists():
+            raise ValueError("Unknown session")
+        store = Store(home)
+        try:
+            saved = store.session(args.session)
+            session = Session(store, Path(saved["repo"]), key=args.session)
+            digest = session.approve()
+            if args.queue:
+                store.enqueue(args.session, session.generation, digest, time.time(), "Approved by the device owner")
+            return report({"session": args.session, "approved": True, "contract_digest": digest, "queued": bool(args.queue)},
+                          f"Approved contract {digest} for {args.session}. "
+                          + ("Queued for the service." if args.queue else f"Run it with `brahma run --session {args.session}`."))
+        finally:
+            store.close()
     if args.command in ("plan", "run"):
         store = Store(home)
         try:
-            root = repository(args.target or args.repo or Path.cwd())
             def log(event):
                 print(f"[{event.provider}/{event.role}] {event.text}", file=sys.stderr, flush=True)
+            if args.command == "run" and args.session:
+                if args.plan_file or args.approve:
+                    raise ValueError("Use either a plan file with --approve, or --session for an already approved session")
+                saved = store.session(args.session)
+                session = Session(store, Path(saved["repo"]), log, key=args.session)
+                result = asyncio.run(session.execute())
+                code = exitcodes.for_result_status(result.status)
+                return emit({"session": session.key, "status": result.status, "summary": result.text},
+                            json.dumps({"ok": code == 0, "session": session.key, "status": result.status, "summary": result.text,
+                                        "exit_code": code}, indent=2), code, as_json)
+            root = repository(args.target or args.repo or Path.cwd())
             session = Session(store, root, log)
             if args.command == "plan":
                 plan = asyncio.run(session.ask(args.request))
@@ -443,19 +491,21 @@ def _main(argv):
                 return emit({"session": session.key, "status": saved["status"], "plan": plan.to_dict(),
                              "needs": "answers to the plan's questions" if plan.questions else "a human approval: brahma approve " + session.key},
                             text, exitcodes.READY, as_json)
-            if not args.approve:
-                raise ValueError("Execution requires --approve; inspect the plan and configured checks first")
+            if not args.plan_file or not args.approve:
+                raise ValueError("Running a plan file requires --approve (you confirm with Touch ID or your password); "
+                                 "an already approved session runs with --session")
             plan = Plan.parse(args.plan_file.read_text(encoding="utf-8"))
             async def approve_and_execute():
                 # One event loop for the whole run: the session's cancel Event binds to the loop it first awaits on.
                 selection = await session.discover_model_profiles()
                 session.set_plan(plan, model_selection=selection)
+                await session.approve_async()          # the device owner confirms; nothing runs otherwise
                 return await session.execute()
             result = asyncio.run(approve_and_execute())
             code = exitcodes.for_result_status(result.status)
-            print(json.dumps({"ok": result.status == "ready", "session": session.key, "status": result.status,
-                              "summary": result.text, "exit_code": code}, indent=2))
-            return code
+            return emit({"session": session.key, "status": result.status, "summary": result.text},
+                        json.dumps({"ok": code == 0, "session": session.key, "status": result.status, "summary": result.text,
+                                    "exit_code": code}, indent=2), code, as_json)
         except (ValueError, OSError) as error:
             return fail(str(error), exitcodes.USAGE, as_json)
         finally:

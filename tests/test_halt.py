@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import subprocess
 import tempfile
 import time
@@ -27,15 +28,67 @@ class KillFlag(unittest.TestCase):
             self.assertTrue(halt.release(home))
             self.assertFalse(halt.release(home))
 
-    def test_kill_blocks_claims_without_touching_approvals_and_release_restores(self):
+    def test_kill_blocks_claims_and_lifting_it_restarts_nothing_until_resume(self):
+        # Review round 8, finding 8: releasing the kill switch used to make queued work claimable by itself.
+        from tests.approval import owner_confirms
+        from tests.test_cli import run_cli
         with tempfile.TemporaryDirectory() as tmp:
             store, session, digest = approved_job(tmp)
             halt.engage(store.home)
             self.assertIsNone(store.claim(time.time()))
             self.assertEqual(job(store, session.key)["state"], "queued")
             self.assertEqual(store.session(session.key)["approved_digest"], digest)
-            halt.release(store.home)
-            self.assertIsNotNone(store.claim(time.time()))
+            with self.assertRaisesRegex(ValueError, "Kill switch engaged"):
+                store.resume(session.key)                      # resume waits for the switch to be lifted
+            home = store.home
+            store.close()
+            with owner_confirms():
+                code, out, _ = run_cli("--json", "kill", "--release", state=home)
+            self.assertEqual((code, json.loads(out)["held_jobs"]), (0, 1))
+            store = Store(home)
+            self.assertEqual(job(store, session.key)["state"], "held")
+            self.assertIsNone(store.claim(time.time() + 10))   # nothing restarts by itself
+            self.assertTrue(store.resume(session.key))           # an explicit resume queues it again
+            self.assertIsNotNone(store.claim(time.time() + 10))
+            store.close()
+
+    def test_publication_needs_a_committed_receipt_for_the_current_approval(self):
+        from brahma.models import Event
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, digest = approved_job(tmp)
+            store.set(session.key, status="ready")
+            with self.assertRaisesRegex(ValueError, "No readiness receipt"):
+                session.ready_receipt()
+            session.emit(Event(kind="ready_receipt", text=json.dumps({"digest": "other", "head": "h", "committed": True})))
+            with self.assertRaisesRegex(ValueError, "No readiness receipt"):
+                session.ready_receipt()                           # a receipt for another approval does not count
+            session.emit(Event(kind="ready_receipt", text=json.dumps({"digest": digest, "head": "h", "committed": False})))
+            with self.assertRaisesRegex(ValueError, "not committed"):
+                session.ready_receipt()
+            session.emit(Event(kind="ready_receipt", text=json.dumps({"digest": digest, "head": "h", "committed": True})))
+            self.assertEqual(session.ready_receipt()["head"], "h")
+            store.pause(session.key)
+            with self.assertRaisesRegex(ValueError, "paused"):
+                session.ready_receipt()
+            store.close()
+
+    def test_a_paused_foreground_run_keeps_a_continuation_that_resume_queues(self):
+        # Review round 8, finding 16: pausing a foreground run finished its job, so resume had nothing to continue.
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, digest = approved_job(tmp)
+            store.finish_job(session.key)                       # a foreground run has no queued job
+
+            async def engine_run(*args, **kwargs):
+                store.pause(session.key)
+                return Result("brahma", "cancelled", "paused")
+            with patch("brahma.engine.execute", engine_run):
+                result = asyncio.run(session.execute())
+            self.assertEqual(result.status, "cancelled")
+            self.assertEqual(job(store, session.key)["state"], "held")
+            self.assertIsNone(store.claim(time.time() + 10))
+            self.assertTrue(store.resume(session.key))
+            claimed = store.claim(time.time() + 10)
+            self.assertEqual((claimed["session"], claimed["digest"]), (session.key, digest))
             store.close()
 
     def test_kill_works_even_if_the_database_is_unusable(self):
@@ -77,8 +130,35 @@ class Execution(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Kill switch engaged", result.text)
             store.close()
 
+    async def test_an_external_kill_or_stop_cancels_an_active_planner(self):
+        # Review round 8, finding 7: planning only checked the kill switch before it started.
+        for action in ("kill", "stop"):
+            with self.subTest(action=action), tempfile.TemporaryDirectory() as tmp:
+                store, session, _ = approved_job(tmp)
+                before = store.session(session.key)["plan"]
+                seen = {}
+
+                async def planner(request, repo, settings, emit, cancel, provider_gate=None):
+                    other = Store(store.home)          # another process acting on the same state
+                    halt.engage(other.home) if action == "kill" else other.stop(session.key)
+                    other.close()
+                    for _ in range(100):
+                        if cancel.is_set():
+                            seen["cancelled"] = True
+                            raise RuntimeError("Planner cancelled")
+                        await asyncio.sleep(.05)
+                    return Plan("x", [Task("t", "do", ["a.py"], ["ok"])])
+                with patch.object(Session, "discover_model_profiles", return_value=None), \
+                        patch("brahma.engine.plan", planner):
+                    with self.assertRaises((RuntimeError, ValueError)):
+                        await session.ask("new goal")
+                self.assertTrue(seen.get("cancelled"))
+                self.assertEqual(store.session(session.key)["plan"], before)
+                store.close()
+
     async def test_pause_mid_run_keeps_the_job_queued_and_stop_does_not(self):
-        for hold, expected in (("pause", "queued"), ("stop", "cancelled")):
+        # A pause keeps the approved continuation held until `resume` (review round 8, findings 8 and 16).
+        for hold, expected in (("pause", "held"), ("stop", "cancelled")):
             with self.subTest(hold=hold), tempfile.TemporaryDirectory() as tmp:
                 store, session, _ = approved_job(tmp)
 

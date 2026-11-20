@@ -15,6 +15,7 @@ from brahma.scheduler import tick
 from brahma.session import Session
 from brahma.store import Store
 from test_core import init_repo
+from tests.approval import approve
 
 
 class ApprovedQueue(unittest.IsolatedAsyncioTestCase):
@@ -44,6 +45,7 @@ class ApprovedQueue(unittest.IsolatedAsyncioTestCase):
                 return Result(provider, 'ok', json.dumps({'verdict': 'pass', 'summary': 'Verified actual change', 'issues': []}))
             try:
                 with patch('brahma.providers.doctor', AsyncMock(return_value={'available': True})), patch('brahma.quota.probe_codex', AsyncMock(return_value=codex)), patch('brahma.providers.run', side_effect=run):
+                    approve(session)
                     result = await session.execute()
                     self.assertEqual(result.status, 'waiting')
                     self.assertEqual(calls, [('codex', 'builder')])
@@ -103,6 +105,7 @@ class ApprovedQueue(unittest.IsolatedAsyncioTestCase):
             allowed = normalize_codex({'rateLimits': {'primary': {'usedPercent': 5, 'windowDurationMins': 300, 'resetsAt': time.time()+300}}})
             try:
                 with patch('brahma.providers.doctor', AsyncMock(return_value={'available': True})), patch('brahma.quota.probe_codex', AsyncMock(return_value=allowed)), patch('brahma.providers.run', AsyncMock(return_value=Result('codex', 'limited', 'limit reached'))) as worker:
+                    approve(session)
                     result = await session.execute()
                     self.assertEqual(result.status, 'waiting')
                     self.assertTrue(store.quota('codex')['blocked'])

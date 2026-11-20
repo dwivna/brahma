@@ -427,6 +427,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
             if results is not None:
                 results.append((tuple(command), "not_run", None))
             raise toolchain.ToolchainChanged(problem)       # an environment change, not a test failure: no repair is spent
+        from . import procs
         try:
             process = await asyncio.create_subprocess_exec(*argv, cwd=worktree, env=environment,
                         stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT, start_new_session=True)
@@ -434,6 +435,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
             if results is not None:
                 results.append((tuple(command), "failed", None))
             return False, "Approved check could not start: " + command[0]
+        record = procs.register(process.pid)
         output = bytearray()
         async def drain():
             while chunk := await process.stdout.read(8192):
@@ -463,6 +465,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
             stopped.cancel()
             if process.returncode is None:
                 await _stop(process)
+            procs.unregister(record)
             if not running.done():
                 running.cancel()
     return True, "\n".join(summaries)
@@ -484,7 +487,9 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
     return git(worktree, "rev-parse", "HEAD")
 
 
-def publish(worktree: Path, summary: str, body: str) -> str:
+def publish(worktree: Path, summary: str, body: str, expected_head: str) -> str:
+    """Push exactly the commit that was verified ready, and open a draft PR. Anything added after readiness (a commit, an
+    uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed."""
     import shutil
     from . import safety
     summary, body = safety.redact(summary), safety.redact(body)     # never send a secret-shaped string to GitHub
@@ -493,6 +498,10 @@ def publish(worktree: Path, summary: str, body: str) -> str:
     branch = git(worktree, "branch", "--show-current")
     if not branch.startswith("brahma/"):
         raise ValueError("Only Brahma-owned branches may be published")
+    if not expected_head or git(worktree, "rev-parse", "HEAD") != expected_head:
+        raise ValueError("Not published: the branch has moved since it was verified ready; run and verify it again")
+    if status_paths(worktree) or hidden_index_entries(worktree):
+        raise ValueError("Not published: the worktree has changes that were not part of the verified, committed result")
     git(worktree, "push", "--set-upstream", "origin", f"{branch}:{branch}")  # explicit destination: never a default branch
     result = subprocess.run(["gh", "pr", "create", "--draft", "--head", branch,
                              "--title", summary[:120], "--body-file", "-"], cwd=worktree,

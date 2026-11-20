@@ -376,15 +376,18 @@ async def _run_once(provider: str, prompt: str, cwd: Path, role: str, settings,
     executable = shutil.which(provider)
     parser = StreamParser(provider, role, emit)
     process = None
+    record = None
     watchers: list[asyncio.Task] = []
     status = "error"
     error = ""
+    from . import procs
     try:
         process = await asyncio.create_subprocess_exec(
             *_command(provider, executable, Path(cwd), role, settings, native_session_id), cwd=cwd, env=child_env(),
             stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE, start_new_session=True, limit=MAX_LINE_BYTES,
         )
+        record = procs.register(process.pid)
         emit(Event(provider, role, "progress", "Worker started"))
 
         async def feed():
@@ -460,6 +463,7 @@ async def _run_once(provider: str, prompt: str, cwd: Path, role: str, settings,
     finally:
         if process is not None:
             await _stop(process)
+        procs.unregister(record)
         for task in watchers:
             if not task.done():
                 task.cancel()

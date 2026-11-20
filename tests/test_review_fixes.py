@@ -13,6 +13,7 @@ from brahma import board, briefs, dispute, engine, gittools, safety
 from brahma.config import Settings
 from brahma.models import Event, Plan, Result, Task
 from brahma.store import Store
+from tests.approval import owner_confirms
 
 SECRET = "sk-SYNTHETICabcdefghij123456"
 HIGH = {"id": "F1", "severity": "high", "text": "Header missing"}
@@ -47,10 +48,11 @@ class Redaction(unittest.TestCase):
                 self.assertNotIn(value, safety.redact("found " + value + " here"))
 
     def test_publish_text_is_redacted_before_it_is_sent(self):
-        with patch("shutil.which", return_value="/usr/bin/gh"), patch.object(gittools, "git", side_effect=["brahma/x", ""]), \
+        with patch("shutil.which", return_value="/usr/bin/gh"), patch.object(gittools, "git", side_effect=["brahma/x", "h1", ""]), \
+                patch.object(gittools, "status_paths", return_value=[]), patch.object(gittools, "hidden_index_entries", return_value=[]), \
                 patch("subprocess.run") as run:
             run.return_value.returncode, run.return_value.stdout = 0, "url"
-            gittools.publish(Path("/w"), "Fix " + SECRET, "body " + SECRET)
+            gittools.publish(Path("/w"), "Fix " + SECRET, "body " + SECRET, "h1")
             call = run.call_args
             self.assertNotIn("SYNTHETIC", json.dumps(call.args[0]) + call.kwargs["input"])
 
@@ -215,7 +217,8 @@ class Session(unittest.TestCase):
             store.attention(session.key, "decision", "disputed")
             store.close()
             state = Path(d) / "state"
-            self.assertEqual(run_cli("--json", "decide", session.key, "--for", "author", state=state)[0], 0)
+            with owner_confirms():
+                self.assertEqual(run_cli("--json", "decide", session.key, "--for", "author", state=state)[0], 0)
             check = Store(state)
             decided = [json.loads(e["text"]) for e in check.events_after(session.key, 0) if e["kind"] == "dispute_decision"][0]
             self.assertEqual(decided["digest"], hashlib.sha256(text.encode()).hexdigest()[:32])

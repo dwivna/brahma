@@ -14,6 +14,7 @@ from brahma.gittools import (changed_paths, create_worktree, git, ownership_chan
 from brahma.models import Event, Plan, Result, Task
 from brahma.session import Session
 from brahma.store import Store
+from tests.approval import approve
 
 
 def init_repo(root):
@@ -134,10 +135,12 @@ class AsyncCore(unittest.IsolatedAsyncioTestCase):
             async def execute(plan, wt, settings, emit, cancel, **kwargs):
                 seen.append(kwargs)
                 return Result("brahma", "incomplete", "fixture")
+            approve(session)
             with patch("brahma.engine.execute", execute):
                 await session.execute()
             self.assertEqual(seen[0]["completed_indices"], set())
             session.set_plan(Plan("new goal", [Task("task", "change", ["first.txt"], ["correct"])]))
+            approve(session)
             with patch("brahma.engine.execute", execute):
                 await session.execute()
             self.assertEqual(seen[-1]["completed_indices"], set())
@@ -168,6 +171,7 @@ class AsyncCore(unittest.IsolatedAsyncioTestCase):
             async def execute(plan, wt, settings, emit, cancel, **kwargs):
                 seen.append(kwargs["completed_indices"])
                 return Result("brahma", "incomplete", "fixture")
+            approve(session)
             with patch("brahma.engine.execute", execute):
                 await session.execute()
             self.assertEqual(seen, [set()])

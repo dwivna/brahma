@@ -104,9 +104,9 @@ uv run brahma --demo
 4. **Inspect the contract:** Gherkin, separate owned paths, actual checks, the toolchain
    they will run on (program path and SHA-256, the JDK's hash and version, `JAVA_HOME`), selected
    definitions and model/budget settings. The UI shows its hash and `.feature` path.
-5. **Use `/approve`.** Brahma works in its own `brahma/SESSION` branch/worktree,
-   runs checks and requests the other provider's review. By default, readiness
-   permits a local commit; publication is off.
+5. **Use `/approve`.** macOS asks you to confirm with Touch ID or your login password; nothing is approved
+   without that. Brahma then works in its own `brahma/SESSION` branch/worktree, runs checks and requests the other
+   provider's review. By default, readiness makes a local commit on that branch; publication is off.
 6. **Inspect the result.** `ready` requires checks and review. `needs_checks`,
    `waiting`, `blocked`, `incomplete` and `cancelled` retain unfinished work.
 
@@ -186,21 +186,22 @@ execution permission.
 | `/doctor`, `/status` | Retry sign-in checks or inspect session/checkpoint status. |
 | `/models [codex\|claude]` | Inspect advertised models and routine/critical profiles without generation. |
 | `/usage [codex\|claude]` | Inspect provider-reported quota and resets without creating a plan. |
-| `/approve` | Approve and execute the displayed contract, or explicitly continue it. |
+| `/approve` | Approve (Touch ID or your password) and execute the displayed contract. |
 | `/skills`, `/agents` | Inventory user/project definitions; discovery is not activation. |
 | `/sessions`, `/resume ID` | List sessions or open a checkpoint without executing it. |
 | `/stop`, Escape | Stop this session for good: cancels its queue; running again needs a new approval. |
-| `/pause` | Hold this session: approval and queue are kept; `brahma resume ID` releases it. |
+| `/pause` | Hold this session: its approval and an unfinished run are kept; `brahma resume ID` queues it again. |
 | `/kill` | Global kill switch: halt every worker and refuse new work until `brahma kill --release`. |
 | `/capacity codex`, `/capacity claude` | Record your capacity confirmation and queue one approved waiting continuation. |
-| `/publish` | Push a ready Brahma branch and create a draft PR using `gh`. |
+| `/publish` | After Touch ID or your password, push exactly the commit that was verified ready and open a draft PR with `gh`. A branch that moved, or a worktree with changes, is not published. |
 | `/quit`, Ctrl+Q | Close the UI; approved queued work can continue via the service. |
 
 Ctrl+N starts a fresh conversation. The same controls exist in the shell:
 `brahma pause|resume|stop SESSION` and `brahma kill [--release]`. The kill switch
 is a `KILL` file in the state directory; while it exists no worker starts, running
-workers stop within seconds, and coordinator Git writes are refused. Releasing it
-never restarts anything by itself.
+workers stop within seconds (including workers whose coordinator has died), and coordinator Git writes are refused.
+Releasing it needs Touch ID or your password and never restarts anything by itself: queued work is held until
+`brahma resume SESSION`.
 
 Brahma's Git guard blocks, in code, every merge, rebase, reset, amend, pull, tag,
 branch deletion, force or delete push, and any push that is not a `brahma/*` branch.
@@ -218,8 +219,12 @@ brahma --resume SESSION_ID
 # Proposal only; consumes provider usage.
 brahma plan "Add CSV export" --repo /path/to/repository --output /tmp/export.plan.json
 
-# Inspect and resolve the plan first; creates a new execution session.
+# Inspect and resolve the plan first; creates a new execution session. You confirm with Touch ID or your password.
 brahma run /tmp/export.plan.json --repo /path/to/repository --approve
+
+# Approve a session's displayed contract (Touch ID or password), then run it; --queue hands it to the service.
+brahma approve SESSION_ID [--queue]
+brahma run --session SESSION_ID       # runs an already approved session; never approves
 
 # Hold, release or stop a session; global kill switch.
 brahma pause SESSION_ID
@@ -227,7 +232,7 @@ brahma resume SESSION_ID
 brahma stop SESSION_ID
 brahma kill            # brahma kill --release to lift
 brahma note SESSION "text" [--task N]   # guidance applied at the next checkpoint
-brahma decide SESSION --for reviewer|author   # settle a disputed review
+brahma decide SESSION --for reviewer|author   # settle a disputed review (Touch ID or password)
 brahma proposals        # draft proposals from check failures, stale branches, feedback (starts nothing)
 brahma memory show     # what Brahma remembers about this repository
 brahma memory forget --yes   # delete its memory and routing history only
@@ -235,18 +240,22 @@ brahma memory forget --yes   # delete its memory and routing history only
 
 ### For scripts and AI callers
 
-Add `--json` before any command and every result or error is one JSON object with
-`ok` and `exit_code`; `brahma events` prints one JSON object per line.
+Add `--json` before any command (or a command's own `--json`) and every result or error is exactly one JSON object
+with `ok` and `exit_code`; `brahma events` prints one JSON object per line. `models` and `usage` put their report
+under `models` / `usage`; `plan` returns the session key and what it needs next.
 
 ```sh
 brahma --json status SESSION_ID          # where it stands; exit code is the outcome
 brahma events SESSION_ID --after 120 --follow   # stream events (JSON lines)
 ```
 
-An AI caller may plan, read status, usage and models, and run contracts a human has
-already approved. There is deliberately no `approve` command: only a human approves.
+An AI caller may plan, read status, usage and models, and run contracts a person has already approved
+(`brahma run --session`). Approving a contract, deciding a disputed review, publishing and lifting the kill switch are
+human-only: each asks the device owner for Touch ID or the login password at that moment, and refuses otherwise. A
+program started by an agent cannot pass that prompt. This does not stop a process that can rewrite Brahma's own source
+or drive the screen; on systems other than macOS, human-only actions are refused.
 
-Exit codes (a proposed table, versioned: changing one is a MINOR version bump):
+Exit codes (locked at 1.0.0; changing one is a MAJOR version bump):
 
 | Code | Meaning |
 | --- | --- |
@@ -260,7 +269,7 @@ Exit codes (a proposed table, versioned: changing one is a MINOR version bump):
 | `30` | A provider CLI is missing or not signed in (`brahma doctor`) |
 
 For an existing checkpoint, use `brahma --resume SESSION_ID`, inspect it, then
-`/approve`. `brahma run` executes a plan file; it is not existing-session resume.
+`/approve`, or `brahma approve SESSION_ID` and `brahma run --session SESSION_ID`.
 Use the terminal for multi-round questioning: a shell `plan` invocation produces
 one proposal and may still contain unresolved questions.
 
@@ -395,9 +404,12 @@ prevents overlapping Brahma workers using that directory.
 
 Brahma states what it can and cannot prevent. On every worker launch it records an `enforcement` event. Neither
 supported CLI is launched with a control that stops it **reading** secret files or paths outside the worktree, so
-protected reads are reported as *not enforced*. Writes are confined to the worktree by the provider's sandbox
-(Codex) or by having no shell (Claude), and approved ownership is verified after the run: an out-of-ownership
-change is restored on the isolated branch (never a path you had already edited) and readiness stays blocked.
+protected reads are reported as *not enforced*. Codex runs with its `workspace-write` sandbox; Claude is launched without
+a shell tool. Neither is a verified path boundary, so Brahma does not claim writes are confined to the worktree.
+What Brahma enforces is verification after every worker run, whatever its outcome: changes are measured against the
+Git identity taken when the run started (branch, HEAD, Git directory, no hidden index flags), an out-of-ownership or
+sensitive change is restored on the isolated branch (never a path you had already edited) and readiness stays blocked.
+A change outside the worktree (your home directory, another repository) is not detected.
 Set `strict_enforcement = true` to make Brahma refuse to start workers until reads can be enforced. Events and
 logs are redacted before they are stored; text a worker prints that tries to direct Brahma (read `.env`, push,
 merge) is shown to you as a redacted flag and never acted on.
@@ -443,10 +455,20 @@ they do not automatically spawn child processes.
 
 ## Release limits (1.0.0)
 
-- Check toolchains are bound by program, JDK and known startup files and variables; other build-tool environment inputs are not
-  all bound, and the last independent review still had open findings of that kind.
-- Hashing and running are two steps; fingerprints cover the launched file, not what it loads; checks are not sandboxed.
-- Not implemented: signed-policy approval, read-side secret enforcement, confinement of the provider CLIs.
+These are deliberate limits of the first release, not hidden defects:
+
+- **No sandbox.** Workers and approved checks run as you. They can read anything your user can read (secret protection
+  on reads is a prompt instruction; neither provider CLI can enforce it), and a check can change files outside the
+  worktree. Brahma verifies and restores changes *inside* the worktree only.
+- **Toolchain binding** covers each check program, the JDK it selects when that is knowable, the startup files and the
+  variables listed in the changelog. Maven rc files are disabled for checks and Gradle options that can move the JDK
+  or user home mark the JDK unbound. Fingerprints cover the launched file, not everything it loads, and hashing and
+  running are two steps.
+- **Human-only actions** (approve, decide, publish, lift the kill switch) need macOS Touch ID or the login password.
+  They are refused on other systems. The prompt stops an agent that runs commands; it does not stop a process that can
+  rewrite Brahma itself or drive the screen.
+- **Not implemented:** signed-policy approval (every 1.0.0 approval needs a person), read-side secret enforcement, and
+  confinement of the provider CLIs.
 
 ## Development status
 

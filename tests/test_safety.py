@@ -273,11 +273,15 @@ class PublishDestination(unittest.TestCase):
             calls = []
             def fake_git(worktree, *args):
                 calls.append(args)
+                if args[:2] == ("rev-parse", "HEAD"):
+                    return "h1"
                 return "brahma/abc123def456" if args[:2] == ("branch", "--show-current") else ""
             fake_run = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1"})()
             with patch("brahma.gittools.git", fake_git), patch("shutil.which", lambda name: "/usr/bin/gh"), \
+                    patch("brahma.gittools.status_paths", return_value=[]), \
+                    patch("brahma.gittools.hidden_index_entries", return_value=[]), \
                     patch("brahma.gittools.subprocess.run", lambda *a, **k: fake_run):
-                gittools.publish(repo, "summary", "body")
+                gittools.publish(repo, "summary", "body", "h1")
             push = [c for c in calls if c[0] == "push"][0]
             self.assertEqual(push, ("push", "--set-upstream", "origin", "brahma/abc123def456:brahma/abc123def456"))
             self.assertIsNone(gittools.refuse(push))

@@ -115,7 +115,8 @@ class Store:
 
     # Event kinds whose text is machine-readable JSON read back by the coordinator: not rewritten by redaction.
     STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome", "dispute_reply", "disagreement", "dispute_decision",
-                               "user_note", "context_expansion", "checks_failing", "signin_lost", "review_notes"})
+                               "user_note", "context_expansion", "checks_failing", "signin_lost", "review_notes",
+                               "ready_receipt"})
 
     def event(self, session: str, event) -> None:
         if event.kind == "task_state" and isinstance(event.text, str):
@@ -180,10 +181,34 @@ class Store:
         self.db.execute("UPDATE sessions SET paused=1 WHERE id=?", (session,))
         self.db.commit()
 
-    def resume(self, session: str) -> None:
+    def resume(self, session: str) -> bool:
+        """Release a pause and re-queue the session's held continuation, if any. Never while the kill switch is engaged.
+        Returns True when approved work was queued again."""
         self.session(session)
+        if self.killed:
+            raise ValueError("Kill switch engaged: release it with `brahma kill --release` before resuming a session")
+        import time
         self.db.execute("UPDATE sessions SET paused=0 WHERE id=?", (session,))
+        cursor = self.db.execute("UPDATE jobs SET state='queued', next_at=COALESCE(next_at, ?) WHERE session=? AND state='held' "
+                                 "AND session IN (SELECT id FROM sessions WHERE stopped=0)", (time.time(), session))
         self.db.commit()
+        return cursor.rowcount > 0
+
+    def hold(self, session: str, generation: str, digest: str, reason: str) -> None:
+        """Keep an approved continuation that only an explicit `resume` may queue again (a pause or the kill switch).
+        A stopped session keeps nothing."""
+        if self.session(session)["stopped"]:
+            return
+        self.db.execute("INSERT INTO jobs VALUES (?,?,?,?,?,?) ON CONFLICT(session) DO UPDATE SET generation=excluded.generation,"
+                        "digest=excluded.digest,next_at=excluded.next_at,state=excluded.state,reason=excluded.reason",
+                        (session, generation, digest, None, "held", reason))
+        self.db.commit()
+
+    def hold_all(self, reason: str) -> int:
+        """Lifting the kill switch restarts nothing: every queued or running job becomes held until its session is resumed."""
+        cursor = self.db.execute("UPDATE jobs SET state='held', reason=? WHERE state IN ('queued','running')", (reason,))
+        self.db.commit()
+        return cursor.rowcount
 
     @property
     def killed(self) -> bool:
