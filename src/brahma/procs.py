@@ -126,32 +126,3 @@ def reap(home: Path, *, everything: bool = False, grace: float = 2.0) -> tuple[l
         stopped.append(pid)
         unregister(record)
     return stopped, survivors
-    for record in sorted(folder.glob("*.json")):
-        try:
-            data = json.loads(record.read_text())
-            pid, coordinator = int(data["pid"]), int(data["coordinator"])
-        except (OSError, ValueError, KeyError, TypeError):
-            unregister(record)
-            continue
-        if not _alive(pid) or (data.get("started") and _started(pid) != data["started"]):
-            unregister(record)               # gone, or the PID now belongs to another process
-            continue
-        orphan = not _alive(coordinator) or (data.get("coordinator_started") and _started(coordinator) != data["coordinator_started"])
-        if not (everything or orphan):
-            continue
-        for sig in (signal.SIGTERM, signal.SIGKILL):
-            try:
-                os.killpg(pid, sig)
-            except (ProcessLookupError, PermissionError):
-                break
-            deadline = time.monotonic() + grace
-            while _alive(pid) and time.monotonic() < deadline:
-                time.sleep(.05)
-            if not _alive(pid):
-                break
-        if _alive(pid) and _started(pid) == data.get("started"):
-            survivors.append(pid)            # keep the record: it is still running
-            continue
-        stopped.append(pid)
-        unregister(record)
-    return stopped, survivors

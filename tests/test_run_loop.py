@@ -44,7 +44,8 @@ class RunLoop(unittest.TestCase):
                 await touch_cancel(self)
                 return "d" * 64
             with patch.object(Session, "discover_model_profiles", discover), patch.object(Session, "execute", execute), \
-                    patch.object(Session, "set_plan", lambda self, plan, **kw: None), patch.object(Session, "approve_async", approve):
+                    patch.object(Session, "set_plan", lambda self, plan, **kw: None), patch.object(Session, "approve_async", approve), \
+                    patch("brahma.cli.confirm_in_terminal", lambda session: None):
                 code, out, err = run_cli("run", "--repo", str(root), "--approve", str(plan_file), state=Path(tmp) / "state")
             self.assertEqual(code, 0, out + err)
             self.assertEqual(json.loads(out)["status"], "ready")

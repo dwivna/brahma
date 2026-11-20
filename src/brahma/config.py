@@ -74,3 +74,16 @@ class Settings:
 
 def state_home() -> Path:
     return Path(os.environ.get("BRAHMA_STATE_DIR", str(Path.home() / ".local/state/brahma"))).expanduser()
+
+
+def run_settings_line(models: dict) -> str:
+    """The locked run settings as they will actually apply, defaults included (auto-commit is on by default)."""
+    default = Settings()
+    value = {name: models.get(name, getattr(default, name)) for name in ("publish", "auto_commit", "strict_enforcement")}
+    parts = ["local commit on the brahma/ branch when ready" if value["auto_commit"] else "no automatic commit",
+             "draft PR publication when ready" if value["publish"] else "no publication",
+             "strict read enforcement" if value["strict_enforcement"] else "reads not enforced (see README)"]
+    allow = models.get("ignored_allowlist")
+    if allow is not None and list(allow) != list(default.ignored_allowlist):
+        parts.append("ignored build caches: " + ", ".join(map(str, allow)))
+    return "Run settings: " + "; ".join(parts)

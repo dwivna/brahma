@@ -466,7 +466,10 @@ These are deliberate limits of the first release, not hidden defects:
   running are two steps.
 - **Human-only actions** (approve, decide, publish, lift the kill switch) need macOS Touch ID or the login password.
   They are refused on other systems. The prompt stops an agent that runs commands; it does not stop a process that can
-  rewrite Brahma itself or drive the screen.
+  rewrite Brahma itself or drive the screen. Command-line approval also prints the whole contract and asks you to type
+  its digest prefix, and refuses a caller without a terminal; a program can fake a terminal, so treat that step as a
+  guard, not a barrier. **Confirm Touch ID only when you started the approval yourself**, and check that the digest in
+  the system dialog matches the contract you read.
 - **Not implemented:** signed-policy approval (every 1.0.0 approval needs a person), read-side secret enforcement, and
   confinement of the provider CLIs.
 

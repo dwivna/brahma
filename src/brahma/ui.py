@@ -10,7 +10,7 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 
-from .config import Settings, state_home
+from .config import Settings, run_settings_line, state_home
 from .gittools import repository
 from .models import Event, Plan, Task
 from .session import CONTROL, Session
@@ -33,19 +33,6 @@ HELP = """Type your goal here. Brahma proposes a plan; /approve runs only that p
 /publish     push the completed branch and create a draft PR (requires gh)
 No automatic merges, releases or paid API fallback. Approved queues can continue through the local service after quit. /stop cancels future restarts.
 Configure explicit test commands in brahma.toml. Without them a task stays needs_checks."""
-
-
-def run_settings_line(models: dict) -> str:
-    """The locked run settings as they will actually apply, defaults included (auto-commit is on by default)."""
-    default = Settings()
-    value = {name: models.get(name, getattr(default, name)) for name in ("publish", "auto_commit", "strict_enforcement")}
-    parts = ["local commit on the brahma/ branch when ready" if value["auto_commit"] else "no automatic commit",
-             "draft PR publication when ready" if value["publish"] else "no publication",
-             "strict read enforcement" if value["strict_enforcement"] else "reads not enforced (see README)"]
-    allow = models.get("ignored_allowlist")
-    if allow is not None and list(allow) != list(default.ignored_allowlist):
-        parts.append("ignored build caches: " + ", ".join(map(str, allow)))
-    return "Run settings: " + "; ".join(parts)
 
 
 class ConversationLog(RichLog):

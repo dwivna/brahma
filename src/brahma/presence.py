@@ -6,8 +6,10 @@ authentication (Touch ID, or the login password) through LocalAuthentication, ru
 Nothing is compiled or stored. There is no environment variable, flag or configuration that skips it.
 
 Limits, stated plainly: this stops an agent from approving by running a command; it does not defend against a process that
-can already rewrite Brahma's own source code or drive the screen with accessibility permission. Other systems have no
-device-owner prompt here, so human-only actions are refused there.
+can already rewrite Brahma's own source code or drive the screen with accessibility permission. A caller can still make
+the system dialog appear, so the dialog names the contract digest and the CLI first shows the whole contract in the
+person's terminal and asks for the digest prefix (cli.confirm_in_terminal). Other systems have no device-owner prompt
+here, so human-only actions are refused there.
 """
 from __future__ import annotations
 

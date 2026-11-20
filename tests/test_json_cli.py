@@ -11,7 +11,7 @@ from brahma import exitcodes
 from brahma.models import Event
 
 from tests.test_cli import repo_session, run_cli
-from tests.approval import owner_confirms
+from tests.approval import at_terminal, owner_confirms
 
 
 def stored(tmp, **fields):
@@ -214,6 +214,15 @@ class OnlyAPersonApproves(unittest.TestCase):
         self.store.close()
         self.state = Path(self.tmp.name) / "state"
 
+    def digest(self):
+        from brahma.contracts import read_contract
+        from brahma.store import Store
+        store = Store(self.state)
+        try:
+            return read_contract(Path(store.session(self.session.key)["contract"]))["digest"]
+        finally:
+            store.close()
+
     def approved(self):
         from brahma.store import Store
         store = Store(self.state)
@@ -223,7 +232,7 @@ class OnlyAPersonApproves(unittest.TestCase):
             store.close()
 
     def test_approve_without_the_device_owner_records_nothing(self):
-        with owner_confirms(False) as prompt:
+        with owner_confirms(False) as prompt, at_terminal(self.digest()[:8]):
             code, out, _ = run_cli("--json", "approve", self.session.key, state=self.state)
         prompt.assert_called_once()
         self.assertEqual((code, json.loads(out)["ok"]), (20, False))
@@ -231,11 +240,29 @@ class OnlyAPersonApproves(unittest.TestCase):
         self.assertIsNone(self.approved())
 
     def test_approve_with_the_device_owner_records_the_digest(self):
-        with owner_confirms():
-            code, out, _ = run_cli("--json", "approve", self.session.key, state=self.state)
+        with owner_confirms(), at_terminal(self.digest()[:8]):
+            code, out, err = run_cli("--json", "approve", self.session.key, state=self.state)
         data = json.loads(out)
         self.assertEqual((code, data["approved"]), (0, True))
         self.assertEqual(self.approved(), data["contract_digest"])
+        self.assertIn("Owns: a.txt", err)                    # the person saw the contract before confirming
+        self.assertIn('Checks: [["true"]]', err)
+
+    def test_a_caller_without_a_terminal_never_raises_a_prompt(self):
+        # Automated security review: an agent must not be able to pop a Touch ID prompt a person confirms unseen.
+        with owner_confirms() as prompt:
+            code, out, _ = run_cli("--json", "approve", self.session.key, state=self.state)
+        prompt.assert_not_called()
+        self.assertEqual(code, 20)
+        self.assertIn("interactive terminal", json.loads(out)["error"])
+        self.assertIsNone(self.approved())
+
+    def test_a_wrong_digest_prefix_approves_nothing(self):
+        with owner_confirms() as prompt, at_terminal("00000000"):
+            code, _, _ = run_cli("--json", "approve", self.session.key, state=self.state)
+        prompt.assert_not_called()
+        self.assertEqual(code, 20)
+        self.assertIsNone(self.approved())
 
     def test_running_never_approves(self):
         from unittest.mock import AsyncMock, patch

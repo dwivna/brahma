@@ -215,6 +215,23 @@ def main(argv=None):
         return fail(redact(f"{type(error).__name__}: {error}")[:2000], exitcodes.BLOCKED, wants_json)
 
 
+def _interactive() -> bool:
+    return sys.stdin.isatty() and sys.stderr.isatty()
+
+
+def confirm_in_terminal(session) -> None:
+    """Before the system prompt: the person sees the whole contract in their own terminal and types its digest prefix.
+    A caller without an interactive terminal (an agent, a script) is refused here, so it can never raise a prompt that a
+    person might confirm without seeing what it approves."""
+    if not _interactive():
+        raise ValueError("Approval needs your interactive terminal: run this yourself, read the contract, then confirm")
+    digest, lines = session.approval_summary()
+    print("\n".join(lines), file=sys.stderr)
+    typed = input(f"Type the first 8 characters of the contract digest to approve it ({digest[:4]}…): ").strip()
+    if typed != digest[:8]:
+        raise ValueError("Digest not confirmed; nothing was approved")
+
+
 def emit(payload: dict, text, code: int, as_json: bool) -> int:
     """Print one result. JSON output is always the envelope: the payload plus `ok` and `exit_code`.
     `text` may be a callable so human formatting is only done for humans."""
@@ -457,6 +474,7 @@ def _main(argv):
         try:
             saved = store.session(args.session)
             session = Session(store, Path(saved["repo"]), key=args.session)
+            confirm_in_terminal(session)
             digest = session.approve()
             if args.queue:
                 store.enqueue(args.session, session.generation, digest, time.time(), "Approved by the device owner")
@@ -499,6 +517,7 @@ def _main(argv):
                 # One event loop for the whole run: the session's cancel Event binds to the loop it first awaits on.
                 selection = await session.discover_model_profiles()
                 session.set_plan(plan, model_selection=selection)
+                confirm_in_terminal(session)
                 await session.approve_async()          # the device owner confirms; nothing runs otherwise
                 return await session.execute()
             result = asyncio.run(approve_and_execute())

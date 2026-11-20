@@ -14,3 +14,10 @@ def owner_confirms(answer: bool = True):
 def approve(session) -> str:
     with owner_confirms():
         return session.approve()
+
+
+@contextmanager
+def at_terminal(typed: str | None):
+    """A person at an interactive terminal who types `typed` when asked for the digest prefix."""
+    with patch("brahma.cli._interactive", return_value=True), patch("builtins.input", return_value=typed or "") as asked:
+        yield asked

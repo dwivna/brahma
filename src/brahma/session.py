@@ -282,7 +282,27 @@ class Session:
         if self.store.session(self.key)["status"] == "ready":
             raise ValueError("This plan is already complete; use /new for another goal")
         contract, _, _ = self.approved_contract()
-        return contract, f"approve contract {contract['digest'][:12]} ({len(self.plan.tasks)} task(s)) in {self.repo.name}"
+        # Only values Brahma controls go into the system prompt; the repository name is reduced to a safe, quoted label.
+        label = re.sub(r"[^A-Za-z0-9._-]", "_", self.repo.name)[:40] or "repository"
+        return contract, (f"approve contract {contract['digest'][:12]} ({len(self.plan.tasks)} task(s)) "
+                          f"in repository '{label}'")
+
+    def approval_summary(self) -> tuple[str, list[str]]:
+        """Everything a person must see before approving, from the locked contract itself: (digest, lines)."""
+        from . import toolchain
+        from .config import run_settings_line
+        contract, _ = self._approval_target()
+        payload = contract["payload"]
+        lines = [f"Contract {contract['digest']}", f"Repository: {self.repo}", "Goal: " + self.plan.summary]
+        for number, task in enumerate(self.plan.tasks, 1):
+            lines += [f"{number}. {task.title} [{task.provider}/{task.complexity}]", "   Owns: " + ", ".join(task.files),
+                      "   Acceptance: " + "; ".join(task.acceptance)]
+        lines.append("Checks: " + (json.dumps(payload["checks"]) if payload["checks"] else "none (cannot become ready)"))
+        lines += toolchain.describe(payload.get("toolchain", {}))
+        lines.append(run_settings_line(payload["models"]))
+        budget = payload["task_budget"]
+        lines.append(f"Budget: {budget['active_seconds'] / 60:g} active minutes per task, at most {budget['repair_cycles']} repairs")
+        return contract["digest"], [safety.redact(CONTROL.sub("", line)) for line in lines]
 
     def _record_approval(self, digest: str) -> str:
         again, _, _ = self.approved_contract()           # nothing may change while the prompt was open
