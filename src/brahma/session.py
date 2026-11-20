@@ -125,8 +125,8 @@ class Session:
         """Notes Abhinav left for this session; applied by the engine at its next checkpoint, never mid-run."""
         from .briefs import Note
         notes = []
-        events = self.store.events_after(self.key, 0, 5000)
-        floor = max([e["seq"] for e in events if e["kind"] == "plan_created"], default=0)   # notes belong to one plan
+        floor = self.store.latest_seq(self.key, "plan_created")     # notes belong to one plan, however long the history
+        events = self.store.events_since(self.key, floor)
         for event in events:
             if event["kind"] != "user_note" or event["seq"] < floor:
                 continue

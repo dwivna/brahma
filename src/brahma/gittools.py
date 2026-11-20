@@ -4,6 +4,7 @@ import asyncio
 import fnmatch
 import hashlib
 import os
+import stat
 from pathlib import Path
 import signal
 import subprocess
@@ -193,22 +194,40 @@ def status_paths(repo: Path) -> list[str]:
     return sorted(set(paths))
 
 
-_FINGERPRINT_CAP = 64 * 1024 * 1024
+_HASH_CACHE: dict[tuple, str] = {}
+_HASH_CACHE_FROM = 64 * 1024 * 1024     # only large files are cached; small ones are cheaper to hash than to track
 
 
 def _fingerprint(path: Path) -> str:
+    """Content fingerprint of one path. Every file is hashed in full: metadata alone (size, mtime) can be preserved
+    across a content change, so it never stands in for contents. A large file's hash is reused only while its inode
+    change time (ctime) is unchanged; any write updates ctime and an unprivileged process cannot set it back."""
     if path.is_symlink():
         return "symlink:" + os.readlink(path)
     if not path.is_file():
         return "absent"
-    info = path.stat()
-    if info.st_size > _FINGERPRINT_CAP:  # huge artefacts: size+mtime, not a full read on every check
-        return f"large:{info.st_mode}:{info.st_size}:{info.st_mtime_ns}"
-    digest = hashlib.sha256()
-    with path.open("rb") as stream:
-        while chunk := stream.read(65536):
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)   # a FIFO swapped in never blocks us
+    except OSError:
+        return "unreadable"
+    with os.fdopen(descriptor, "rb") as stream:
+        before = os.fstat(stream.fileno())
+        if not stat.S_ISREG(before.st_mode):
+            return f"special:{before.st_mode}"
+        key = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+        if before.st_size >= _HASH_CACHE_FROM and key in _HASH_CACHE:
+            return str(before.st_mode) + ":" + _HASH_CACHE[key]
+        digest = hashlib.sha256()
+        while chunk := stream.read(1024 * 1024):
             digest.update(chunk)
-    return str(path.stat().st_mode) + ":" + digest.hexdigest()
+        after = os.fstat(stream.fileno())
+    if (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != (before.st_size, before.st_mtime_ns, before.st_ctime_ns):
+        return f"changing:{after.st_ctime_ns}"           # written while being read: never equal to a settled fingerprint
+    if before.st_size >= _HASH_CACHE_FROM:
+        if len(_HASH_CACHE) > 4096:
+            _HASH_CACHE.clear()
+        _HASH_CACHE[key] = digest.hexdigest()
+    return str(before.st_mode) + ":" + digest.hexdigest()
 
 
 def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:

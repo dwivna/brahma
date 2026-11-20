@@ -167,7 +167,21 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
 
 
 async def serve(home: Path, *, once: bool = False) -> int:
-    home = Path(home)
+    home = Path(home).expanduser().resolve()
+    # Everything in this process that finds the state directory by itself (the Git write guard checks the kill switch
+    # through state_home()) must see this one, not the default.
+    previous = os.environ.get("BRAHMA_STATE_DIR")
+    os.environ["BRAHMA_STATE_DIR"] = str(home)
+    try:
+        return await _serve(home, once=once)
+    finally:
+        if previous is None:
+            os.environ.pop("BRAHMA_STATE_DIR", None)
+        else:
+            os.environ["BRAHMA_STATE_DIR"] = previous
+
+
+async def _serve(home: Path, *, once: bool) -> int:
     store = Store(home)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -216,7 +230,8 @@ def service_plist(home: Path) -> dict:
     # inherited; no credentials are embedded. Without JAVA_HOME a service-run `mvn` can pick a different JDK than the one
     # the approved checks passed under (found by the first real run: Lombok failed under a newer default JDK).
     environment = {"PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                   "PYTHONPATH": str(Path(__file__).resolve().parents[1])}
+                   "PYTHONPATH": str(Path(__file__).resolve().parents[1]),
+                   "BRAHMA_STATE_DIR": str(home)}     # the kill switch and state the service checks are this home's
     java_home = os.environ.get("JAVA_HOME", "")
     if java_home and Path(java_home).is_absolute() and Path(java_home).is_dir() and "\x00" not in java_home:
         environment["JAVA_HOME"] = java_home

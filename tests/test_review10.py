@@ -286,7 +286,8 @@ class Finding15MeasuredAcrossContinuations(unittest.IsolatedAsyncioTestCase):
         outcome = [json.loads(e.text) for e in events if e.kind == "outcome"][-1]
         self.assertGreaterEqual(outcome["seconds"], 600)                      # 3600 budget - 3000 remaining before resume
         self.assertEqual(outcome["usage_measured"]["task_1_attempt_0_builder"], {"input_tokens": 100})
-        self.assertEqual(outcome["usage_measured"]["task_1_attempt_0_reviewer"], {"input_tokens": 5})
+        reviewer = [v for k, v in outcome["usage_measured"].items() if k.startswith("task_1_attempt_0_reviewer@")]
+        self.assertEqual(reviewer, [{"input_tokens": 5}])
 
 
 if __name__ == "__main__":

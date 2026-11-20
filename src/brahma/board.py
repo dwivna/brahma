@@ -130,8 +130,8 @@ def build(store, key: str, now: float | None = None) -> Board:
     code, status = session_status(store, key)
     saved = store.session(key)
     now = time.time() if now is None else now
-    events = store.events_after(key, 0, 20000)
-    floor = max([e["seq"] for e in events if e["kind"] == "plan_created"], default=0)   # rows of the current plan only
+    floor = store.latest_seq(key, "plan_created")          # rows of the current plan only, however long the history
+    events = store.events_since(key, floor)
     latest: dict[int, dict] = {}
     for event in events:
         if event["kind"] == "task_state" and event["seq"] >= floor:
@@ -171,8 +171,8 @@ def pending(store, key: str) -> list[tuple[str, str, str]]:
     from .cli import session_status
     code, status = session_status(store, key)
     out = []
-    events = store.events_after(key, 0, 20000)
-    floor = max([e["seq"] for e in events if e["kind"] == "plan_created"], default=0)   # signals belong to the current plan
+    floor = store.latest_seq(key, "plan_created")          # signals belong to the current plan, however long the history
+    events = store.events_since(key, floor)
     if code == exitcodes.NEEDS_APPROVAL and not [a for a in store.open_attention(key) if a["kind"] == "decision"]:
         if status["contract_digest"] and not status["approved"]:
             out.append((f"approval:{status['contract_digest']}", "approval", "A plan needs your approval"))

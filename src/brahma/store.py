@@ -264,6 +264,26 @@ class Store:
         return [dict(zip(("seq", "created", "provider", "role", "kind", "text", "usage"),
                          (*row[:6], json.loads(row[6])))) for row in rows]
 
+    def latest_seq(self, key: str, kind: str) -> int:
+        """Sequence number of the newest event of `kind` (0 if none): where the current plan's records start."""
+        row = self.db.execute("SELECT MAX(seq) FROM events WHERE session=? AND kind=?", (key, kind)).fetchone()
+        return int(row[0] or 0)
+
+    def events_since(self, key: str, seq: int) -> list[dict]:
+        """Every event from `seq` on (inclusive), oldest first, with no cap: readers of the current plan must never
+        silently see a prefix of the history instead of its newest records."""
+        out, after = [], seq - 1
+        while True:
+            batch = self.events_after(key, after, 5000)
+            out.extend(batch)
+            if len(batch) < 5000:
+                return out
+            after = batch[-1]["seq"]
+
+    def latest_event(self, key: str, kind: str) -> dict | None:
+        seq = self.latest_seq(key, kind)
+        return self.events_after(key, seq - 1, 1)[0] if seq else None
+
     def job(self, key: str) -> dict | None:
         row = self.db.execute("SELECT generation,digest,next_at,state,reason FROM jobs WHERE session=?", (key,)).fetchone()
         return dict(zip(("generation", "digest", "next_at", "state", "reason"), row)) if row else None

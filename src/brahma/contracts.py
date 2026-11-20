@@ -126,8 +126,18 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
         raise ValueError("At most three repair cycles are permitted")
     selected_checks = checks if checks is not None else plan.checks
     from .safety import argv_looks_secret, looks_secret
-    plan_text = [value for task in plan.tasks for value in (task.title, task.instructions, *task.acceptance, *task.scenarios)
-                 if isinstance(value, str)] + [plan.summary]
+    def strings(value):
+        if isinstance(value, str):
+            yield value
+        elif isinstance(value, dict):
+            for key, item in value.items():
+                yield str(key)
+                yield from strings(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                yield from strings(item)
+    # Every string the contract stores or forwards: the whole plan (feature, questions, ...) and the rendered feature.
+    plan_text = [*strings(plan.to_dict()), render_feature(plan)]
     if any(looks_secret(value) for value in plan_text) or any(argv_looks_secret(command) for command in selected_checks or []):
         raise ValueError("The plan or its checks contain a credential-shaped value; remove it before approval "
                          "(it would be stored in the contract and sent to workers)")

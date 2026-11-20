@@ -45,12 +45,34 @@ def _hide(match: "re.Match[str]") -> str:
     return match.group(0).replace(value, REDACTED) if value else REDACTED
 
 
+# A JSON key that names a credential: its value is hidden whatever it looks like (`{"password": "hunter2"}` has no
+# recognisable shape once the name and value are separate fields).
+_CREDENTIAL_KEY = re.compile(r"(?i)api[_-]?key|apikey|secret|token|passw|authorization|credential|private[_-]?key|cookie")
+
+
+def _hide_all(value, key: str):
+    if isinstance(value, bool) or value is None:
+        return value
+    if isinstance(value, (int, float)):
+        # Provider usage counters (input_tokens, output_tokens, ...) are numbers named after tokens, not credentials.
+        return value if "token" in key.lower() else REDACTED
+    if isinstance(value, str):
+        return REDACTED if value else value
+    if isinstance(value, dict):
+        return {k: _hide_all(item, key) for k, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_hide_all(item, key) for item in value]
+    return REDACTED
+
+
 def redact_deep(value):
-    """redact() applied to every string inside JSON-like data (dict keys are names, not data, and are kept)."""
+    """redact() applied to every string inside JSON-like data. Dict keys are names and are kept; a value under a key that
+    names a credential is hidden entirely, at any depth."""
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: redact_deep(item) for key, item in value.items()}
+        return {key: _hide_all(item, str(key)) if _CREDENTIAL_KEY.search(str(key)) else redact_deep(item)
+                for key, item in value.items()}
     if isinstance(value, (list, tuple)):
         return [redact_deep(item) for item in value]
     return value

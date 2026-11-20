@@ -194,13 +194,16 @@ class InstructionsForDirectoryOwnership(Fixture):
 
 
 class LargeIgnoredFiles(Fixture):
-    def test_oversized_files_use_size_and_mtime_not_a_full_read(self):
-        self.write("tools/big.sh", "x")
-        with patch.object(gittools, "_FINGERPRINT_CAP", 0):
+    def test_large_files_are_content_hashed_even_when_size_and_mtime_are_preserved(self):
+        # Review round 11, finding 16: size + mtime stood in for contents above 64 MiB, and both can be preserved.
+        import os
+        self.write("tools/big.sh", "aaaa")
+        path = self.repo / "tools/big.sh"
+        with patch.object(gittools, "_HASH_CACHE_FROM", 0):            # treat it as large: the cached path
             first = gittools.snapshot_changes(self.repo)["tools/big.sh"]
-        self.assertTrue(first.startswith("large:"))
-        self.write("tools/big.sh", "xyz")  # changes size, so the cheap fingerprint still differs
-        with patch.object(gittools, "_FINGERPRINT_CAP", 0):
+            info = path.stat()
+            path.write_text("bbbb")                                     # same size
+            os.utime(path, ns=(info.st_atime_ns, info.st_mtime_ns))     # modification time put back
             self.assertNotEqual(first, gittools.snapshot_changes(self.repo)["tools/big.sh"])
 
 

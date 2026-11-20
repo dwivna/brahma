@@ -305,7 +305,7 @@ class ServiceRegistration(unittest.TestCase):
             text = plistlib.dumps(data).decode()
             for secret in ("sk-secret", "gh-secret-xyz", "API_KEY", "GH_TOKEN"):
                 self.assertNotIn(secret, text)
-            self.assertEqual(set(data["EnvironmentVariables"]) - {"JAVA_HOME"}, {"PATH", "PYTHONPATH"})
+            self.assertEqual(set(data["EnvironmentVariables"]) - {"JAVA_HOME"}, {"PATH", "PYTHONPATH", "BRAHMA_STATE_DIR"})
             self.assertTrue(Path(data["EnvironmentVariables"]["PYTHONPATH"]).is_absolute())
 
     def test_plist_carries_java_home_only_when_it_is_a_real_absolute_directory(self):

@@ -13,6 +13,7 @@ from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 from .config import Settings, run_settings_line, state_home
 from .gittools import repository
 from .models import Event, Plan, Task
+from .safety import redact
 from .session import CONTROL, Session
 from .store import Store
 from . import toolchain
@@ -151,7 +152,7 @@ class BrahmaApp(App):
             self.refresh_status()
             return
         target = event.provider if event.provider in ("codex", "claude") else "manager"
-        text = CONTROL.sub("", event.text)
+        text = redact(CONTROL.sub("", event.text))     # the final rendering boundary: nothing reaches the screen unredacted
         color = "#efcc87" if target == "manager" else "#8ec9ee" if target == "codex" else "#e6b6a0"
         rendered = Text(f"{event.role} · {text}", style=color)
         self._pane_entries[target].append(rendered)

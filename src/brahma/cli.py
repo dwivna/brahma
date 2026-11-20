@@ -451,7 +451,8 @@ def _main(argv):
         try:
             saved = store.session(args.session)
             waiting = [a for a in store.open_attention(args.session) if a["kind"] == "decision"]
-            disputes = [e for e in store.events_after(args.session, 0, 5000) if e["kind"] == "disagreement"]
+            last = store.latest_event(args.session, "disagreement")        # the newest dispute, however long the history
+            disputes = [last] if last else []
             if not waiting or not disputes:
                 raise ValueError("No disputed review is waiting for a decision")
             import hashlib

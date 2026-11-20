@@ -50,6 +50,20 @@ def _findings_key(items: list[dict]) -> str:
     return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()[:32]
 
 
+class _Invocations(dict):
+    """Provider usage of one execution, one entry per provider invocation. A role label written twice (a repeated
+    reviewer call, or the same attempt in a later continuation) gets a new key instead of overwriting the first."""
+
+    def __init__(self):
+        super().__init__()
+        import uuid
+        self._run, self._count = uuid.uuid4().hex[:8], 0
+
+    def __setitem__(self, key, value):
+        self._count += 1
+        super().__setitem__(f"{key}@{self._run}.{self._count}", value)
+
+
 def _tree(worktree: Path, settings: Settings) -> dict:
     """What the reviewer saw: HEAD plus every changed path's content fingerprint."""
     from .gittools import git, snapshot_changes
@@ -67,7 +81,7 @@ def _with_leftovers(kind: str, passed: dict, items: list[dict]):
 
 
 async def _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit, cancel, deadline, budgets,
-                         provider_gate, usage, attempt):
+                         provider_gate, usage, attempt, postflight=None):
     """Handle high-severity findings. Returns (kind, payload):
     ("repair", review) normal repair loop; ("pass", review) the reviewer withdrew; ("overruled", review) Abhinav sided
     with the author; ("escalate", text) stop and wait for Abhinav. Allows one author reply per task."""
@@ -101,6 +115,8 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
     replied = await providers.run(builder, prompt, worktree, "reply", author_settings, emit, cancel,
                                   max(0, deadline - time.monotonic()))
     usage[f"task_{index}_attempt_{attempt}_reply"] = replied.usage
+    if postflight and (problem := postflight()):        # ownership is verified after every worker exit
+        return "blocked", problem
     if replied.status != "ok":
         return "repair", review
     state["reply_used"] = True
@@ -117,6 +133,8 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
     again = await providers.run(reviewer, _BOUNDARIES + "\n" + dispute.rereview_prompt(brief, top, replies), worktree,
                                 "reviewer", reviewer_settings, emit, cancel, max(0, deadline - time.monotonic()))
     usage[f"task_{index}_attempt_{attempt}_rereview"] = again.usage
+    if postflight and (problem := postflight()):
+        return "blocked", problem
     if again.status != "ok":
         return "repair", review
     try:
@@ -348,7 +366,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
     if validated.questions:
         return Result("brahma", "blocked", "Resolve the plan's questions before execution")
     completed: list[str] = []
-    usage: dict = {}
+    usage: dict = _Invocations()
     needs_checks = not bool(settings.checks)
     progress = task_progress or {}
     budgets: dict[int, dict] = {}
@@ -359,13 +377,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
     def task_usage(index: int) -> dict:
         """All provider-reported usage of one task across continuations: earlier runs plus this one, nothing counted twice."""
         merged = dict(prior_usage.get(index) or {})
-        for key, value in usage.items():
-            if not key.startswith(f"task_{index}_") or not value or merged.get(key) == value:
-                continue
-            name, n = key, 1
-            while name in merged and merged[name] != value:
-                name, n = f"{key}_continued_{n}", n + 1
-            merged[name] = value
+        # Every invocation has its own key (run id + sequence), so equal token counts are separate calls, never duplicates.
+        merged.update((key, value) for key, value in usage.items() if key.startswith(f"task_{index}_") and value)
         return merged
 
     def spent(index: int) -> float:
@@ -553,6 +566,14 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     budgets[index]["expansion"] = accepted or ["(none accepted)"]
                     _emit(emit, "context_expansion", json.dumps({"index": index, "accepted": accepted, "rejected": rejected}))
                     if accepted and not cancel.is_set() and time.monotonic() < deadline:
+                        # Verify (and restore) what the first invocation did before another worker starts: a later
+                        # invocation must never be able to hide an earlier one's out-of-ownership edit.
+                        owned, reason = ownership_changes(worktree, task.files, baseline=baseline,
+                                                          ignored_allow=settings.ignored_allowlist, identity=identity)
+                        if not owned:
+                            reason += _restore_note(worktree, task.files, baseline, settings, emit, identity)
+                            _checkpoint(emit, index, task, "blocked", attempt, reason)
+                            return result("blocked", task, "File ownership check failed: " + reason)
                         again = await providers.run(builder, prompt + "\nAdditional files you asked for (one-time expansion):\n"
                                                     + widened, worktree, "builder", builder_settings, emit, cancel,
                                                     max(0, deadline - time.monotonic()),
@@ -662,6 +683,13 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         _emit(emit, "signin_lost", json.dumps({"index": index, "provider": reviewer}))
                     _checkpoint(emit, index, task, state, attempt, f"Independent reviewer {reviewed.status}")
                     return guarded(index, state, task, f"Independent reviewer {reviewed.status}; draft retained")
+                # The reviewer is a worker too: verify (and restore) before its verdict starts a repair by another worker.
+                owned, reason = ownership_changes(worktree, task.files, baseline=baseline,
+                                                  ignored_allow=settings.ignored_allowlist, identity=identity)
+                if not owned:
+                    reason += _restore_note(worktree, task.files, baseline, settings, emit, identity)
+                    _checkpoint(emit, index, task, "blocked", attempt, reason)
+                    return result("blocked", task, "File ownership check failed after review: " + reason)
                 try:
                     review = _review(reviewed.text)
                 except (ValueError, TypeError):
@@ -676,8 +704,15 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if review["verdict"] == "changes_requested":
                 from . import dispute
                 if dispute.high(dispute.findings(review)):
+                    def postflight():
+                        owned, reason = ownership_changes(worktree, task.files, baseline=baseline,
+                                                          ignored_allow=settings.ignored_allowlist, identity=identity)
+                        return None if owned else reason + _restore_note(worktree, task.files, baseline, settings, emit, identity)
                     kind, payload = await _dispute_round(index, task, builder, reviewer, review, worktree, settings, emit,
-                                                         cancel, deadline, budgets, provider_gate, usage, attempt)
+                                                         cancel, deadline, budgets, provider_gate, usage, attempt, postflight)
+                    if kind == "blocked":
+                        _checkpoint(emit, index, task, "blocked", attempt, payload)
+                        return result("blocked", task, "File ownership check failed: " + payload)
                     if kind == "escalate":
                         _checkpoint(emit, index, task, "needs_decision", attempt, "Disputed high-severity finding")
                         _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
@@ -741,6 +776,11 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
     if completed_indices:
         if cancel.is_set():
             return result("cancelled", detail="Stopped before resume verification")
+        everything = [name for task in validated.tasks for name in task.files]
+        try:
+            reviewed = _tree(worktree, settings)     # the session accepted these completed tasks against these contents
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return result("blocked", detail="Reviewed files could not be fingerprinted: " + str(error))
         try:
             checked, checks_text = await run_checks(worktree, settings.checks, cancel,
                                                    min(3600, settings.task_timeout), emit, None,
@@ -749,10 +789,23 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             return result("blocked", detail=str(error))
         if not checked or cancel.is_set():
             return result("cancelled" if cancel.is_set() else "incomplete", detail=safety.redact(checks_text[-1000:]))
-        verified_tree = _tree(worktree, settings)
-        owned, reason = ownership_changes(worktree, [name for task in validated.tasks for name in task.files], ignored_allow=settings.ignored_allowlist, identity=identity)
+        owned, reason = ownership_changes(worktree, everything, ignored_allow=settings.ignored_allowlist, identity=identity)
         if not owned:
+            reason += _restore_note(worktree, everything, reviewed["changes"], settings, emit, identity)
             return result("blocked", detail="Resume ownership check failed: " + reason)
+        try:
+            verified_tree = _tree(worktree, settings)
+        except (OSError, ValueError, subprocess.SubprocessError) as error:
+            return result("blocked", detail="Checked files could not be fingerprinted: " + str(error))
+        if verified_tree != reviewed:
+            # The checks changed reviewed files. Nothing is accepted unreviewed: on the next run the session finds each
+            # affected task's files differ from its ready receipt, so those tasks are checked and reviewed again.
+            changed = sorted(set(verified_tree["changes"]) ^ set(reviewed["changes"])
+                             | {p for p in set(verified_tree["changes"]) & set(reviewed["changes"])
+                                if verified_tree["changes"][p] != reviewed["changes"][p]})
+            return result("incomplete", detail="The checks changed files after they were reviewed ("
+                          + (", ".join(changed[:10]) or "the commit") + "); nothing was accepted. "
+                          "Run again to check and review the affected tasks.")
     if needs_checks:
         return Result("brahma", "needs_checks", "Independent review and diff checks passed; configure and run project checks before readiness.\n"
                       + "; ".join(completed), usage, seconds=time.monotonic() - started)

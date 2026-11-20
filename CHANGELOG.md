@@ -38,6 +38,19 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Independent review round 11: a value stored under a credential-named field (`password`, `api_key`, ...) is hidden at
+  any depth, while provider token counters are kept; every string in a plan, including its Gherkin feature, is checked
+  for credentials before approval; every approved instruction file must be present in the run's checkout (one that is
+  only untracked in the source refuses the run instead of silently dropping its rules), and a bare owned directory brings
+  its own instruction files; on resume, checks that change reviewed files accept nothing (the affected tasks are checked
+  and reviewed again on the next run; a check that rewrites owned files differently on every run therefore cannot reach
+  readiness on resume), and ownership failures found on resume are restored; the board, notes and dispute decisions read
+  the newest plan however long the history; each provider invocation's usage is counted once, never merged with an equal
+  one; every file is content-hashed for ownership and readiness (size and modification time no longer stand in for files
+  over 64 MiB); the terminal UI redacts everything it renders; ownership is verified and restored after every worker
+  exit (the first builder before a context-expansion builder, the reviewer, and the dispute reply and re-review); special
+  files (FIFOs, devices) are never opened blocking; the background service passes its state directory to everything
+  that checks the kill switch.
 - Independent review round 10: every Git query Brahma makes ignores a redirected repository, index or configuration
   from the environment; secrets nested anywhere in stored events (including dispute reviews) and in `brahma events`
   output are redacted; repository instructions and selected definitions are redacted before they reach a worker, and a

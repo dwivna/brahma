@@ -53,6 +53,26 @@ class ToolchainChanged(Exception):
     """The machine no longer matches the approved toolchain. Not a test failure: it must not spend a repair attempt."""
 
 
+def _open_regular(path: Path):
+    """Open a regular file for reading without ever blocking: the type is checked on the opened descriptor, so a FIFO or
+    device put at the path (before or after any earlier check) is refused instead of hanging planning or checks."""
+    descriptor = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError(f"Not a regular file: {path}")
+        return os.fdopen(descriptor, "rb")
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _read_small(path: Path, limit: int = 65535) -> str | None:
+    """The text of a small regular file; None if it is larger than `limit` bytes."""
+    with _open_regular(path) as handle:
+        data = handle.read(limit + 1)
+    return None if len(data) > limit else data.decode("utf-8", "replace")
+
+
 def _fingerprint(path: Path) -> str | None:
     """SHA-256 of a regular file; None for anything else, unreadable, or larger than the bound. Never follows into devices."""
     try:
@@ -60,7 +80,7 @@ def _fingerprint(path: Path) -> str | None:
         if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_HASH_BYTES:
             return None
         digest, remaining = hashlib.sha256(), MAX_HASH_BYTES + 1
-        with path.open("rb") as handle:
+        with _open_regular(path) as handle:
             while remaining > 0 and (chunk := handle.read(min(1 << 20, remaining))):
                 digest.update(chunk)
                 remaining -= len(chunk)
@@ -118,8 +138,9 @@ def _java_runtime(env: dict[str, str], program: str, target: Path) -> dict | Non
     release = None
     marker = home / "release"
     try:
-        if marker.is_file() and marker.stat().st_size < 65536:
-            for line in marker.read_text(errors="replace").splitlines():
+        text = _read_small(marker) if marker.is_file() else None
+        if text is not None:
+            for line in text.splitlines():
                 if line.startswith("JAVA_VERSION="):
                     value = line.split("=", 1)[1].strip().strip('"')
                     release = value if len(value) <= 32 and _VERSION_TEXT.fullmatch(value) else "unrecognised"
@@ -150,9 +171,9 @@ def _selects_own_jdk(directory: Path, project_files: dict[str, str]) -> bool:
         if key.endswith("gradle.properties"):
             try:
                 path = Path(key) if key.startswith("/") else directory / key
-                if path.stat().st_size >= 65536:
+                text = _read_small(path)
+                if text is None:
                     return True                                       # too large to scan: assume it might select a JDK
-                text = path.read_text(errors="replace")
                 if "java.home" in text or "\\" in text:            # any mention, or any backslash (escapes and line continuations can spell it)
                     return True
             except OSError:
