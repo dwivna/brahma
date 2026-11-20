@@ -42,24 +42,20 @@ def git_env(base: dict[str, str] | None = None) -> dict[str, str]:
     return env
 
 
-_GIT_DIRS: dict[str, tuple[Path, ...]] = {}
-
-
 def attribute_override(repo: Path) -> str | None:
     """`$GIT_DIR/info/attributes` is read by every Git command whatever `--attr-source` says, so a filter or conversion
     attribute there (written after approval) would run a program or change bytes on Brahma's own Git calls. Brahma
     1.0 refuses to operate while that file has any content."""
     key = str(Path(repo).absolute())
-    if key not in _GIT_DIRS:
-        # rev-parse reads no attributes. Both the worktree's own Git directory and the shared one are checked.
-        found = subprocess.run(["git", "-C", key, "rev-parse", "--absolute-git-dir", "--git-common-dir"], text=True,
-                               capture_output=True, timeout=30, env=git_env())
-        lines = found.stdout.splitlines()
-        if found.returncode or len(lines) != 2:
-            return None                      # not a repository: the Git command itself reports that
-        common = Path(lines[1]) if Path(lines[1]).is_absolute() else Path(key) / lines[1]
-        _GIT_DIRS[key] = (Path(lines[0]), common.resolve())
-    for directory in _GIT_DIRS[key]:
+    # Looked up on every call, never cached: a repointed `.git` file must not leave an old directory being checked.
+    # rev-parse reads no attributes. Both the worktree's own Git directory and the shared one are checked.
+    found = subprocess.run(["git", "-C", key, "rev-parse", "--absolute-git-dir", "--git-common-dir"], text=True,
+                           capture_output=True, timeout=30, env=git_env())
+    lines = found.stdout.splitlines()
+    if found.returncode or len(lines) != 2:
+        return None                          # not a repository: the Git command itself reports that
+    common = Path(lines[1]) if Path(lines[1]).is_absolute() else Path(key) / lines[1]
+    for directory in (Path(lines[0]), common.resolve()):
         path = directory / "info" / "attributes"
         try:
             info = os.lstat(path)

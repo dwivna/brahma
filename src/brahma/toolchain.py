@@ -261,11 +261,11 @@ _GRADLE_VALUE_OPTIONS = ("-D", "-P", "-g", "-p", "-c", "-I", "-b", "-u", "--syst
 
 def _gradle_redirect_in_environment(env: dict[str, str]) -> bool:
     """Fail closed: a JVM startup variable that sets a Gradle property (`-Dorg.gradle.java.home=...` picks another daemon
-    JDK, `-Dgradle.user.home=...` another properties file) or loads an argument file. The launcher script's own word
-    splitting removes quotes and backslashes, so they are removed here before looking."""
+    JDK, `-Dgradle.user.home=...` or `-Duser.home=...` another properties file) or loads an argument file. The launcher
+    script's own word splitting removes quotes and backslashes, so they are removed here before looking."""
     for key in _JAVA_STARTUP_VARIABLES:
         value = re.sub(r"[\"'\\]", "", env.get(key, "")).casefold()
-        if "org.gradle." in value or "gradle.user.home" in value or re.search(r"(^|\s)@", value):
+        if "org.gradle." in value or "user.home" in value or re.search(r"(^|\s)@", value):
             return True
     return False
 

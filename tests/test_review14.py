@@ -50,6 +50,18 @@ class Finding1RepositoryLocalAttributes(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "info/attributes"):
                 gittools.status_paths(Path(tmp) / "wt")
 
+    def test_a_repointed_git_directory_is_checked_not_a_remembered_one(self):
+        # Automated security review of 0dd720d: the Git-directory lookup was cached per path.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, other = make_repo(Path(tmp) / "r"), make_repo(Path(tmp) / "o")
+            git(repo, "worktree", "add", "-q", "-b", "brahma/s", str(Path(tmp) / "wt"))
+            wt = Path(tmp) / "wt"
+            self.assertIsNone(gitsafe.attribute_override(wt))
+            (other / ".git" / "info").mkdir(exist_ok=True)
+            (other / ".git" / "info" / "attributes").write_text("* filter=demo\n")
+            (wt / ".git").write_text(f"gitdir: {other / '.git'}\n")
+            self.assertIn("info/attributes", gitsafe.attribute_override(wt))
+
     def test_system_attributes_are_off(self):
         self.assertEqual(gitsafe.git_env({})["GIT_ATTR_NOSYSTEM"], "1")
 
@@ -161,7 +173,7 @@ class Finding7GradleStartupVariables(unittest.TestCase):
             script(root / "bin", "gradle")
             home = jdk(root, "21")
             for value in ("-Dorg.gradle.java.home=/opt/other", "-Dorg.\"gradle\".java.home=/opt/other",
-                          "-Dgradle.user.home=/tmp/h"):
+                          "-Dgradle.user.home=/tmp/h", "-Duser.home=/tmp/h"):    # automated review of 0dd720d
                 with self.subTest(value=value):
                     env = {"PATH": str(root / "bin"), "JAVA_HOME": str(home), "GRADLE_OPTS": value}
                     info = toolchain.probe([["gradle", "build"]], repo, env)["programs"]["gradle"]
