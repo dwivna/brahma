@@ -3,7 +3,7 @@ import os
 import shutil
 import unittest
 
-import provider_guard  # noqa: F401
+from tests import provider_guard  # noqa: F401
 
 
 class ProviderGuard(unittest.TestCase):

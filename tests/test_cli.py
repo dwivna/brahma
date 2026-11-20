@@ -14,7 +14,7 @@ from brahma import cli, quota
 from brahma.models import Plan, Task
 from brahma.session import Session
 from brahma.store import Store
-import provider_guard  # noqa: F401,E402  (no test may launch a real provider CLI)
+from tests import provider_guard  # noqa: F401,E402  (no test may launch a real provider CLI)
 
 
 def run_cli(*argv, state):

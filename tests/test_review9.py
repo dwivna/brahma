@@ -131,6 +131,22 @@ class SessionFlow(unittest.TestCase):
         self.assertEqual(result.status, "cancelled")
         self.assertEqual(self.job()["state"], "queued")
 
+    def test_a_kill_switch_released_before_the_run_winds_down_does_not_requeue_work(self):
+        # Automated security review of 21b93d3: lifting the kill switch must never restart work by itself.
+        from brahma import halt
+        store, session = self.store, self.session
+
+        async def engine_run(*args, **kwargs):
+            halt.engage(store.home)
+            await asyncio.sleep(.5)                          # the monitor sees the kill switch
+            store.hold_all("Kill switch released")
+            halt.release(store.home)                         # released while the worker is still winding down
+            return Result("brahma", "cancelled", "cancelled")
+        with patch("brahma.engine.execute", engine_run):
+            asyncio.run(session.execute())
+        self.assertEqual(self.job()["state"], "held")
+        self.assertIsNone(store.claim(time.time() + 10))
+
     def test_held_work_does_not_run_from_run_session_until_resume_and_a_new_approval_supersedes_it(self):
         self.store.hold(self.session.key, self.session.generation, self.digest, "kill switch")
         with patch("brahma.engine.execute", AsyncMock(side_effect=AssertionError("ran held work"))):

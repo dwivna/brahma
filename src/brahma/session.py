@@ -591,9 +591,15 @@ class Session:
                     # A pause or the kill switch keeps the approved continuation; only `resume` queues it again.
                     self.store.hold(self.key, self.generation, contract["digest"], reason + "; resume to continue")
                 elif seen_halt and result.status == "cancelled" and not self.store.session(self.key)["stopped"]:
-                    # Paused, then resumed before this run wound down: the resume asked for the work to continue.
-                    self.store.enqueue(self.key, self.generation, contract["digest"], time.time(),
-                                       "Resumed after " + seen_halt[0])
+                    job = self.store.job(self.key)
+                    if set(seen_halt) == {"Paused by user"} and not (job and job["state"] == "held"):
+                        # Only a pause was seen, and `resume` has already released it: continue as the person asked.
+                        self.store.enqueue(self.key, self.generation, contract["digest"], time.time(),
+                                           "Resumed after a pause")
+                    else:
+                        # The kill switch was seen during this run: lifting it never restarts work; only `resume` does.
+                        self.store.hold(self.key, self.generation, contract["digest"],
+                                        "Kill switch was engaged during the run; resume to continue")
                 elif result.status == "waiting":
                     waits = [json.loads(e["text"]) for e in self.store.events(self.key) if e["kind"] == "wait"]
                     latest = waits[-1] if waits else {}

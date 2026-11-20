@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from unittest.mock import patch
-import provider_guard  # noqa: F401,E402  (no test may launch a real provider CLI)
+from tests import provider_guard  # noqa: F401,E402  (no test may launch a real provider CLI)
 
 
 @contextmanager
