@@ -299,6 +299,17 @@ class GitMetadataCannotHideChanges(Fixture):
         self.assertFalse(ok)
         self.assertIn("src/keep.py", reason)
 
+    def test_flags_left_by_an_earlier_run_are_cleared_not_trusted(self):
+        # Automated security review: an identity re-taken on resume must not accept flags set by an interrupted run.
+        self.write("src/keep.py", "x = 'hidden by an earlier run'\n")
+        self.git("update-index", "--assume-unchanged", "src/keep.py")
+        stale = gittools.git_identity(self.repo)
+        ok, reason = gittools.ownership_changes(self.repo, ["other/**"], baseline={}, identity=stale)
+        self.assertFalse(ok)                      # a flag is a violation even if it was present when the identity was taken
+        self.assertEqual(gittools.clear_index_flags(self.repo), ["src/keep.py"])
+        self.assertIn("src/keep.py", gittools.status_paths(self.repo))     # the hidden edit is visible again
+        self.assertEqual(gittools.git_identity(self.repo)["hidden"], [])
+
     def test_a_branch_switch_is_caught_and_blocks_the_commit(self):
         self.git("checkout", "-q", "-b", "brahma/other")
         ok, reason = gittools.ownership_changes(self.repo, ["src/**"], baseline={}, identity=self.identity)

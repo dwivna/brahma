@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import stat
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,29 +12,75 @@ from pathlib import Path
 SCHEMA_VERSION = 3  # 1 = sessions/events/jobs/quotas; 2 adds the shared record; 3 adds notices (shown-once attention)
 
 
+def secure_home(home: Path) -> Path:
+    """The state directory holds plans, contracts and events: it must be a real directory owned by this user and closed to
+    others. An existing directory with wider permissions is tightened; one owned by someone else, or a symlink, is refused."""
+    home = Path(home).expanduser()
+    if home.is_symlink():
+        raise ValueError(f"State directory {home} is a symlink; use a real directory owned by you")
+    home.mkdir(parents=True, exist_ok=True, mode=0o700)
+    info = os.lstat(home)
+    if not stat.S_ISDIR(info.st_mode):
+        raise ValueError(f"State directory {home} is not a directory")
+    if info.st_uid != os.getuid():
+        raise ValueError(f"State directory {home} belongs to another user; refusing to use it")
+    if stat.S_IMODE(info.st_mode) & 0o077:
+        os.chmod(home, 0o700)
+    return home
+
+
+def _private_file(path: Path) -> None:
+    """Create a file 0600 (or tighten an existing one), never following a symlink."""
+    if path.is_symlink():
+        raise ValueError(f"{path} is a symlink; refusing to use it as Brahma state")
+    descriptor = os.open(path, os.O_RDWR | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600)
+    try:
+        if stat.S_IMODE(os.fstat(descriptor).st_mode) & 0o077:
+            os.fchmod(descriptor, 0o600)
+    finally:
+        os.close(descriptor)
+
+
 class Store:
     def __init__(self, home: Path):
-        self.home = home
-        home.mkdir(parents=True, exist_ok=True, mode=0o700)
-        self.db = sqlite3.connect(home / "state.sqlite3")
-        self.db.execute("PRAGMA journal_mode=WAL")
-        self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, repo TEXT, created TEXT, status TEXT, plan TEXT, worktree TEXT)")
-        self.db.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, session TEXT, created TEXT, provider TEXT, role TEXT, kind TEXT, text TEXT, usage TEXT)")
-        columns = {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}
-        for name, kind in (("stopped", "INTEGER DEFAULT 0"), ("contract", "TEXT"), ("approved_digest", "TEXT"),
-                           ("paused", "INTEGER DEFAULT 0")):
-            if name not in columns:
-                self.db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
-        self.db.execute("CREATE TABLE IF NOT EXISTS jobs (session TEXT PRIMARY KEY, generation TEXT NOT NULL, digest TEXT NOT NULL, next_at REAL, state TEXT NOT NULL, reason TEXT)")
-        self.db.execute("CREATE TABLE IF NOT EXISTS quotas (provider TEXT PRIMARY KEY, snapshot TEXT NOT NULL)")
-        version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if version > SCHEMA_VERSION:
+        self.home = secure_home(home)
+        database = self.home / "state.sqlite3"
+        _private_file(database)
+        self.db = sqlite3.connect(database, timeout=30, isolation_level=None)
+        try:
+            # Read the format before touching anything: a newer database is refused unmodified.
+            version = self.db.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                raise ValueError(f"State format {version} is newer than this Brahma reads ({SCHEMA_VERSION}); "
+                                 "upgrade Brahma rather than reinterpret it")
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("BEGIN IMMEDIATE")          # one serialized, all-or-nothing migration
+            try:
+                self.db.execute("CREATE TABLE IF NOT EXISTS sessions (id TEXT PRIMARY KEY, repo TEXT, created TEXT, status TEXT, plan TEXT, worktree TEXT)")
+                self.db.execute("CREATE TABLE IF NOT EXISTS events (seq INTEGER PRIMARY KEY, session TEXT, created TEXT, provider TEXT, role TEXT, kind TEXT, text TEXT, usage TEXT)")
+                columns = {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}
+                for name, kind in (("stopped", "INTEGER DEFAULT 0"), ("contract", "TEXT"), ("approved_digest", "TEXT"),
+                                   ("paused", "INTEGER DEFAULT 0")):
+                    if name not in columns:
+                        self.db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {kind}")
+                self.db.execute("CREATE TABLE IF NOT EXISTS jobs (session TEXT PRIMARY KEY, generation TEXT NOT NULL, digest TEXT NOT NULL, next_at REAL, state TEXT NOT NULL, reason TEXT)")
+                self.db.execute("CREATE TABLE IF NOT EXISTS quotas (provider TEXT PRIMARY KEY, snapshot TEXT NOT NULL)")
+                if self.db.execute("PRAGMA user_version").fetchone()[0] > SCHEMA_VERSION:    # raced with a newer Brahma
+                    raise ValueError("State format changed during startup; refusing to reinterpret it")
+                self._migrate_shared_record()
+                self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        except BaseException:
             self.db.close()
-            raise ValueError(f"State format {version} is newer than this Brahma reads ({SCHEMA_VERSION}); "
-                             "upgrade Brahma rather than reinterpret it")
-        self._migrate_shared_record()
-        self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-        self.db.commit()
+            raise
+        self.db.isolation_level = ""                    # back to the default: DML opens a transaction, commit() ends it
+        for suffix in ("-wal", "-shm"):
+            sidecar = database.with_name(database.name + suffix)
+            if sidecar.exists() and not sidecar.is_symlink() and stat.S_IMODE(sidecar.stat().st_mode) & 0o077:
+                os.chmod(sidecar, 0o600)
 
     def _migrate_shared_record(self) -> None:
         """Additive, idempotent tables for the shared record (Round 5). Existing data is never touched."""

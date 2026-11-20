@@ -162,10 +162,18 @@ class Session:
         with self.lock():
             active = Path(saved["worktree"]) if saved["worktree"] else self.repo
             from .scheduler import Capacity
-            selection = await self.discover_model_profiles()
-            settings = self.selected_settings(Settings.load(self.repo), selection)
-            plan = await engine.plan(brief, active, settings, self.emit, self.cancel,
-                                     provider_gate=Capacity(self.store, self.cancel))
+            monitor = asyncio.create_task(self._watch_halt(since=saved))
+            try:
+                selection = await self.discover_model_profiles()
+                settings = self.selected_settings(Settings.load(self.repo), selection)
+                plan = await engine.plan(brief, active, settings, self.emit, self.cancel,
+                                         provider_gate=Capacity(self.store, self.cancel))
+            finally:
+                monitor.cancel()
+                await asyncio.gather(monitor, return_exceptions=True)
+            reason = self._new_halt(saved)
+            if reason:
+                raise ValueError(reason + " during planning; no plan was recorded")
         self.set_plan(plan, model_selection=selection)
         self.emit(Event(kind="plan", text=json.dumps(self.plan.to_dict(), ensure_ascii=False)))
         return self.plan
@@ -262,6 +270,26 @@ class Session:
         self.store.pause(self.key)
         self.cancel.set()
 
+    def _new_halt(self, since: dict) -> str | None:
+        """A halt that applies to planning: the kill switch, or a stop/pause issued after planning began (a stop left from
+        an earlier plan does not block asking for a new one)."""
+        if self.store.killed:
+            return "Kill switch engaged"
+        now = self.store.session(self.key)
+        if now["stopped"] and not since["stopped"]:
+            return "Stopped by user"
+        if now["paused"] and not since["paused"]:
+            return "Paused by user"
+        return None
+
+    async def _watch_halt(self, since: dict, interval: float = .2) -> None:
+        """Durable controls from any process (`brahma kill|stop|pause`) cancel the planner within moments."""
+        while True:
+            if self._new_halt(since):
+                self.cancel.set()
+                return
+            await asyncio.sleep(interval)
+
     def halted(self) -> str | None:
         """Why work must not continue right now, or None."""
         if self.store.killed:
@@ -333,8 +361,12 @@ class Session:
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
             if gittools.git(worktree, "rev-parse", "HEAD") != contract["payload"]["base_revision"]:
                 raise ValueError("Worktree base changed outside this approval; review a new plan")
+            revealed = gittools.clear_index_flags(worktree)
+            if revealed:
+                self.emit(Event(kind="enforcement", text="Cleared Git index flags that hid changes to: " + ", ".join(revealed[:20])
+                                + ". Those changes are now visible to ownership verification."))
             identity = gittools.git_identity(worktree)
-            if (identity["branch"] != "brahma/" + self.key
+            if (identity["hidden"] or identity["branch"] != "brahma/" + self.key
                     or not Path(identity["git_dir"]).resolve().is_relative_to(Path(identity["common_dir"]).resolve() / "worktrees")):
                 raise ValueError("Worktree Git identity does not match this session; it was not run")
             self.settings._git_identity = identity

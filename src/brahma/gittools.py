@@ -250,10 +250,18 @@ def identity_problems(worktree: Path, identity: dict | None) -> list[str]:
                        ("branch", "the checked-out branch"), ("head", "HEAD (an unexpected commit)")):
         if now[key] != identity.get(key):
             problems.append(f"{label} changed")
-    added = sorted(set(now["hidden"]) - set(identity.get("hidden", [])))
-    if added:
-        problems.append("index flags now hide changes to: " + ", ".join(added[:20]))
+    if now["hidden"]:      # Brahma clears every flag when a run starts, so any flag present now was set during the run
+        problems.append("index flags hide changes to: " + ", ".join(now["hidden"][:20]))
     return problems
+
+
+def clear_index_flags(worktree: Path) -> list[str]:
+    """Make every tracked change visible again before a run takes its baseline: a flag left by an interrupted earlier run
+    must not become part of what later runs trust. Returns the paths that were hidden."""
+    hidden = hidden_index_entries(worktree)
+    if hidden:
+        git(worktree, "update-index", "--no-assume-unchanged", "--no-skip-worktree", "--", *hidden)
+    return hidden
 
 
 _SENSITIVE_PREFIXES = (".env", "credentials", ".credentials")
