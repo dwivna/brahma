@@ -36,6 +36,8 @@ security reviews that followed.
   quick resume keeps the work queued; automatic publication works and pushes the verified commit; the approval display
   shows the base revision, the Gherkin feature, loaded definitions and instructions; command output is redacted; the
   Codex builder banner no longer claims writes are confined.
+- `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
+  read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
 - Independent review round 10: every Git query Brahma makes ignores a redirected repository, index or configuration
   from the environment; secrets nested anywhere in stored events (including dispute reviews) and in `brahma events`
   output are redacted; repository instructions and selected definitions are redacted before they reach a worker, and a

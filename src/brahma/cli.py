@@ -227,12 +227,16 @@ def _interactive() -> bool:
         return False
 
 
+_TTY = "/dev/tty"
+
+
 def _read_typed(prompt: str) -> str:
-    """Read the answer from the controlling terminal itself, not from whatever was piped into the command."""
-    with open("/dev/tty", "r+") as tty:
-        tty.write(prompt)
-        tty.flush()
-        return tty.readline().strip()
+    """Read the answer from the controlling terminal itself, not from whatever was piped into the command.
+
+    Unbuffered bytes: a text-mode read-write stream needs a seekable file and a terminal is not one."""
+    with open(_TTY, "rb+", buffering=0) as tty:
+        tty.write(prompt.encode("utf-8"))
+        return tty.readline(1024).decode("utf-8", "replace").strip()
 
 
 def confirm_in_terminal(session) -> str:
