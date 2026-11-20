@@ -27,6 +27,15 @@ def engage(home: Path) -> None:
     flag(home).write_text("Brahma kill switch engaged. Remove with `brahma kill --release`.\n")
 
 
+def kill_everything(home: Path) -> tuple[list[int], list[int]]:
+    """The kill switch, as every interface applies it: engage the flag, then stop every recorded worker and check process
+    group at once, including groups whose coordinator already died (nobody would be watching the flag for them).
+    Returns (stopped, survivors) process-group ids."""
+    engage(home)
+    from . import procs
+    return procs.reap(Path(home), everything=True)
+
+
 def release(home: Path) -> bool:
     try:
         flag(home).unlink()

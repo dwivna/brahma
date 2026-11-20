@@ -283,27 +283,14 @@ class BrahmaApp(App):
                         contract = None
                         lines.append("Stored contract cannot be used: " + str(error) + ". Describe the goal again to create a new plan.")
                 if saved["contract"] and contract is not None:
-                    lines.extend(("Contract: " + contract["digest"], "Feature file: " + str(Path(saved["contract"]).with_suffix(".feature")),
-                                  contract["payload"]["feature"],
-                                  "Checks: " + json.dumps(contract["payload"]["checks"]),
-                                  *toolchain.describe(contract["payload"].get("toolchain", {})),
-                                  "Budget: {:g} active minutes/task; at most {} repairs; quota waiting excluded.".format(
-                                      contract["payload"]["task_budget"]["active_seconds"] / 60, contract["payload"]["task_budget"]["repair_cycles"])))
-                    models = contract["payload"]["models"]
-                    # Locked settings that widen what a run does must be visible at approval, not only inside the digest.
-                    lines.append(run_settings_line(models))
-                    risky = sorted({c[0].rsplit("/", 1)[-1] for c in contract["payload"]["checks"]
-                                    if c and c[0].rsplit("/", 1)[-1] in ("sh", "bash", "zsh", "curl", "wget", "nc", "ssh", "scp")})
-                    if risky:
-                        lines.append("WARNING: approved checks run these shell or network programs on this computer: " + ", ".join(risky))
-                    selection = models.get("selection")
-                    for provider in ("codex", "claude"):
-                        for suffix, purpose in (("_model", "routine"), ("_critical_model", "critical")):
-                            field = provider + suffix
-                            detail = selection["profiles"][field] if selection else None
-                            chosen = detail["selected"] if detail else models.get(field)
-                            state = "advertised" if detail and detail["verified"] else "unavailable" if detail and detail["available"] is False else "unverified"
-                            lines.append(f"Model: {provider} {purpose} = {chosen or 'unavailable'} ({state})")
+                    # The same complete, sanitised view the CLI shows; /approve is bound to the digest displayed here.
+                    try:
+                        digest, view = self.session.approval_summary()
+                        self.displayed_digest = digest
+                        lines.extend(("Feature file: " + str(Path(saved["contract"]).with_suffix(".feature")), *view))
+                    except ValueError as error:
+                        self.displayed_digest = None
+                        lines.append("Cannot be approved now: " + str(error))
             lines.append("/approve locks this complete contract and permits queued resumption. /stop cancels restarts.")
         if self.session:
             lines.append("Approved checks: " + ("; ".join(" ".join(c) for c in (plan.checks or self.session.settings.checks)) or
@@ -442,7 +429,11 @@ class BrahmaApp(App):
                 elif not self.session:
                     raise ValueError("Select a repository first")
                 else:
-                    await self.session.approve_async()        # Touch ID or the login password; refused otherwise
+                    digest = getattr(self, "displayed_digest", None)
+                    if not digest:
+                        raise ValueError("Show the contract first (it is displayed with the plan); nothing was approved")
+                    # Bound to the contract on screen; Touch ID or the login password, refused otherwise.
+                    await self.session.approve_async(digest)
                     await self.session.execute()
             elif value.startswith("/"):
                 raise ValueError("Unknown command. Use /help")
@@ -520,11 +511,13 @@ class BrahmaApp(App):
     def action_kill(self):
         from . import halt
         self.usage_cancel.set()
-        halt.engage(self.store.home)
         if self.session and not self.demo:
             self.session.cancel.set()
+        # The same kill as `brahma kill`: the flag, and every recorded worker group stopped now, orphans included.
+        _, survivors = halt.kill_everything(self.store.home)
         self.write(Event(text="Kill switch engaged: all workers stop, no new work starts, Git writes are refused. "
-                         "Lift it with `brahma kill --release`."))
+                         "Lift it with `brahma kill --release`."
+                         + (f" WARNING: {len(survivors)} worker group(s) could not be stopped: {survivors}" if survivors else "")))
 
     def action_stop(self):
         self.usage_cancel.set()

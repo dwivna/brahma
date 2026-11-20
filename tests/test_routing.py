@@ -150,7 +150,8 @@ class EngineRouting(unittest.IsolatedAsyncioTestCase):
         self.patches = [patch.object(engine, "_context", return_value="ctx"),
                         patch.object(gittools, "snapshot_changes", return_value={}, create=True),
                         patch.object(gittools, "ownership_changes", return_value=(True, "Owned")), patch.object(gittools, "git_identity", return_value={}),
-                        patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0")))]
+                        patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0"))),
+                        patch.object(engine, "_tree", return_value={"head": "h", "changes": {}})]
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)

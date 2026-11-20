@@ -3,7 +3,14 @@ from pathlib import Path
 import subprocess
 
 
-def build_context(repo: Path, files: list[str], limit: int) -> str:
+def build_context(repo: Path, files: list[str], limit: int, approved: dict[str, str] | None = None,
+                  owned: tuple[str, ...] = ()) -> str:
+    """Instructions and a bounded Git summary for a worker. With `approved` (path -> SHA-256 from the locked contract), an
+    instruction file is sent only if it is the approved content; a file the approved plan owns may have been edited by
+    this plan's own workers and is sent marked as such. Recognisable secrets are always redacted."""
+    import hashlib
+    from fnmatch import fnmatchcase
+    from .safety import redact
     root = repo.resolve()
     instructions = []
     candidates = {root / "AGENTS.md", root / "CLAUDE.md"}
@@ -18,7 +25,15 @@ def build_context(repo: Path, files: list[str], limit: int) -> str:
         if path.is_file():
             if path.is_symlink() or not path.resolve().is_relative_to(root):
                 raise ValueError("Repository instructions escaped the selected repository")
-            instructions.append(f"--- {path.relative_to(root)} ---\n{path.read_text(encoding='utf-8')}")
+            relative = path.relative_to(root).as_posix()
+            content = path.read_bytes()
+            label = relative
+            if approved is not None and approved.get(relative) != hashlib.sha256(content).hexdigest():
+                if any(fnmatchcase(relative, pattern) or relative == pattern.rstrip("/") for pattern in owned):
+                    label += " (edited within this approved plan)"
+                else:
+                    raise ValueError(f"Repository instructions changed since approval: {relative}; approve a new plan")
+            instructions.append(f"--- {label} ---\n{redact(content.decode('utf-8'))}")
     mandatory = "\n".join(instructions)
     if len(mandatory) > limit - 1000:
         raise ValueError("Mandatory repository instructions exceed context cap; raise cap instead of dropping them")

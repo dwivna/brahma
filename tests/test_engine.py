@@ -45,6 +45,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(gittools, "ownership_changes", return_value=(True, "Owned")),
             patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0"))),
             patch.object(gittools, "git_identity", return_value={}),
+            patch.object(engine, "_tree", return_value={"head": "h", "changes": {}}),      # the files the checks covered (round 10, finding 6)
         ]
         self.mocks = [p.start() for p in self.patches]
         for p in self.patches:

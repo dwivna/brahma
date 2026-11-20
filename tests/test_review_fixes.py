@@ -82,7 +82,7 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         for p in (patch.object(engine, "_context", return_value="ctx"),
                   patch.object(gittools, "snapshot_changes", return_value={}, create=True),
                   patch.object(gittools, "ownership_changes", return_value=(True, "ok")), patch.object(gittools, "git_identity", return_value={}),
-                  patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "ok")))):
+                  patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "ok"))), patch.object(engine, "_tree", return_value={"head": "h", "changes": {}})):
             p.start()
             self.addCleanup(p.stop)
 
@@ -145,7 +145,9 @@ class Flow(unittest.IsolatedAsyncioTestCase):
     async def test_a_decision_is_cleared_when_the_fresh_review_has_no_high_finding(self):
         await self.run_flow([("b", Result("codex", "ok", "d")), ("r", Result("claude", "ok", review())),
                              ("reply", Result("codex", "ok", reply())), ("r", Result("claude", "ok", review()))])
-        saved = dict(self.states()[-1], dispute_decision="author", phase="review")
+        last = self.states()[-1]
+        # The worktree moved after the decision, so the decided review is not reused: a fresh review runs.
+        saved = dict(last, dispute_decision="author", phase="review", dispute=dict(last["dispute"], tree={"head": "moved"}))
         self.events.clear()
         await self.run_flow([("r", Result("claude", "ok", review("pass", [])))], progress={1: saved})
         self.assertIsNone(self.states()[-1]["dispute_decision"])

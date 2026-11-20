@@ -124,14 +124,17 @@ def usage(events: list[dict]) -> dict:
             "estimated": estimated}
 
 
-def build(store, key: str) -> Board:
+def build(store, key: str, now: float | None = None) -> Board:
+    import time
     from .cli import session_status
     code, status = session_status(store, key)
     saved = store.session(key)
+    now = time.time() if now is None else now
     events = store.events_after(key, 0, 20000)
+    floor = max([e["seq"] for e in events if e["kind"] == "plan_created"], default=0)   # rows of the current plan only
     latest: dict[int, dict] = {}
     for event in events:
-        if event["kind"] == "task_state":
+        if event["kind"] == "task_state" and event["seq"] >= floor:
             try:
                 row = json.loads(event["text"])
             except (ValueError, TypeError):
@@ -143,6 +146,10 @@ def build(store, key: str) -> Board:
         row = latest[index]
         state = str(row.get("state", "unknown"))
         remaining = row.get("remaining_seconds")
+        deadline = row.get("deadline_epoch")
+        if (row.get("active") is True and isinstance(deadline, (int, float)) and not isinstance(deadline, bool)
+                and isinstance(remaining, (int, float))):
+            remaining = min(remaining, max(0.0, deadline - now))   # a running task keeps spending time between checkpoints
         budget = row.get("budget_seconds", TASK_SECONDS)      # the locked per-task budget, not a fixed hour
         if not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget <= 0:
             budget = TASK_SECONDS

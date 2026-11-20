@@ -41,8 +41,15 @@ class Capacity:
                 return {"state": "waiting", "next_at": None, "reason": "Quota blocked; reset time unavailable"}
             self.store.observe(fresh)
             return quota.eligibility(fresh)
-        return quota.eligibility(snapshot) if snapshot else {
-            "state": "unknown", "next_at": None, "reason": "Signed in; remaining Claude allowance not yet reported"}
+        if not snapshot:
+            return {"state": "unknown", "next_at": None, "reason": "Signed in; remaining Claude allowance not yet reported"}
+        decision = quota.eligibility(snapshot)
+        if decision.get("limit_without_reset"):
+            # Claude has no quota probe, so nothing can show the limit has lifted: wait for a newer observation (the status-
+            # line tap) or the person's explicit capacity confirmation, instead of retrying into the same rejection.
+            return {"state": "waiting", "next_at": None,
+                    "reason": "Claude reported a limit without a reset time; after checking, confirm with `/capacity claude`"}
+        return decision
 
 
 def _note(store: Store, session, key: str, text: str) -> None:
@@ -127,7 +134,10 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
             # A pause or the kill switch holds the work; it is not a stop, so the approved job is kept, held until `resume`.
             store.hold(key, session.generation, job["digest"], "Held by a pause or the kill switch; resume to continue")
             return True
-        if result.status != "waiting":
+        current = store.job(key)
+        if result.status != "waiting" and current and current["state"] == "running":
+            # Only a job still marked running is closed here: Session.execute may already have queued (a pause that was
+            # resumed during the run) or held (a pause or the kill switch) its continuation, and that decision stands.
             store.finish_job(key, "cancelled" if store.session(key)["stopped"] else "done")
         return True
     if isinstance(error, ValueError) and "Another Brahma worker" in str(error):

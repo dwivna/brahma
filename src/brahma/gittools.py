@@ -142,7 +142,7 @@ _CACHE_SENSITIVE_PREFIXES = (".env",)
 
 def _ls_ignored(repo: Path, *extra: str) -> list[str]:
     result = subprocess.run([*_GIT, "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
-                            capture_output=True, check=True, timeout=60)
+                            capture_output=True, check=True, timeout=60, env=git_env())
     return [name for name in result.stdout.decode("utf-8", errors="surrogateescape").split("\0") if name]
 
 
@@ -159,7 +159,7 @@ def ignored_paths(repo: Path, allow=None) -> list[str]:
 
     def kept(item: str) -> bool:
         # A `.env*` file is inspected wherever it is, including inside an allowlisted cache nested in another ignored directory.
-        return not _allowed_ignored(item, allow) or Path(item).name.startswith(_CACHE_SENSITIVE_PREFIXES)
+        return not _allowed_ignored(item, allow) or Path(item).name.casefold().startswith(_CACHE_SENSITIVE_PREFIXES)
 
     found = []
     for name in _ls_ignored(repo, "--directory"):
@@ -179,7 +179,7 @@ def status_paths(repo: Path) -> list[str]:
     """Changes `git status` reports (never ignored files); these are the only paths git can stage."""
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
     result = subprocess.run([*_GIT, "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
-                            capture_output=True, check=True, timeout=15)
+                            capture_output=True, check=True, timeout=15, env=git_env())
     chunks = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
     paths, index = [], 0
     while index < len(chunks) and chunks[index]:
@@ -217,7 +217,7 @@ def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:
 
 def hidden_index_entries(worktree: Path) -> list[str]:
     """Tracked paths whose changes `git status` would not show: assume-unchanged (lower-case tag) or skip-worktree (S)."""
-    result = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-v", "-z"], capture_output=True, check=True, timeout=60)
+    result = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-v", "-z"], capture_output=True, check=True, timeout=60, env=git_env())
     hidden = []
     for row in result.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
         if len(row) > 2 and (row[0].islower() or row[0] == "S"):
@@ -265,8 +265,9 @@ _SENSITIVE_PREFIXES = (".env", "credentials", ".credentials")
 
 
 def _sensitive(path: str) -> bool:
+    # Case-folded: on macOS's default case-insensitive filesystem `.ENV` and `.Git` are the same files as `.env` and `.git`.
     return any(part in (".brahma", "custody", ".git") or part.startswith(_SENSITIVE_PREFIXES)
-               or part.endswith((".pem", ".key")) for part in Path(path).parts)
+               or part.endswith((".pem", ".key")) for part in (piece.casefold() for piece in Path(path).parts))
 
 
 def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_allow=None, identity=None) -> tuple[bool, str]:
@@ -301,21 +302,35 @@ def violating_paths(worktree: Path, files: list[str], baseline=None, ignored_all
     return bad
 
 
-def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored_allow=None) -> tuple[list[str], list[str]]:
+def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored_allow=None,
+                       identity: dict | None = None) -> tuple[list[str], list[str]]:
     """Undo attributable worker changes that violate ownership, on the isolated branch only.
 
     A path that was already changed in the prelaunch baseline (a pre-existing edit) cannot be separated from the
     worker's change, so it is never touched and is reported as not restored. A path absent from the baseline was
     clean at launch: tracked files go back to HEAD, new files (including ignored ones) are removed.
+    With the run's starting `identity`, a worker that also committed is undone too: when HEAD has moved, the paths its
+    commits changed are included and every restore uses the starting revision as the source, so the files go back to
+    what they were when the run began (the commits stay in the branch history; readiness is blocked by the moved HEAD).
     Returns (restored, not_restored). Readiness stays blocked either way; this only limits the damage.
     """
     restored, kept = [], []
     root = worktree.resolve()
-    # Exact comparison against the tracked list: a worker-chosen file name is never a pathspec (`:(glob)**`, `*`).
-    listing = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-z"],
-                             capture_output=True, check=True, timeout=60).stdout
+    candidates = list(violating_paths(worktree, files, baseline, ignored_allow))
+    source = "HEAD"
+    original = (identity or {}).get("head")
+    if original and git(worktree, "rev-parse", "HEAD") != original:
+        source = original
+        committed = subprocess.run([*_GIT, "-C", str(worktree), "diff", "--name-only", "-z", original, "HEAD"],
+                                   capture_output=True, check=True, timeout=60, env=git_env()).stdout
+        for name in committed.decode("utf-8", errors="surrogateescape").split("\0"):
+            if name and name not in candidates and (not any(ownership.owns(p, name) for p in files) or _sensitive(name)):
+                candidates.append(name)
+    # Exact comparison against the source revision's file list: a worker-chosen name is never a pathspec (`:(glob)**`).
+    listing = subprocess.run([*_GIT, "-C", str(worktree), "ls-tree", "-r", "--name-only", "-z", source],
+                             capture_output=True, check=True, timeout=60, env=git_env()).stdout
     tracked_files = set(listing.decode("utf-8", errors="surrogateescape").split("\0"))
-    for name in violating_paths(worktree, files, baseline, ignored_allow):
+    for name in candidates:
         target = worktree / name
         if name in baseline:
             kept.append(name)
@@ -326,8 +341,10 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
         tracked = name in tracked_files
         try:
             if tracked:
-                git(worktree, "restore", "--source=HEAD", "--staged", "--worktree", "--", name)
+                git(worktree, "restore", "--source=" + source, "--staged", "--worktree", "--", name)
             elif target.is_symlink() or target.is_file():
+                if source != "HEAD":
+                    git(worktree, "rm", "-q", "--cached", "--ignore-unmatch", "--", name)   # added by a worker commit
                 target.unlink()
             elif target.is_dir():
                 kept.append(name)

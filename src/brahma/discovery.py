@@ -103,7 +103,8 @@ def selected_instructions(entries: Iterable[Definition], identifiers: Iterable[s
         digest = hashlib.sha256(content).hexdigest()
         if digest != entry.sha256:
             raise ValueError(f"Definition changed since approval: {identifier}")
-        text = content.decode("utf-8")
+        from .safety import redact
+        text = redact(content.decode("utf-8"))
         output.append(f"\nApproved {identifier} [sha256:{digest}]\n"
                       "State: instruction-loaded; native customization disabled; no child spawning.\n"
                       f"{text}\nEnd approved {identifier}\n")

@@ -32,6 +32,51 @@ def displayable(text: str) -> str:
 CONTROL = re.compile(r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))|[\x00-\x08\x0b-\x1f\x7f]")
 
 
+def approval_view(contract: dict) -> list[str]:
+    """Everything a person must see before approving, rendered from the locked contract itself (not from session state),
+    one sanitised line per item. Used by the CLI and the terminal UI alike."""
+    from . import toolchain
+    from .config import run_settings_line
+    payload = contract["payload"]
+    plan = Plan.parse(json.dumps(payload["plan"]))
+    lines = [f"Contract {contract['digest']}", f"Repository: {payload['repository']}",
+             f"Base revision: {payload['base_revision']}", "Goal: " + plan.summary]
+    for number, task in enumerate(plan.tasks, 1):
+        lines += [f"{number}. {task.title} [{task.provider}/{task.complexity}]", "   Owns: " + ", ".join(task.files),
+                  "   Acceptance: " + "; ".join(task.acceptance), "   Instructions to the worker:"]
+        lines += ["      " + line for line in task.instructions.splitlines() if line.strip()]
+        for kind, ids in (("skills", task.allowed_skills), ("agents", task.allowed_agents)):
+            if ids:
+                lines.append(f"   Loads {kind}: " + ", ".join(ids))
+    for identifier, entry in sorted(payload.get("definitions", {}).items()):
+        lines.append(f"Definition {identifier}: {entry['scope']} {entry['path']} sha256:{entry['sha256'][:16]}")
+    instructions = payload.get("instructions", {})
+    lines.append("Repository instructions: " + (", ".join(sorted(instructions)) if instructions else "none"))
+    lines.append("Gherkin feature:")
+    lines += ["   " + line for line in payload["feature"].splitlines() if line.strip()]
+    lines.append("Checks: " + (json.dumps(payload["checks"]) if payload["checks"] else "none (cannot become ready)"))
+    lines += toolchain.describe(payload.get("toolchain", {}))
+    models = payload["models"]
+    lines.append(run_settings_line(models))
+    risky = sorted({c[0].rsplit("/", 1)[-1] for c in payload["checks"]
+                    if c and c[0].rsplit("/", 1)[-1] in ("sh", "bash", "zsh", "curl", "wget", "nc", "ssh", "scp")})
+    if risky:
+        lines.append("WARNING: approved checks run these shell or network programs on this computer: " + ", ".join(risky))
+    selection = models.get("selection")
+    for provider in ("codex", "claude"):
+        for suffix, purpose in (("_model", "routine"), ("_critical_model", "critical")):
+            field = provider + suffix
+            detail = selection["profiles"][field] if selection else None
+            chosen = detail["selected"] if detail else models.get(field)
+            state = ("advertised" if detail and detail["verified"] else
+                     "unavailable" if detail and detail["available"] is False else "unverified")
+            lines.append(f"Model: {provider} {purpose} = {chosen or 'unavailable'} ({state})")
+    budget = payload["task_budget"]
+    lines.append(f"Budget: {budget['active_seconds'] / 60:g} active minutes per task, at most {budget['repair_cycles']} "
+                 "repairs; quota waiting excluded")
+    return [safety.redact(displayable(line)) for line in lines]
+
+
 class Session:
     def __init__(self, store: Store, repo: Path, emit=lambda event: None, key: str | None = None):
         self.store, self.repo, self.callback = store, gittools.repository(repo), emit
@@ -184,6 +229,7 @@ class Session:
         with self.lock():
             active = Path(saved["worktree"]) if saved["worktree"] else self.repo
             from .scheduler import Capacity
+            saved = dict(saved, control=self.store.last_control(self.key))
             monitor = asyncio.create_task(self._watch_halt(since=saved))
             try:
                 selection = await self.discover_model_profiles()
@@ -299,31 +345,9 @@ class Session:
                           f"in repository '{label}'")
 
     def approval_summary(self) -> tuple[str, list[str]]:
-        """Everything a person must see before approving, from the locked contract itself: (digest, lines)."""
-        from . import toolchain
-        from .config import run_settings_line
+        """(digest, lines) for the contract that approve() would approve now."""
         contract, _ = self._approval_target()
-        payload = contract["payload"]
-        lines = [f"Contract {contract['digest']}", f"Repository: {payload['repository']}",
-                 f"Base revision: {payload['base_revision']}", "Goal: " + self.plan.summary]
-        for number, task in enumerate(self.plan.tasks, 1):
-            lines += [f"{number}. {task.title} [{task.provider}/{task.complexity}]", "   Owns: " + ", ".join(task.files),
-                      "   Acceptance: " + "; ".join(task.acceptance)]
-            for kind, ids in (("skills", task.allowed_skills), ("agents", task.allowed_agents)):
-                if ids:
-                    lines.append(f"   Loads {kind}: " + ", ".join(ids))
-        for identifier, entry in sorted(payload.get("definitions", {}).items()):
-            lines.append(f"Definition {identifier}: {entry['scope']} {entry['path']} sha256:{entry['sha256'][:16]}")
-        instructions = payload.get("instructions", {})
-        lines.append("Repository instructions: " + (", ".join(sorted(instructions)) if instructions else "none"))
-        lines.append("Gherkin feature:")
-        lines += ["   " + line for line in payload["feature"].splitlines() if line.strip()]
-        lines.append("Checks: " + (json.dumps(payload["checks"]) if payload["checks"] else "none (cannot become ready)"))
-        lines += toolchain.describe(payload.get("toolchain", {}))
-        lines.append(run_settings_line(payload["models"]))
-        budget = payload["task_budget"]
-        lines.append(f"Budget: {budget['active_seconds'] / 60:g} active minutes per task, at most {budget['repair_cycles']} repairs")
-        return contract["digest"], [safety.redact(displayable(line)) for line in lines]
+        return contract["digest"], approval_view(contract)
 
     def _record_approval(self, digest: str) -> str:
         again, _, _ = self.approved_contract()           # nothing may change while the prompt was open
@@ -386,9 +410,10 @@ class Session:
         if self.store.killed:
             return "Kill switch engaged"
         now = self.store.session(self.key)
-        if now["stopped"] and not since["stopped"]:
+        fresh = self.store.controls_after(self.key, since.get("control", 0))   # a repeated stop/pause also counts
+        if now["stopped"] and ("stop" in fresh or not since["stopped"]):
             return "Stopped by user"
-        if now["paused"] and not since["paused"]:
+        if now["paused"] and ("pause" in fresh or not since["paused"]):
             return "Paused by user"
         return None
 
@@ -562,8 +587,16 @@ class Session:
                 if result.status == "ready":
                     ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files],
                                                              ignored_allow=self.settings.ignored_allowlist, identity=identity)
+                    try:
+                        same = result.tree is not None and engine._tree(worktree, self.settings) == result.tree
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        same = False
                     if not ok:
                         result = Result("brahma", "blocked", message)
+                    elif not same:
+                        # Readiness covers exactly what was checked and reviewed; never commit or publish anything else.
+                        result = Result("brahma", "blocked", "Files changed after they were checked and reviewed; "
+                                        "nothing was committed. Resume to check and review them again.", result.usage)
                     elif self.settings.auto_commit:
                         commit = gittools.commit_changes(worktree, self.plan.summary, identity)
                         result.text += "\nLocal commit: " + commit

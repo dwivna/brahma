@@ -162,8 +162,10 @@ class SessionFlow(unittest.TestCase):
         approve(self.session)
         published = []
 
-        async def engine_run(*args, **kwargs):
-            return Result("brahma", "ready", "done")
+        async def engine_run(plan, worktree, settings, *args, **kwargs):
+            ready = Result("brahma", "ready", "done")
+            ready.tree = engine._tree(worktree, settings)          # what the checks and review covered
+            return ready
 
         def publish(worktree, summary, body, expected_head):
             published.append(expected_head)
@@ -175,10 +177,29 @@ class SessionFlow(unittest.TestCase):
         self.assertEqual(published, [receipt["head"]])
         self.assertIn("Draft PR", result.text)
 
+    def test_a_file_changed_after_verification_is_never_committed_or_published(self):
+        # Round 10, finding 6: readiness is bound to the exact contents that were checked and reviewed.
+        (self.session.repo / "brahma.toml").write_text('[brahma]\npublish=true\nchecks=[["true"]]\n')
+        self.session.set_plan(Plan("Goal", [Task("T", "do", ["a.txt"], ["ok"])], checks=[["true"]]))
+        approve(self.session)
+
+        async def engine_run(plan, worktree, settings, *args, **kwargs):
+            ready = Result("brahma", "ready", "done")
+            ready.tree = engine._tree(worktree, settings)
+            (worktree / "a.txt").write_text("changed after review\n")     # owned, but never checked or reviewed
+            return ready
+        with patch("brahma.engine.execute", engine_run), \
+                patch("brahma.gittools.publish", side_effect=AssertionError("published unverified files")), \
+                patch("brahma.gittools.commit_changes", side_effect=AssertionError("committed unverified files")):
+            result = asyncio.run(self.session.execute())
+        self.assertEqual(result.status, "blocked")
+        self.assertIn("changed after they were checked", result.text)
+
     def test_the_approval_display_shows_what_the_digest_covers(self):
         _, lines = self.session.approval_summary()
         text = "\n".join(lines)
-        for expected in ("Base revision: ", "Gherkin feature:", "Repository instructions:", "Owns: a.txt", "Run settings:"):
+        for expected in ("Base revision: ", "Gherkin feature:", "Repository instructions:", "Owns: a.txt", "Run settings:",
+                         "Instructions to the worker:", "Model: codex routine"):
             self.assertIn(expected, text)
 
 

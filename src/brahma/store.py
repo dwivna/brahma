@@ -119,19 +119,15 @@ class Store:
                                "ready_receipt"})
 
     def event(self, session: str, event) -> None:
-        if event.kind == "task_state" and isinstance(event.text, str):
-            # Structured, but its free-text fields carry check output and reviewer text: redact those fields only.
-            from . import safety
+        from . import safety
+        if event.kind in self.STRUCTURED_EVENTS and isinstance(event.text, str):
+            # Structured JSON read back by the coordinator: every string inside it is redacted (reviews, check output and
+            # dispute positions can be nested), keys and numbers are kept so the structure still parses.
             try:
-                row = json.loads(event.text)
-                for name in ("summary", "feedback"):
-                    if isinstance(row.get(name), str):
-                        row[name] = safety.redact(row[name])
-                event.text = json.dumps(row, ensure_ascii=False)
-            except (ValueError, TypeError, AttributeError):
+                event.text = json.dumps(safety.redact_deep(json.loads(event.text)), ensure_ascii=False)
+            except (ValueError, TypeError):
                 event.text = safety.redact(event.text)
-        if event.kind not in self.STRUCTURED_EVENTS and isinstance(event.text, str):
-            from . import safety
+        elif isinstance(event.text, str):
             event.text = safety.redact(event.text)  # the one chokepoint before events reach logs and screens
         self.db.execute("INSERT INTO events(session,created,provider,role,kind,text,usage) VALUES(?,?,?,?,?,?,?)",
                         (session, self.now(), event.provider, event.role, event.kind, event.text,
@@ -173,13 +169,29 @@ class Store:
     def stop(self, session: str) -> None:
         self.db.execute("UPDATE sessions SET stopped=1 WHERE id=?", (session,))
         self.db.execute("UPDATE jobs SET state='cancelled' WHERE session=?", (session,))
-        self.db.commit()
+        self._control(session, "stop")
 
     def pause(self, session: str) -> None:
         """Hold a session: its approval and queued job are kept, but nothing runs until resume()."""
         self.session(session)
         self.db.execute("UPDATE sessions SET paused=1 WHERE id=?", (session,))
+        self._control(session, "pause")
+
+    def _control(self, session: str, action: str) -> None:
+        """Record each stop/pause as an event, so a repeated stop is seen even when the flag was already set."""
+        self.db.execute("INSERT INTO events(session,created,provider,role,kind,text,usage) VALUES(?,?,?,?,?,?,?)",
+                        (session, self.now(), "brahma", "user", "control", action, "{}"))
         self.db.commit()
+
+    def last_control(self, session: str) -> int:
+        """Sequence number of the latest stop/pause for a session (0 if none)."""
+        row = self.db.execute("SELECT MAX(seq) FROM events WHERE session=? AND kind='control'", (session,)).fetchone()
+        return row[0] or 0
+
+    def controls_after(self, session: str, seq: int) -> set[str]:
+        """The stop/pause actions recorded for a session after event `seq`."""
+        return {row[0] for row in self.db.execute(
+            "SELECT text FROM events WHERE session=? AND kind='control' AND seq>?", (session, seq))}
 
     def resume(self, session: str) -> bool:
         """Release a pause and re-queue the session's held continuation, if any. Never while the kill switch is engaged.

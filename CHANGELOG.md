@@ -36,12 +36,26 @@ security reviews that followed.
   quick resume keeps the work queued; automatic publication works and pushes the verified commit; the approval display
   shows the base revision, the Gherkin feature, loaded definitions and instructions; command output is redacted; the
   Codex builder banner no longer claims writes are confined.
+- Independent review round 10: every Git query Brahma makes ignores a redirected repository, index or configuration
+  from the environment; secrets nested anywhere in stored events (including dispute reviews) and in `brahma events`
+  output are redacted; repository instructions and selected definitions are redacted before they reach a worker, and a
+  plan or check containing a credential-shaped value is refused before approval; workers receive repository instructions
+  only if they match the approved fingerprints (an instruction file the plan owns may change within that plan, marked);
+  the terminal UI shows the same complete contract view as the CLI (including worker instructions and models) and
+  approves only the digest it displayed; readiness, the local commit and publication are bound to the exact files the
+  checks and review covered (files changed during review are checked and reviewed again); `/kill` stops orphaned
+  worker groups like `brahma kill`; a repeated stop during planning is seen; an unowned edit that a worker also
+  committed is restored from the run's starting revision; sensitive names are matched case-insensitively (`.ENV`);
+  `worker` and `statusline` refuse `--json` with a JSON error; a scheduled run paused and quickly resumed keeps its
+  continuation; a Claude limit without a reset time waits for a newer observation or capacity confirmation; the live
+  board's active time advances between checkpoints and shows only the current plan; measured time and usage per task
+  include earlier continuations.
 
 **Known limits shipped with 1.0.0 (not hidden by the version number)**
 - Toolchain binding covers the check program, its JDK and the startup files and variables listed under 0.13.0. Other
-  environment inputs that Maven or Gradle read outside the checkout are not all bound. The last independent review (Codex,
-  round 7) still reported HIGH findings of this kind; the fixes made after it ("disable rather than enumerate", Gradle fail-closed)
-  were tested but not re-reviewed independently. Worker edits to files it does not own are restored and block readiness regardless.
+  environment inputs that Maven or Gradle read outside the checkout are not all bound. The round-7 findings of this kind
+  were fixed ("disable rather than enumerate", Gradle fail-closed) and independent review round 10 confirmed them closed
+  within that stated coverage. Worker edits to files it does not own are restored and block readiness regardless.
 - Hashing and executing a program are two steps, not atomic. Fingerprints cover the launched file, not everything it loads.
   Checks are not sandboxed.
 - Human-only actions need macOS Touch ID or the login password; they protect Brahma's own commands. A process running as

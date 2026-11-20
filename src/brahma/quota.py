@@ -199,13 +199,13 @@ def eligibility(snapshot: dict | None, now: float | None = None) -> dict:
         if exhausted:
             return decision("waiting", "Provider-reported exhausted quota window", max(exhausted))
         if unknown_reset:
-            return decision("unknown", "Provider reported a limit without a reset time")
+            return {**decision("unknown", "Provider reported a limit without a reset time"), "limit_without_reset": True}
         if passed_reset:
             return decision("unknown", "Reported quota window reset; recheck capacity", current)
         if current - observed > FRESH_SECONDS:
             return decision("unknown", "Quota observation is stale; recheck capacity", current)
         if blocked is True:
-            return decision("unknown", "Provider reported a limit; reset is unknown")
+            return {**decision("unknown", "Provider reported a limit; reset is unknown"), "limit_without_reset": True}
         if blocked is False and windows and not snapshot.get("error"):
             return decision("available", "Recent provider observation permits work")
         return decision("unknown", "Provider did not expose remaining quota")

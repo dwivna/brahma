@@ -112,7 +112,7 @@ class Engine(unittest.IsolatedAsyncioTestCase):
         self.prompts, self.events = [], []
         for p in (patch.object(engine, "_context", return_value="ctx"),
                   patch.object(gittools, "ownership_changes", return_value=(True, "Owned")), patch.object(gittools, "git_identity", return_value={}),
-                  patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "ok")))):
+                  patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "ok"))), patch.object(engine, "_tree", return_value={"head": "h", "changes": {}})):
             p.start()
             self.addCleanup(p.stop)
 

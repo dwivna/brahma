@@ -125,6 +125,12 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
     if type(repair_cycles) is not int or not 0 <= repair_cycles <= 3:
         raise ValueError("At most three repair cycles are permitted")
     selected_checks = checks if checks is not None else plan.checks
+    from .safety import argv_looks_secret, looks_secret
+    plan_text = [value for task in plan.tasks for value in (task.title, task.instructions, *task.acceptance, *task.scenarios)
+                 if isinstance(value, str)] + [plan.summary]
+    if any(looks_secret(value) for value in plan_text) or any(argv_looks_secret(command) for command in selected_checks or []):
+        raise ValueError("The plan or its checks contain a credential-shaped value; remove it before approval "
+                         "(it would be stored in the contract and sent to workers)")
     # Reuse the argv schema validator; no shell-string conversion is accepted.
     Plan.parse(json.dumps({**plan.to_dict(), "checks": selected_checks}))
     if checks is not None and plan.checks and selected_checks != plan.checks:

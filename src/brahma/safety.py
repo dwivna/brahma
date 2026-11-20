@@ -45,6 +45,17 @@ def _hide(match: "re.Match[str]") -> str:
     return match.group(0).replace(value, REDACTED) if value else REDACTED
 
 
+def redact_deep(value):
+    """redact() applied to every string inside JSON-like data (dict keys are names, not data, and are kept)."""
+    if isinstance(value, str):
+        return redact(value)
+    if isinstance(value, dict):
+        return {key: redact_deep(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [redact_deep(item) for item in value]
+    return value
+
+
 def redact(text: str) -> str:
     """Remove secret-looking values; keeps names so a reader can still see what was hidden."""
     text = _ENV_LINE.sub(lambda m: m.group(1) + REDACTED, text)

@@ -42,7 +42,8 @@ def brief(task: Task, packet: handoff.Packet | None) -> str:
     data = asdict(task)
     if packet is not None:
         data["handoff_packet"] = packet.to_dict()
-    return json.dumps(data, ensure_ascii=False)
+    from .safety import redact_deep
+    return json.dumps(redact_deep(data), ensure_ascii=False)
 
 
 def missing_context(text: str) -> list[str]:

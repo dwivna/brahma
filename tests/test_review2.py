@@ -71,7 +71,9 @@ class ApprovalScreen(unittest.TestCase):
             path.write_text(json.dumps({"version": contract["version"], "payload": contract["payload"], "digest": contract["digest"]}))
             path.with_suffix(".feature").write_text(contract["payload"]["feature"])
             written = []
-            app = SimpleNamespace(session=SimpleNamespace(key="k", settings=settings),
+            from brahma.session import approval_view
+            app = SimpleNamespace(session=SimpleNamespace(key="k", settings=settings,
+                                                          approval_summary=lambda: (contract["digest"], approval_view(contract))),
                                   store=SimpleNamespace(session=lambda key: {"contract": str(path)}), write=written.append)
             BrahmaApp.show_plan(app, plan)
         return "\n".join(e.text for e in written)
@@ -95,7 +97,7 @@ class ApprovalScreen(unittest.TestCase):
         self.assertIn("no automatic commit", self.render(Settings(auto_commit=False), [["pytest"]]))
 
     def test_the_budget_line_shows_the_locked_budget(self):
-        self.assertIn("Budget: 10 active minutes/task; at most 2 repairs", self.render(Settings(task_timeout=600, repair_cycles=2), [["pytest"]]))
+        self.assertIn("Budget: 10 active minutes per task, at most 2 repairs", self.render(Settings(task_timeout=600, repair_cycles=2), [["pytest"]]))
 
 
 if __name__ == "__main__":

@@ -242,7 +242,8 @@ brahma memory forget --yes   # delete its memory and routing history only
 
 Add `--json` before any command (or a command's own `--json`) and every result or error is exactly one JSON object
 with `ok` and `exit_code`; `brahma events` prints one JSON object per line. `models` and `usage` put their report
-under `models` / `usage`; `plan` returns the session key and what it needs next.
+under `models` / `usage`; `plan` returns the session key and what it needs next. `worker` (the service loop) and
+`statusline` (Claude Code's status line) have no result object and refuse `--json` with a JSON usage error.
 
 ```sh
 brahma --json status SESSION_ID          # where it stands; exit code is the outcome

@@ -27,6 +27,7 @@ class Result:
     usage: dict[str, Any] = field(default_factory=dict)
     session_id: str | None = None
     seconds: float = 0.0
+    tree: dict | None = None        # for "ready": HEAD and changed-file fingerprints that the checks and review covered
 
 
 @dataclass

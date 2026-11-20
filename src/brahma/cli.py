@@ -177,7 +177,8 @@ def stream_events(store: Store, key: str, after: int, follow: bool) -> int:
         while True:
             batch = store.events_after(key, after)
             for event in batch:
-                print(json.dumps(event, ensure_ascii=False), flush=True)
+                from .safety import redact_deep
+                print(json.dumps(redact_deep(event), ensure_ascii=False), flush=True)
                 after = event["seq"]
             if not follow:
                 break
@@ -284,6 +285,12 @@ def _main(argv):
     as_json = args.json_output or bool(getattr(args, "json", False))
     if args.json_output and args.command is None:
         raise ValueError("--json needs a command; the interactive terminal has no JSON mode")
+    if as_json and args.command in ("worker", "statusline"):
+        # worker is the background service loop; statusline's output is Claude Code's status line. Neither has a result
+        # object, so JSON is refused explicitly rather than silently ignored.
+        return fail(f"`{args.command}` has no JSON output: "
+                    + ("it is the background service loop" if args.command == "worker"
+                       else "its output is Claude Code's status line"), exitcodes.USAGE, True)
     if args.command == "models":
         from .model_selection import format_models, read_models
         try:
@@ -374,12 +381,12 @@ def _main(argv):
             return report({"kill": False, "changed": changed, "held_jobs": held},
                           f"Kill switch released. Nothing restarts by itself: {held} approved job(s) are held; "
                           "`brahma resume SESSION` continues one.")
-        halt.engage(home)
-        from . import procs
-        stopped, _ = procs.reap(home, everything=True)        # including workers whose coordinator already died
-        return report({"kill": True, "changed": True, "stopped_worker_groups": len(stopped)},
+        stopped, survivors = halt.kill_everything(home)       # including workers whose coordinator already died
+        return report({"kill": True, "changed": True, "stopped_worker_groups": len(stopped),
+                       "surviving_worker_groups": survivors},
                       "Kill switch engaged: running workers stop at their next check (within seconds), "
-                      "no new work starts, and Git writes are refused. Approvals are kept.")
+                      "no new work starts, and Git writes are refused. Approvals are kept."
+                      + (f" WARNING: {len(survivors)} worker group(s) could not be stopped: {survivors}" if survivors else ""))
     if args.command in ("pause", "resume", "stop"):
         store = Store(home)
         try:
