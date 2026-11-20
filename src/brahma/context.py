@@ -9,7 +9,7 @@ def build_context(repo: Path, files: list[str], limit: int, approved: dict[str, 
     instruction file is sent only if it is the approved content; a file the approved plan owns may have been edited by
     this plan's own workers and is sent marked as such. Recognisable secrets are always redacted."""
     import hashlib
-    from fnmatch import fnmatchcase
+    from . import ownership
     from .safety import redact
     root = repo.resolve()
     instructions = []
@@ -29,7 +29,7 @@ def build_context(repo: Path, files: list[str], limit: int, approved: dict[str, 
             content = path.read_bytes()
             label = relative
             if approved is not None and approved.get(relative) != hashlib.sha256(content).hexdigest():
-                if any(fnmatchcase(relative, pattern) or relative == pattern.rstrip("/") for pattern in owned):
+                if any(ownership.owns(pattern, relative) for pattern in owned):   # the same matcher ownership checks use
                     label += " (edited within this approved plan)"
                 else:
                     raise ValueError(f"Repository instructions changed since approval: {relative}; approve a new plan")

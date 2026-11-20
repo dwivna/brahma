@@ -85,6 +85,15 @@ class Finding4InstructionBinding(unittest.TestCase):
             # An instruction file the approved plan itself owns may change within that plan, and says so.
             text = build_context(repo, ["x.txt"], 20000, approved=approved, owned=("AGENTS.md",))
             self.assertIn("edited within this approved plan", text)
+            # Ownership is decided by Brahma's ownership matcher, where `*` never crosses a directory: `docs/*` does not own
+            # docs/sub/AGENTS.md, so a changed nested instruction file is refused rather than sent as plan-owned.
+            nested = repo / "docs" / "sub"
+            nested.mkdir(parents=True)
+            (nested / "AGENTS.md").write_text("nested rules\n")
+            approved["docs/sub/AGENTS.md"] = hashlib.sha256(b"approved nested\n").hexdigest()
+            (repo / "AGENTS.md").write_text("approved rules\n")
+            with self.assertRaisesRegex(ValueError, "changed since approval: docs/sub/AGENTS.md"):
+                build_context(repo, ["docs/sub/page.md"], 20000, approved=approved, owned=("docs/*",))
 
 
 class Finding5TerminalApproval(unittest.TestCase):
