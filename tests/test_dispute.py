@@ -67,8 +67,10 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         self.events, self.calls = [], []
         self.patches = [patch.object(engine, "_context", return_value="ctx"),
                         patch.object(gittools, "snapshot_changes", return_value={}, create=True),
-                        patch.object(gittools, "ownership_changes", return_value=(True, "Owned")),
-                        patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0")))]
+                        patch.object(gittools, "ownership_changes", return_value=(True, "Owned")), patch.object(gittools, "git_identity", return_value={}),
+                        patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0"))),
+                        patch.object(engine, "_tree", side_effect=lambda worktree, settings: dict(self.tree))]
+        self.tree = {"head": "abc", "changes": {"src/t.py": "100644:1"}}
         for p in self.patches:
             p.start()
             self.addCleanup(p.stop)
@@ -139,10 +141,40 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         saved = dict(self.last_state(), dispute_decision="author", phase="review")
         self.events.clear()
         self.calls.clear()
-        result = await self.run_flow([("reviewer", Result("claude", "ok", review_text()))], progress={1: saved})
+        # The tree is unchanged since the decision, so the decided review is applied as it was: no new review, no reply.
+        result = await self.run_flow([], progress={1: saved})
         self.assertEqual(result.status, "ready")
         self.assertEqual(len([e for e in self.events if e.kind == "dispute_overruled"]), 1)
-        self.assertNotIn("reply", [c[1] for c in self.calls])            # still no second reply
+        self.assertEqual(self.calls, [])
+
+    async def test_an_old_decision_never_overrules_new_high_findings(self):
+        # Review round 8, finding 2: the owner overruled finding A; a later review reports a different HIGH finding B.
+        await self.run_flow([("builder", Result("codex", "ok", "d")), ("reviewer", Result("claude", "ok", review_text())),
+                             ("reply", Result("codex", "ok", reply_text())),
+                             ("reviewer", Result("claude", "ok", review_text()))])
+        saved = dict(self.last_state(), dispute_decision="author", phase="review")
+        self.events.clear()
+        self.calls.clear()
+        self.tree = {"head": "abc", "changes": {"src/t.py": "100644:2"}}          # the worktree moved after the decision
+        other = json.dumps({"verdict": "changes_requested", "summary": "New problem",
+                            "issues": [{"id": "F9", "severity": "high", "text": "SQL injection in query builder"}]})
+        result = await self.run_flow([("reviewer", Result("claude", "ok", other)),
+                                      ("builder", Result("codex", "ok", "fixed")),
+                                      ("reviewer", Result("claude", "ok", review_text("pass", [])))], progress={1: saved})
+        self.assertEqual([e for e in self.events if e.kind == "dispute_overruled"], [])
+        self.assertTrue([e for e in self.events if e.kind == "dispute_void"])
+        self.assertIn("SQL injection", self.calls[1][2])           # the new finding went to repair, not to the old decision
+        self.assertEqual(result.status, "ready")
+
+    async def test_a_decision_on_one_set_of_findings_does_not_apply_to_a_different_set(self):
+        state = {"dispute": {"state": "escalated", "findings": engine._findings_key([{"severity": "high", "text": "A", "path": None}])},
+                 "dispute_decision": "author", "reply_used": True}
+        review = {"verdict": "changes_requested", "summary": "s", "issues": [{"id": "F1", "severity": "high", "text": "B"}]}
+        kind, payload = await engine._dispute_round(1, Task("T", "do", ["src/t.py"], ["ok"], "codex"), "codex", "claude", review,
+                                                    Path("/repo"), Settings(), lambda e: None, asyncio.Event(), 0, {1: state},
+                                                    None, {}, 0)
+        self.assertEqual(kind, "repair")
+        self.assertIsNone(state["dispute_decision"])
 
     async def test_deciding_for_the_reviewer_sends_the_task_back_to_repair(self):
         await self.run_flow([("builder", Result("codex", "ok", "d")), ("reviewer", Result("claude", "ok", review_text())),
@@ -151,8 +183,7 @@ class Flow(unittest.IsolatedAsyncioTestCase):
         saved = dict(self.last_state(), dispute_decision="reviewer", phase="review")
         self.events.clear()
         self.calls.clear()
-        result = await self.run_flow([("reviewer", Result("claude", "ok", review_text())),
-                                      ("builder", Result("codex", "ok", "fixed")),
+        result = await self.run_flow([("builder", Result("codex", "ok", "fixed")),
                                       ("reviewer", Result("claude", "ok", review_text("pass", [])))], progress={1: saved})
         self.assertEqual(result.status, "ready")
         self.assertNotIn("reply", [c[1] for c in self.calls])

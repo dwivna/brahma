@@ -156,7 +156,7 @@ class EngineMapping(unittest.IsolatedAsyncioTestCase):
         task = Task("Implement", "do it", ["Implement.py"], ["works"], "codex", "routine")
         with patch.object(engine, "_context", return_value="ctx"), patch.object(
                 gittools, "snapshot_changes", return_value={}), patch.object(
-                gittools, "ownership_changes", return_value=(True, "ok")), patch.object(
+                gittools, "ownership_changes", return_value=(True, "ok")), patch.object(gittools, "git_identity", return_value={}), patch.object(
                 gittools, "run_checks", AsyncMock(return_value=(True, "ok"))), patch.object(
                 engine.providers, "run", run):
             result = await engine.execute(Plan("Goal", [task]), Path("/repo"), Settings(checks=[["true"]]),

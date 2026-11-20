@@ -71,7 +71,7 @@ class Parsing(unittest.TestCase):
 class Commands(unittest.TestCase):
     def test_usage_is_readable_or_json_without_plans_or_model_calls(self):
         report = {"observed_at": 1000, "providers": [], "cancelled": False}
-        for argv in (("usage",), ("usage", "codex", "--json")):
+        for argv in (("usage",), ("usage", "codex", "--json"), ("--json", "usage", "codex")):
             with self.subTest(argv=argv), tempfile.TemporaryDirectory() as tmp, \
                     patch("brahma.usage.read_usage", new_callable=AsyncMock, return_value=report) as read, \
                     patch("brahma.usage.format_usage", return_value="Quota unknown"), \
@@ -79,7 +79,10 @@ class Commands(unittest.TestCase):
                 code, out, err = run_cli(*argv, state=Path(tmp)/"state")
                 self.assertEqual((code, err), (0, ""))
                 self.assertEqual(read.await_args.args[1], ("codex",) if "codex" in argv else ("codex", "claude"))
-                self.assertEqual(json.loads(out), report) if "--json" in argv else self.assertIn("Quota unknown", out)
+                if "--json" in argv:      # one envelope whichever --json is used (review round 8, finding 12)
+                    self.assertEqual(json.loads(out), {"usage": report, "ok": True, "exit_code": 0})
+                else:
+                    self.assertIn("Quota unknown", out)
                 store = Store(Path(tmp)/"state")
                 try:
                     self.assertEqual(store.recent(), [])

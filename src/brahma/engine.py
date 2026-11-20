@@ -42,6 +42,20 @@ def _packet(settings, task: Task, index: int, phase: str, worktree, check_result
         return None
 
 
+def _findings_key(items: list[dict]) -> str:
+    """Identity of a set of high-severity findings: a decision made on one set never covers another."""
+    import hashlib
+    rows = sorted((str(i.get("severity")), str(i.get("text")), str(i.get("path"))) for i in items)
+    return hashlib.sha256(json.dumps(rows, ensure_ascii=False).encode()).hexdigest()[:32]
+
+
+def _tree(worktree: Path, settings: Settings) -> dict:
+    """What the reviewer saw: HEAD plus every changed path's content fingerprint."""
+    from .gittools import git, snapshot_changes
+    return {"head": git(Path(worktree), "rev-parse", "HEAD"),
+            "changes": snapshot_changes(Path(worktree), settings.ignored_allowlist)}
+
+
 def _with_leftovers(kind: str, passed: dict, items: list[dict]):
     """Withdrawing or overruling the high findings must not silently drop the medium and low ones: repair those."""
     rest = [item for item in items if item["severity"] != "high"]
@@ -61,6 +75,10 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
     top = dispute.high(items)
     state = budgets[index]
     decision = state.get("dispute_decision")
+    if decision and (state.get("dispute") or {}).get("findings") != _findings_key(top):
+        # Abhinav decided on other findings; these new ones get the normal path, never the old decision.
+        decision = None
+        state["dispute_decision"] = None
     if decision == "author":
         state.update(dispute={"state": "resolved", "decision": "author"}, dispute_decision=None)
         _emit(emit, "dispute_overruled", f"Abhinav sided with the author on {len(top)} high-severity finding(s); recorded.")
@@ -78,6 +96,7 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
             return "repair", review
     author_settings = _settings_for(settings, builder, task.complexity)
     prompt = _BOUNDARIES + "\n" + dispute.reply_prompt(brief, top)
+    state["worker_ran"] = True
     replied = await providers.run(builder, prompt, worktree, "reply", author_settings, emit, cancel,
                                   max(0, deadline - time.monotonic()))
     usage[f"task_{index}_attempt_{attempt}_reply"] = replied.usage
@@ -112,8 +131,14 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
         position = dispute.positions(top, replies, second)
         text = dispute.describe(position)
         import hashlib
+        try:
+            seen = _tree(worktree, settings)
+        except (OSError, ValueError, subprocess.SubprocessError):
+            seen = None                      # unknown tree: a later decision can never be reused against it
         state["dispute"] = {"state": "escalated", "text": text, "position": position,
-                            "digest": hashlib.sha256(text.encode()).hexdigest()[:32]}
+                            "digest": hashlib.sha256(text.encode()).hexdigest()[:32],
+                            "findings": _findings_key(dispute.high(dispute.findings(second))),
+                            "review": second, "tree": seen}
         _emit(emit, "disagreement", json.dumps({"index": index, "text": text, "position": position}, ensure_ascii=False))
         return "escalate", text
     return "repair", second
@@ -304,10 +329,13 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
     A plan with questions is never executable. Each task shares one deadline across
     its initial attempt, up to three repairs, checks and reviews.
     """
-    from .gittools import ownership_changes, restore_violations, run_checks, snapshot_changes
+    from .gittools import ownership_changes, restore_violations, run_checks, snapshot_changes, git_identity
     from . import toolchain
     started = time.monotonic()
     worktree = Path(worktree)
+    # Ownership is measured against this Git identity (gitdir, branch, HEAD). A worker or a check that commits, switches branch,
+    # repoints .git or hides paths with index flags is caught by comparing against it, not by trusting the moved metadata.
+    identity = getattr(settings, "_git_identity", None) or git_identity(worktree)
     # Revalidate even plans constructed directly by a caller, preserving the contract.
     validated = Plan.parse(json.dumps(plan.to_dict()))
     if validated.questions:
@@ -344,7 +372,24 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         return Result("brahma", status, _summary(completed, task, detail), usage,
                       seconds=time.monotonic() - started)
 
+    def guarded(index: int, status: str, task: Task, detail: str) -> Result:
+        """Every way out of a task after its baseline was taken (quota, timeout, failure, cancel, wait) is verified first:
+        a worker that edited an unowned or sensitive file and then stopped must not leave that edit in place."""
+        entry = budgets.get(index) or {}
+        if "baseline" in entry:
+            try:
+                owned, reason = ownership_changes(worktree, task.files, baseline=entry["baseline"],
+                                                  ignored_allow=settings.ignored_allowlist, identity=identity)
+            except (OSError, ValueError, subprocess.SubprocessError) as error:
+                owned, reason = False, "ownership could not be verified: " + str(error)
+            if not owned:
+                reason += _restore_note(worktree, task.files, entry["baseline"], settings, emit)
+                _checkpoint(emit, index, task, "blocked", entry.get("attempt", 0), reason)
+                return result("blocked", task, "File ownership check failed: " + reason)
+        return result(status, task, detail)
+
     for index, task in enumerate(validated.tasks, 1):
+        task_started = time.monotonic()
         if index in completed_indices:
             if needs_checks:
                 return result("blocked", task, "Cannot resume ready tasks without configured checks")
@@ -365,6 +410,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         clocks[index] = (remaining, time.monotonic())
         deadline = time.monotonic() + remaining
         budgets[index] = {"deadline_epoch": deadline_epoch, "next_attempt": first_attempt,
+                          "budget_seconds": min(3600, settings.task_timeout),
+                          "repair_limit": min(3, settings.repair_cycles),
                           "phase": saved.get("phase", "build"), "attempt": saved.get("attempt", first_attempt),
                           # Dispute state is part of the checkpoint: one author reply per task, even across restarts.
                           "reply_used": bool(saved.get("reply_used", False)), "dispute": saved.get("dispute"),
@@ -393,26 +440,26 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         budgets[index].update(baseline=baseline, feedback=feedback)
         _checkpoint(emit, index, task, "assigned")
         resume_phase = budgets[index]["phase"]
-        if saved.get("state") in ("waiting", "cancelled", "building", "checking", "reviewing", "assigned") and resume_phase in ("build", "check", "review"):
+        if saved.get("state") in ("waiting", "cancelled", "building", "checking", "reviewing", "assigned", "needs_decision") and resume_phase in ("build", "check", "review"):
             first_attempt = saved.get("attempt", first_attempt)
         if first_attempt > min(3, settings.repair_cycles):
             _checkpoint(emit, index, task, "incomplete", first_attempt, "Attempt budget exhausted; a new approved plan is required")
-            return result("incomplete", task, "Attempt budget exhausted; a new approved plan is required")
+            return guarded(index, "incomplete", task, "Attempt budget exhausted; a new approved plan is required")
         for attempt in range(first_attempt, min(3, settings.repair_cycles) + 1):
             budgets[index]["attempt"] = attempt
             if cancel.is_set():
                 _checkpoint(emit, index, task, "cancelled", attempt)
-                return result("cancelled", task, "Stopped by user; draft retained")
+                return guarded(index, "cancelled", task, "Stopped by user; draft retained")
             if time.monotonic() >= deadline:
                 _checkpoint(emit, index, task, "incomplete", attempt, "Shared task deadline reached")
-                return result("incomplete", task, "Shared task deadline reached; draft retained")
+                return guarded(index, "incomplete", task, "Shared task deadline reached; draft retained")
             try:
                 context = _task_context(worktree, task, settings, builder)
                 builder_settings = _settings_for(settings, builder, task.complexity)
                 reviewer_settings = _settings_for(settings, reviewer, task.complexity)
             except (OSError, ValueError, RuntimeError) as exc:
                 _checkpoint(emit, index, task, "blocked", attempt, str(exc))
-                return result("blocked", task, str(exc))
+                return guarded(index, "blocked", task, str(exc))
             from . import briefs
             packet = _packet(settings, task, index, "repair" if feedback else "build", worktree)
             prompt = _BOUNDARIES + "\nYou are the builder. Implement only this accepted task:\n"
@@ -438,7 +485,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         _emit(emit, "wait", json.dumps(dict(provider=builder, **available)))
                         state = "waiting" if available["state"] == "waiting" else "blocked"
                         _checkpoint(emit, index, task, state, attempt, available["reason"])
-                        return result(state, task, available["reason"])
+                        return guarded(index, state, task, available["reason"])
                 # Charge before launch. Quota continuation reuses this attempt, not a repair.
                 budgets[index]["next_attempt"] = max(budgets[index]["next_attempt"], attempt + 1)
                 budgets[index]["phase"] = "build"
@@ -461,7 +508,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     if built.status == "unavailable":
                         _emit(emit, "signin_lost", json.dumps({"index": index, "provider": builder}))
                     _checkpoint(emit, index, task, state, attempt, f"Builder {built.status}")
-                    return result(state, task, f"Builder {built.status}; draft retained")
+                    return guarded(index, state, task, f"Builder {built.status}; draft retained")
                 if note_text:                                   # counted as applied only once a worker really received it
                     budgets[index]["notes_seen"] = seen
                     _emit(emit, "note_applied", f"Applied notes up to #{seen} at this checkpoint")
@@ -482,9 +529,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         if again.status != "ok":
                             state = "cancelled" if again.status == "cancelled" else "incomplete"
                             _checkpoint(emit, index, task, state, attempt, f"Builder {again.status} after context expansion")
-                            return result(state, task, f"Builder {again.status}; draft retained")
+                            return guarded(index, state, task, f"Builder {again.status}; draft retained")
             budgets[index]["phase"] = "check"
-            owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
+            owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist, identity=identity)
             if not owned:
                 reason += _restore_note(worktree, task.files, baseline, settings, emit)
                 _checkpoint(emit, index, task, "blocked", attempt, reason)
@@ -493,7 +540,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if cancel.is_set() or time.monotonic() >= deadline:
                 state = "cancelled" if cancel.is_set() else "incomplete"
                 _checkpoint(emit, index, task, state, attempt)
-                return result(state, task, "Stopped before checks; draft retained")
+                return guarded(index, state, task, "Stopped before checks; draft retained")
             check_results: list = []
             try:
                 checked, checks_text = await run_checks(worktree, settings.checks, cancel,
@@ -505,10 +552,10 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 # and the time spent blocked is not deducted from the task's active budget.
                 budgets[index]["phase"] = "check"
                 _checkpoint(emit, index, task, "waiting", attempt, safety.redact(str(error)))
-                return result("blocked", task, str(error))
+                return guarded(index, "blocked", task, str(error))
             if cancel.is_set():
                 _checkpoint(emit, index, task, "cancelled", attempt)
-                return result("cancelled", task, "Stopped during checks; draft retained")
+                return guarded(index, "cancelled", task, "Stopped during checks; draft retained")
             if not checked:
                 feedback = safety.redact("Actual checks failed:\n" + checks_text[-12000:])
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)
@@ -517,9 +564,9 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 if attempt < min(3, settings.repair_cycles):
                     continue
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=False, findings=0,
-                         usage=usage, seconds=time.monotonic() - started)
+                         usage=usage, seconds=time.monotonic() - task_started)
                 _emit(emit, "checks_failing", json.dumps({"index": index}))
-                return result("incomplete", task, "Checks did not pass after the bounded repairs")
+                return guarded(index, "incomplete", task, "Checks did not pass after the bounded repairs")
             # Build context anew: the reviewer inspects files independently, not the builder's claims.
             review_prompt = (_BOUNDARIES + "\nYou are the independent read-only reviewer. Do not edit files.\n"
                 "Inspect the actual worktree and diff against this accepted task, its acceptance criteria, "
@@ -532,46 +579,61 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 "Accepted task and handoff packet (diff_ref is the commit the changes are measured against):\n"
                 + briefs.brief(task, _packet(settings, task, index, "review", worktree, check_results=check_results))
                 + "\nRepository context:\n" + _task_context(worktree, task, settings, reviewer, "reviewer")
-                + "\nBrahma's actual check output:\n" + checks_text[-12000:])
+                + "\nBrahma's actual check output (secret-shaped values redacted):\n" + safety.redact(checks_text[-12000:]))
             budgets[index]["phase"] = "review"
             _checkpoint(emit, index, task, "reviewing", attempt)
-            if provider_gate:
+            decided = budgets[index].get("dispute") or {}
+            reused = None
+            if budgets[index].get("dispute_decision") in ("reviewer", "author") and decided.get("state") == "escalated":
+                try:
+                    unchanged = decided.get("tree") is not None and decided["tree"] == _tree(worktree, settings)
+                except (OSError, ValueError, subprocess.SubprocessError):
+                    unchanged = False
+                if unchanged and isinstance(decided.get("review"), dict):
+                    reused = decided["review"]      # the decision applies to exactly what was reviewed
+                else:
+                    budgets[index]["dispute_decision"] = None    # the tree moved since the decision: it no longer applies
+                    _emit(emit, "dispute_void", json.dumps({"index": index, "reason": "worktree changed since the decision"}))
+            if reused is not None:
+                review = reused
+            elif provider_gate:
                 available = await provider_gate(reviewer)
                 if available["state"] not in ("available", "unknown"):
                     _emit(emit, "wait", json.dumps(dict(provider=reviewer, **available)))
                     state = "waiting" if available["state"] == "waiting" else "blocked"
                     _checkpoint(emit, index, task, state, attempt, available["reason"])
-                    return result(state, task, available["reason"])
-            native = budgets[index].get("reviewer_session")
-            emit(Event(reviewer, "reviewer", "model_selected", text=
-                       f"Using {reviewer_settings.model_for(reviewer)} for independent {task.complexity} review; contract-locked profile."))
-            kwargs = {"native_session_id": native} if native else {}
-            reviewed = await providers.run(reviewer, review_prompt, worktree, "reviewer",
-                         reviewer_settings, emit, cancel,
-                         max(0, deadline - time.monotonic()), **kwargs)
-            budgets[index]["reviewer_session"] = reviewed.session_id or native
-            usage[f"task_{index}_attempt_{attempt}_reviewer"] = reviewed.usage
-            if reviewed.status != "ok":
-                state = "cancelled" if reviewed.status == "cancelled" else "blocked"
-                if reviewed.status == "limited" and provider_gate:
-                    available = await _limited_wait(reviewer, "reviewer", provider_gate, emit)
-                    _emit(emit, "wait", json.dumps(dict(provider=reviewer, **available)))
-                    state = "waiting"
-                if reviewed.status == "unavailable":
-                    _emit(emit, "signin_lost", json.dumps({"index": index, "provider": reviewer}))
-                _checkpoint(emit, index, task, state, attempt, f"Independent reviewer {reviewed.status}")
-                return result(state, task, f"Independent reviewer {reviewed.status}; draft retained")
-            try:
-                review = _review(reviewed.text)
-            except (ValueError, TypeError):
-                review = {"verdict": "changes_requested", "summary": "Reviewer returned invalid JSON; no pass recorded",
-                          "issues": ["A valid structured independent review is still required"]}
+                    return guarded(index, state, task, available["reason"])
+            if reused is None:
+                native = budgets[index].get("reviewer_session")
+                emit(Event(reviewer, "reviewer", "model_selected", text=
+                           f"Using {reviewer_settings.model_for(reviewer)} for independent {task.complexity} review; contract-locked profile."))
+                kwargs = {"native_session_id": native} if native else {}
+                reviewed = await providers.run(reviewer, review_prompt, worktree, "reviewer",
+                             reviewer_settings, emit, cancel,
+                             max(0, deadline - time.monotonic()), **kwargs)
+                budgets[index]["reviewer_session"] = reviewed.session_id or native
+                usage[f"task_{index}_attempt_{attempt}_reviewer"] = reviewed.usage
+                if reviewed.status != "ok":
+                    state = "cancelled" if reviewed.status == "cancelled" else "blocked"
+                    if reviewed.status == "limited" and provider_gate:
+                        available = await _limited_wait(reviewer, "reviewer", provider_gate, emit)
+                        _emit(emit, "wait", json.dumps(dict(provider=reviewer, **available)))
+                        state = "waiting"
+                    if reviewed.status == "unavailable":
+                        _emit(emit, "signin_lost", json.dumps({"index": index, "provider": reviewer}))
+                    _checkpoint(emit, index, task, state, attempt, f"Independent reviewer {reviewed.status}")
+                    return guarded(index, state, task, f"Independent reviewer {reviewed.status}; draft retained")
+                try:
+                    review = _review(reviewed.text)
+                except (ValueError, TypeError):
+                    review = {"verdict": "changes_requested", "summary": "Reviewer returned invalid JSON; no pass recorded",
+                              "issues": ["A valid structured independent review is still required"]}
             from . import dispute as _dispute
             if not (review["verdict"] == "changes_requested" and _dispute.high(_dispute.findings(review))):
                 budgets[index]["dispute_decision"] = None       # a decision applies only to the findings it was made on
             if review["verdict"] == "blocked":
                 _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
-                return result("blocked", task, review["summary"])
+                return guarded(index, "blocked", task, review["summary"])
             if review["verdict"] == "changes_requested":
                 from . import dispute
                 if dispute.high(dispute.findings(review)):
@@ -581,12 +643,12 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                         _checkpoint(emit, index, task, "needs_decision", attempt, "Disputed high-severity finding")
                         _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
                                  findings=len(dispute.high(dispute.findings(review))), usage=usage,
-                                 seconds=time.monotonic() - started)
-                        return result("needs_decision", task, payload)
+                                 seconds=time.monotonic() - task_started)
+                        return guarded(index, "needs_decision", task, payload)
                     review = payload
             if review["verdict"] == "blocked":     # a blocked re-review stops the task; it is never escalated or overridden
                 _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
-                return result("blocked", task, review["summary"])
+                return guarded(index, "blocked", task, review["summary"])
             if review["verdict"] == "changes_requested":
                 feedback = safety.redact("Independent review:\n" + json.dumps(review, ensure_ascii=False))
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)
@@ -595,16 +657,16 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 if attempt < min(3, settings.repair_cycles):
                     continue
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
-                         findings=len(review.get("issues", [])) or 1, usage=usage, seconds=time.monotonic() - started)
-                return result("incomplete", task, "Independent review did not pass after the bounded repairs")
+                         findings=len(review.get("issues", [])) or 1, usage=usage, seconds=time.monotonic() - task_started)
+                return guarded(index, "incomplete", task, "Independent review did not pass after the bounded repairs")
             if review["verdict"] == "pass" and review["issues"]:
                 # Recorded for Abhinav; sanitized because dispute events are stored unredacted.
                 _emit(emit, "review_notes", json.dumps({"index": index, "notes": _dispute.findings(review)}, ensure_ascii=False))
             if review["verdict"] != "pass":        # allow-list: only an explicit pass may reach readiness
                 _checkpoint(emit, index, task, "blocked", attempt, "Review did not pass")
-                return result("blocked", task, "Review did not pass")
+                return guarded(index, "blocked", task, "Review did not pass")
             # Checks can modify files too; require ownership again before accepting readiness.
-            owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist)
+            owned, reason = ownership_changes(worktree, task.files, baseline=baseline, ignored_allow=settings.ignored_allowlist, identity=identity)
             if not owned:
                 reason += _restore_note(worktree, task.files, baseline, settings, emit)
                 _checkpoint(emit, index, task, "blocked", attempt, reason)
@@ -612,10 +674,10 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if cancel.is_set() or time.monotonic() > deadline:
                 state = "cancelled" if cancel.is_set() else "incomplete"
                 _checkpoint(emit, index, task, state, attempt)
-                return result(state, task, "Task stopped before readiness; draft retained")
+                return guarded(index, state, task, "Task stopped before readiness; draft retained")
             state = "needs_checks" if needs_checks else "ready"
             _outcome(emit, index, task, builder, attempt, ready=state == "ready", checks_passed=True,
-                     findings=len(review.get("issues", [])), usage=usage, seconds=time.monotonic() - started)
+                     findings=len(review.get("issues", [])), usage=usage, seconds=time.monotonic() - task_started)
             _checkpoint(emit, index, task, state, attempt, review["summary"])
             completed.append(task.title)
             break
@@ -631,8 +693,8 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
         except toolchain.ToolchainChanged as error:
             return result("blocked", detail=str(error))
         if not checked or cancel.is_set():
-            return result("cancelled" if cancel.is_set() else "incomplete", detail=checks_text[-1000:])
-        owned, reason = ownership_changes(worktree, [name for task in validated.tasks for name in task.files], ignored_allow=settings.ignored_allowlist)
+            return result("cancelled" if cancel.is_set() else "incomplete", detail=safety.redact(checks_text[-1000:]))
+        owned, reason = ownership_changes(worktree, [name for task in validated.tasks for name in task.files], ignored_allow=settings.ignored_allowlist, identity=identity)
         if not owned:
             return result("blocked", detail="Resume ownership check failed: " + reason)
     if needs_checks:

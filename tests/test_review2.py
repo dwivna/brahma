@@ -65,7 +65,8 @@ class ApprovalScreen(unittest.TestCase):
             root = Path(d)
             for args in (("init", "-q"), ("commit", "-q", "--allow-empty", "-m", "x")):
                 subprocess.run(["git", "-C", str(root), "-c", "user.email=t@t", "-c", "user.name=t", *args], check=True, capture_output=True)
-            contract = contracts.prepare_contract(plan, root, checks, model_profiles=asdict(settings))
+            contract = contracts.prepare_contract(plan, root, checks, model_profiles=asdict(settings),
+                                                  task_timeout=settings.task_timeout, repair_cycles=settings.repair_cycles)
             path = root / "c.json"
             path.write_text(json.dumps({"version": contract["version"], "payload": contract["payload"], "digest": contract["digest"]}))
             path.with_suffix(".feature").write_text(contract["payload"]["feature"])
@@ -77,16 +78,24 @@ class ApprovalScreen(unittest.TestCase):
 
     def test_widening_settings_and_shell_checks_are_visible_before_approval(self):
         text = self.render(Settings(publish=True, ignored_allowlist=[".venv", "*e*"]), [["sh", "-c", "make"], ["pytest"]])
-        self.assertIn("Run settings changed from the defaults:", text)
-        self.assertIn("publish=True", text)
+        self.assertIn("draft PR publication when ready", text)
         self.assertIn("*e*", text)
         self.assertIn("WARNING: approved checks run these shell or network programs", text)
         self.assertIn("sh", text.split("WARNING:")[1])
 
     def test_default_settings_say_so(self):
         text = self.render(Settings(), [["pytest"]])
-        self.assertIn("Run settings: defaults", text)
+        # Review round 8, finding 10: the defaults include a local auto-commit, so the screen must say so.
+        self.assertIn("local commit on the brahma/ branch when ready", text)
+        self.assertIn("no publication", text)
+        self.assertNotIn("no automatic commit", text)
         self.assertNotIn("WARNING", text)
+
+    def test_disabled_auto_commit_is_shown(self):
+        self.assertIn("no automatic commit", self.render(Settings(auto_commit=False), [["pytest"]]))
+
+    def test_the_budget_line_shows_the_locked_budget(self):
+        self.assertIn("Budget: 10 active minutes/task; at most 2 repairs", self.render(Settings(task_timeout=600, repair_cycles=2), [["pytest"]]))
 
 
 if __name__ == "__main__":

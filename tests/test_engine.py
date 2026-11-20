@@ -44,6 +44,7 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
             patch.object(gittools, "snapshot_changes", return_value={}, create=True),
             patch.object(gittools, "ownership_changes", return_value=(True, "Owned")),
             patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0"))),
+            patch.object(gittools, "git_identity", return_value={}),
         ]
         self.mocks = [p.start() for p in self.patches]
         for p in self.patches:
@@ -76,6 +77,26 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Behavior works", self.calls[1][2])
         self.assertEqual(self.states()[-1]["state"], "ready")
         self.assertEqual(self.states()[-1]["index"], 1)
+
+    async def test_a_worker_that_stops_early_is_still_ownership_checked_and_restored(self):
+        # Review round 8, finding 5: limited, failed, timed-out or cancelled workers used to skip verification.
+        self.mocks[2].return_value = (False, "File ownership/sensitive-path review required: .env")
+        for status in ("limited", "failed", "cancelled", "timeout", "overloaded"):
+            with self.subTest(status=status), patch.object(gittools, "restore_violations", return_value=([".env"], [])) as restore:
+                self.events.clear()
+                result = await self.execute([Result("codex", status, "edited .env then stopped")])
+                self.assertEqual(result.status, "blocked")
+                self.assertIn("File ownership check failed", result.text)
+                restore.assert_called_once()
+                self.assertEqual(self.states()[-1]["state"], "blocked")
+
+    async def test_check_output_secrets_never_reach_the_reviewer_prompt(self):
+        # Review round 8, finding 3.
+        self.mocks[3].return_value = (True, "tests passed\nAPI_TOKEN=abcdefghijklmnop123456\n")
+        result = await self.execute([Result("codex", "ok", "done"), review()])
+        self.assertEqual(result.status, "ready")
+        self.assertNotIn("abcdefghijklmnop123456", self.calls[1][2])
+        self.assertIn("tests passed", self.calls[1][2])
 
     async def test_empty_checks_never_claim_ready(self):
         result = await self.execute([Result("codex", "ok", "tests passed"), review()], settings=Settings(checks=[]))

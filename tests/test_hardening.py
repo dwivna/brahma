@@ -97,10 +97,17 @@ class CommitWithIgnoredFiles(Fixture):
         self.write("tools/helper.sh", "echo hi\n")  # ignored by *.sh, owned via the contract
         self.assertIn("tools/helper.sh", gittools.changed_paths(self.repo))      # reviewed for ownership
         self.assertNotIn("tools/helper.sh", gittools.status_paths(self.repo))    # but not stageable
+        subprocess.run(["git", "-C", str(self.repo), "checkout", "-q", "-b", "brahma/abc"], check=True)
         head = gittools.commit_changes(self.repo, "add new")
         files = subprocess.run(["git", "-C", str(self.repo), "show", "--name-only", "--format=", head],
                                capture_output=True, text=True, check=True).stdout.split()
         self.assertEqual(files, ["src/new.py"])
+
+    def test_commit_refuses_a_branch_that_is_not_brahmas(self):
+        # Review round 8, finding 4: no coordinator commit unless the worktree is still on its own branch.
+        self.write("src/new.py", "y = 2\n")
+        with self.assertRaises(ValueError):
+            gittools.commit_changes(self.repo, "x")
 
     def test_sensitive_ignored_file_still_blocks_the_commit(self):
         self.write("src/new.py")
@@ -250,6 +257,79 @@ class IgnoredAllowlistConfig(unittest.TestCase):
                     (path / "brahma.toml").write_text(f"[brahma]\nignored_allowlist = {bad}\n")
                     with self.assertRaises(ValueError):
                         config.Settings.load(path)
+
+
+class GitMetadataCannotHideChanges(Fixture):
+    """Review round 8, findings 4 and 6: ownership is measured against the Git identity taken when the run started."""
+
+    def git(self, *args):
+        subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
+                       check=True, capture_output=True)
+
+    def setUp(self):
+        super().setUp()
+        self.git("checkout", "-q", "-b", "brahma/abc")
+        self.identity = gittools.git_identity(self.repo)
+
+    def test_a_clean_run_passes(self):
+        self.write("src/keep.py", "x = 2\n")
+        ok, _ = gittools.ownership_changes(self.repo, ["src/**"], baseline={}, identity=self.identity)
+        self.assertTrue(ok)
+
+    def test_an_unowned_change_committed_during_the_run_is_caught(self):
+        self.write("other/unowned.py", "evil = 1\n")
+        self.git("add", "-A")
+        self.git("commit", "-q", "-m", "worker commit")        # git status is now clean
+        self.assertEqual(gittools.status_paths(self.repo), [])
+        ok, reason = gittools.ownership_changes(self.repo, ["src/**"], baseline={}, identity=self.identity)
+        self.assertFalse(ok)
+        self.assertIn("HEAD", reason)
+
+    def test_assume_unchanged_cannot_hide_an_edit(self):
+        self.write("src/keep.py", "x = 'tampered'\n")
+        self.git("update-index", "--assume-unchanged", "src/keep.py")
+        self.assertEqual(gittools.status_paths(self.repo), [])
+        ok, reason = gittools.ownership_changes(self.repo, ["other/**"], baseline={}, identity=self.identity)
+        self.assertFalse(ok)
+        self.assertIn("index flags", reason)
+
+    def test_skip_worktree_cannot_hide_an_edit(self):
+        self.git("update-index", "--skip-worktree", "src/keep.py")
+        ok, reason = gittools.ownership_changes(self.repo, ["other/**"], baseline={}, identity=self.identity)
+        self.assertFalse(ok)
+        self.assertIn("src/keep.py", reason)
+
+    def test_a_branch_switch_is_caught_and_blocks_the_commit(self):
+        self.git("checkout", "-q", "-b", "brahma/other")
+        ok, reason = gittools.ownership_changes(self.repo, ["src/**"], baseline={}, identity=self.identity)
+        self.assertFalse(ok)
+        self.assertIn("branch", reason)
+        with self.assertRaises(ValueError):
+            gittools.commit_changes(self.repo, "x", self.identity)
+
+    def test_a_repointed_git_directory_is_caught(self):
+        changed = dict(self.identity, git_dir="/elsewhere/.git")
+        ok, reason = gittools.ownership_changes(self.repo, ["src/**"], baseline={}, identity=changed)
+        self.assertFalse(ok)
+        self.assertIn("Git directory", reason)
+
+    def test_repository_fsmonitor_config_is_never_run(self):
+        marker = Path(self.tmp.name) / "ran"
+        hook = Path(self.tmp.name) / "fsmonitor.sh"
+        hook.write_text(f"#!/bin/sh\ntouch {marker}\n")
+        hook.chmod(0o755)
+        self.git("config", "core.fsmonitor", str(hook))
+        gittools.status_paths(self.repo)
+        gittools.git_identity(self.repo)
+        self.assertFalse(marker.exists())
+
+    def test_env_inside_an_allowlisted_cache_nested_in_another_ignored_directory_is_seen(self):
+        (self.repo / ".gitignore").write_text(".env\nscratch/\n.venv/\n")
+        self.write("scratch/.venv/.env", "TOKEN=1\n")
+        self.write("scratch/.venv/lib/site.py", "pass\n")
+        found = gittools.ignored_paths(self.repo)
+        self.assertIn("scratch/.venv/.env", found)
+        self.assertNotIn("scratch/.venv/lib/site.py", found)
 
 
 if __name__ == "__main__":

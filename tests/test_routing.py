@@ -149,7 +149,7 @@ class EngineRouting(unittest.IsolatedAsyncioTestCase):
         self.events, self.calls = [], []
         self.patches = [patch.object(engine, "_context", return_value="ctx"),
                         patch.object(gittools, "snapshot_changes", return_value={}, create=True),
-                        patch.object(gittools, "ownership_changes", return_value=(True, "Owned")),
+                        patch.object(gittools, "ownership_changes", return_value=(True, "Owned")), patch.object(gittools, "git_identity", return_value={}),
                         patch.object(gittools, "run_checks", AsyncMock(return_value=(True, "Actual checks: exit 0")))]
         for p in self.patches:
             p.start()

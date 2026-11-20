@@ -41,14 +41,22 @@ class Board(unittest.TestCase):
         before = board.build(self.store, self.key)
         self.assertEqual(self.store.set_quota if False else None, None)
         row = before.tasks[0]
-        self.assertEqual((row.worker, row.phase, row.repairs), ("claude", "waiting", 2))
+        self.assertEqual((row.worker, row.phase, row.repairs), ("claude", "waiting", 3))   # attempt 3 is the third repair
         self.assertEqual(row.active_minutes, 35.0)                       # 3600-1500 s; the wait adds nothing
         self.assertIn("resumes by itself", row.next_step)
         after = board.build(self.store, self.key)                        # refresh again: unchanged
         self.assertEqual(after.tasks[0].active_minutes, 35.0)
         text = "\n".join(before.lines())
         self.assertIn("35 of 60 min active", text)
-        self.assertIn("repairs 2/3", text)
+        self.assertIn("repairs 3/3", text)
+
+    def test_the_locked_budget_and_zero_based_attempts_are_used(self):
+        # Review round 8, finding 15: a 60-second task showed ~59 minutes active and its first repair as zero.
+        state(self.store, self.key, state="changes_requested", attempt=1, builder="codex", remaining_seconds=30.0,
+              budget_seconds=60, repair_limit=2, active=True)
+        row = board.build(self.store, self.key).tasks[0]
+        self.assertEqual((row.repairs, row.active_minutes, row.budget_minutes), (1, 0.5, 1.0))
+        self.assertIn("repairs 1/2", "\n".join(board.build(self.store, self.key).lines()))
 
     def test_unknown_capacity_and_usage_are_explicit_and_measured_stays_separate_from_estimates(self):
         text = "\n".join(board.build(self.store, self.key).lines())
@@ -116,7 +124,7 @@ class EngineSignals(unittest.IsolatedAsyncioTestCase):
         events = []
         plan = Plan("G", [Task("T", "do", ["src/t.py"], ["ok"], "codex")])
         with patch.object(engine, "_context", return_value="c"), \
-                patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
+                patch.object(gittools, "ownership_changes", return_value=(True, "ok")), patch.object(gittools, "git_identity", return_value={}), \
                 patch.object(gittools, "snapshot_changes", return_value={}, create=True), \
                 patch.object(engine.providers, "run", AsyncMock(return_value=Result("codex", "unavailable", ""))):
             out = await engine.execute(plan, Path("/repo"), Settings(checks=[["true"]]), events.append, asyncio.Event())
@@ -124,7 +132,7 @@ class EngineSignals(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([json.loads(e.text)["provider"] for e in events if e.kind == "signin_lost"], ["codex"])
         events.clear()
         with patch.object(engine, "_context", return_value="c"), \
-                patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
+                patch.object(gittools, "ownership_changes", return_value=(True, "ok")), patch.object(gittools, "git_identity", return_value={}), \
                 patch.object(gittools, "snapshot_changes", return_value={}, create=True), \
                 patch.object(gittools, "run_checks", AsyncMock(return_value=(False, "failed"))), \
                 patch.object(engine.providers, "run", AsyncMock(return_value=Result("codex", "ok", "d"))):

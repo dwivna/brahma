@@ -139,6 +139,32 @@ class JsonOnEveryCommand(unittest.TestCase):
                     data = json.loads(out)
                     self.assertEqual((code, data["ok"], data["exit_code"], err), (0, True, 0, ""))
 
+    def test_models_usage_doctor_and_errors_honour_the_global_flag(self):
+        # Review round 8, finding 12: `brahma --json models` printed text; doctor lacked ok/exit_code.
+        from unittest.mock import AsyncMock, patch
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("brahma.model_selection.read_models", new_callable=AsyncMock, return_value={"providers": []}), \
+                patch("brahma.usage.read_usage", new_callable=AsyncMock, return_value={"providers": []}), \
+                patch("brahma.providers.doctor", new_callable=AsyncMock, return_value={"provider": "x", "available": False}):
+            for argv, code in ((("models",), 0), (("models", "--json"), 0), (("usage",), 0), (("doctor",), 30)):
+                with self.subTest(argv=argv):
+                    got, out, _ = run_cli("--json", *argv, state=Path(tmp) / "state")
+                    data = json.loads(out)
+                    self.assertEqual((got, data["exit_code"], data["ok"]), (code, code, code == 0))
+
+    def test_unexpected_failures_are_still_one_json_object(self):
+        from unittest.mock import AsyncMock, patch
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch("brahma.model_selection.read_models", new_callable=AsyncMock, side_effect=RuntimeError("provider exploded")):
+            code, out, _ = run_cli("--json", "models", state=Path(tmp) / "state")
+        data = json.loads(out)
+        self.assertEqual((code, data["ok"], data["exit_code"]), (13, False, 13))
+        self.assertIn("provider exploded", data["error"])
+
+    def test_needs_checks_has_its_own_exit_code(self):
+        # Review round 8, finding 13.
+        self.assertEqual(exitcodes.for_result_status("needs_checks"), exitcodes.NEEDS_CHECKS)
+
     def test_usage_errors_are_json_with_code_20(self):
         for argv in (["--json", "pause"], ["--json", "nonsense"], ["--json", "service"]):
             with self.subTest(argv=argv):

@@ -63,6 +63,12 @@ def refuse(args: tuple[str, ...]) -> str | None:
     return None
 
 
+# Never let repository configuration run code or hide paths while Brahma inspects a worktree: no hooks, no fsmonitor
+# helper, no stale untracked cache.
+_GIT = ("git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
+        "-c", "core.untrackedCache=false")
+
+
 _READ_ONLY = frozenset({"status", "diff", "rev-parse", "log", "show", "ls-files", "ls-tree", "cat-file", "check-ignore",
                         "symbolic-ref", "merge-base", "rev-list", "for-each-ref", "describe", "blame", "grep", "config"})
 
@@ -86,7 +92,7 @@ def git(repo: Path, *args: str) -> str:
         from .config import state_home
         if halt.engaged(state_home()):
             raise ValueError("Kill switch engaged: coordinator Git writes are refused")
-    result = subprocess.run(["git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-C", str(repo), *args],
+    result = subprocess.run([*_GIT, "-C", str(repo), *args],
                             text=True, capture_output=True, timeout=60)
     if result.returncode:
         raise ValueError(result.stderr.strip() or "Git command failed")
@@ -138,7 +144,7 @@ _CACHE_SENSITIVE_PREFIXES = (".env",)
 
 
 def _ls_ignored(repo: Path, *extra: str) -> list[str]:
-    result = subprocess.run(["git", "--literal-pathspecs", "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
+    result = subprocess.run([*_GIT, "-C", str(repo), "ls-files", "-o", "-i", "--exclude-standard", "-z", *extra],
                             capture_output=True, check=True, timeout=60)
     return [name for name in result.stdout.decode("utf-8", errors="surrogateescape").split("\0") if name]
 
@@ -153,18 +159,16 @@ def ignored_paths(repo: Path, allow=None) -> list[str]:
     hidden inside an allowlisted directory are not inspected.
     """
     allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
+
+    def kept(item: str) -> bool:
+        # A `.env*` file is inspected wherever it is, including inside an allowlisted cache nested in another ignored directory.
+        return not _allowed_ignored(item, allow) or Path(item).name.startswith(_CACHE_SENSITIVE_PREFIXES)
+
     found = []
     for name in _ls_ignored(repo, "--directory"):
-        is_dir = name.endswith("/")
-        if _allowed_ignored(name.rstrip("/"), allow, is_dir):
-            if is_dir:
-                found.extend(item for item in _ls_ignored(repo, "--", name)
-                             if Path(item).name.startswith(_CACHE_SENSITIVE_PREFIXES))
-            continue
-        if is_dir:
-            found.extend(item for item in _ls_ignored(repo, "--", name)
-                         if not _allowed_ignored(item, allow))
-        else:
+        if name.endswith("/"):
+            found.extend(item for item in _ls_ignored(repo, "--", name) if kept(item))
+        elif kept(name):
             found.append(name)
     return found
 
@@ -177,7 +181,7 @@ def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
 def status_paths(repo: Path) -> list[str]:
     """Changes `git status` reports (never ignored files); these are the only paths git can stage."""
     # NUL delimiters preserve spaces. Rename destinations and originals are both checked.
-    result = subprocess.run(["git", "--literal-pathspecs", "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+    result = subprocess.run([*_GIT, "-C", str(repo), "status", "--porcelain=v1", "-z", "--untracked-files=all"],
                             capture_output=True, check=True, timeout=15)
     chunks = result.stdout.decode("utf-8", errors="surrogateescape").split("\0")
     paths, index = [], 0
@@ -214,6 +218,44 @@ def snapshot_changes(worktree: Path, ignored_allow=None) -> dict[str, str]:
     return {name: _fingerprint(worktree / name) for name in changed_paths(worktree, ignored_allow)}
 
 
+def hidden_index_entries(worktree: Path) -> list[str]:
+    """Tracked paths whose changes `git status` would not show: assume-unchanged (lower-case tag) or skip-worktree (S)."""
+    result = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-v", "-z"], capture_output=True, check=True, timeout=60)
+    hidden = []
+    for row in result.stdout.decode("utf-8", errors="surrogateescape").split("\0"):
+        if len(row) > 2 and (row[0].islower() or row[0] == "S"):
+            hidden.append(row[2:])
+    return sorted(hidden)
+
+
+def git_identity(worktree: Path) -> dict:
+    """The Git metadata ownership is measured against. Taken once when a run starts and compared on every verification."""
+    return {"git_dir": git(worktree, "rev-parse", "--absolute-git-dir"),
+            "common_dir": git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"),
+            "branch": git(worktree, "branch", "--show-current"),
+            "head": git(worktree, "rev-parse", "HEAD"),
+            "hidden": hidden_index_entries(worktree)}
+
+
+def identity_problems(worktree: Path, identity: dict | None) -> list[str]:
+    """What moved in the Git metadata since `identity` was taken. Any entry blocks readiness."""
+    if not identity:
+        return []
+    try:
+        now = git_identity(worktree)
+    except (OSError, ValueError, subprocess.SubprocessError) as error:
+        return ["Git metadata could not be read: " + str(error)]
+    problems = []
+    for key, label in (("git_dir", "the worktree's Git directory (.git was repointed)"), ("common_dir", "the repository it belongs to"),
+                       ("branch", "the checked-out branch"), ("head", "HEAD (an unexpected commit)")):
+        if now[key] != identity.get(key):
+            problems.append(f"{label} changed")
+    added = sorted(set(now["hidden"]) - set(identity.get("hidden", [])))
+    if added:
+        problems.append("index flags now hide changes to: " + ", ".join(added[:20]))
+    return problems
+
+
 _SENSITIVE_PREFIXES = (".env", "credentials", ".credentials")
 
 
@@ -222,7 +264,10 @@ def _sensitive(path: str) -> bool:
                or part.endswith((".pem", ".key")) for part in Path(path).parts)
 
 
-def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_allow=None) -> tuple[bool, str]:
+def ownership_changes(worktree: Path, files: list[str], baseline=None, ignored_allow=None, identity=None) -> tuple[bool, str]:
+    moved = identity_problems(worktree, identity)
+    if moved:
+        return False, "Git metadata changed during the run, so changes cannot be attributed: " + "; ".join(moved)
     current = changed_paths(worktree, ignored_allow)
     if baseline is None:
         paths = current
@@ -262,7 +307,7 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     restored, kept = [], []
     root = worktree.resolve()
     # Exact comparison against the tracked list: a worker-chosen file name is never a pathspec (`:(glob)**`, `*`).
-    listing = subprocess.run(["git", "--literal-pathspecs", "-C", str(worktree), "ls-files", "-z"],
+    listing = subprocess.run([*_GIT, "-C", str(worktree), "ls-files", "-z"],
                              capture_output=True, check=True, timeout=60).stdout
     tracked_files = set(listing.decode("utf-8", errors="surrogateescape").split("\0"))
     for name in violating_paths(worktree, files, baseline, ignored_allow):
@@ -415,8 +460,11 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
     return True, "\n".join(summaries)
 
 
-def commit_changes(worktree: Path, summary: str) -> str:
-    ok, message = ownership_changes(worktree, ["**"])
+def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -> str:
+    """Commit on the session's own branch only. With `identity`, the branch, HEAD and gitdir must still be the verified ones."""
+    if not git(worktree, "branch", "--show-current").startswith("brahma/"):
+        raise ValueError("Refusing to commit: the worktree is not on a Brahma branch")
+    ok, message = ownership_changes(worktree, ["**"], identity=identity)
     if not ok:
         raise ValueError(message)
     # Owned git-ignored files are reviewed above but never staged (`git add` refuses them).

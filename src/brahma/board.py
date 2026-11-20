@@ -35,6 +35,8 @@ class TaskRow:
     repairs: int
     next_step: str
     blocker: str = ""
+    budget_minutes: float = 60.0      # the locked per-task active budget
+    repair_limit: int = 3
 
 
 @dataclass
@@ -52,8 +54,8 @@ class Board:
         head = f"{self.status}" + (" · PAUSED" if self.paused else "") + (" · STOPPED" if self.stopped else "")
         out = [f"Session {self.session}: {head}"]
         for t in self.tasks:
-            active = "not started" if t.active_minutes is None else f"{t.active_minutes:.0f} of 60 min active"
-            out.append(f"  {t.index}. {t.title[:40]} · {t.worker} · {t.phase} · {active} · repairs {t.repairs}/3")
+            active = "not started" if t.active_minutes is None else f"{t.active_minutes:.0f} of {t.budget_minutes:.0f} min active"
+            out.append(f"  {t.index}. {t.title[:40]} · {t.worker} · {t.phase} · {active} · repairs {t.repairs}/{t.repair_limit}")
             out.append(f"     next: {t.next_step}" + (f" · {t.blocker}" if t.blocker else ""))
         for name, cap in self.capacity.items():
             out.append(f"  {name}: {cap}")
@@ -141,11 +143,17 @@ def build(store, key: str) -> Board:
         row = latest[index]
         state = str(row.get("state", "unknown"))
         remaining = row.get("remaining_seconds")
-        active = None if not isinstance(remaining, (int, float)) else max(0.0, (TASK_SECONDS - remaining) / 60)
+        budget = row.get("budget_seconds", TASK_SECONDS)      # the locked per-task budget, not a fixed hour
+        if not isinstance(budget, (int, float)) or isinstance(budget, bool) or budget <= 0:
+            budget = TASK_SECONDS
+        active = None if not isinstance(remaining, (int, float)) else max(0.0, (budget - remaining) / 60)
         attempt = row.get("attempt", 0) if type(row.get("attempt", 0)) is int else 0
         blocker = _clean(row.get("summary", "")) if state in ("blocked", "incomplete", "needs_decision", "waiting") else ""
+        limit = row.get("repair_limit", 3)
+        limit = limit if type(limit) is int and 0 <= limit <= 3 else 3
         tasks.append(TaskRow(index, _clean(row.get("title", "?"), 60), str(row.get("builder") or "not chosen yet"), state, active,
-                             max(0, attempt - 1), NEXT_STEP.get(state, "In progress"), blocker))
+                             max(0, attempt), NEXT_STEP.get(state, "In progress"), blocker,   # attempt 0 is the build; 1 the first repair
+                             budget / 60, limit))
     attention = [_clean(a["text"], 200) for a in store.open_attention(key)]
     return Board(key, status["outcome"], bool(saved["paused"]), bool(saved["stopped"]), tasks,
                  capacity(store, events), usage(events), attention)

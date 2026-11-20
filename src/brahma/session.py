@@ -333,6 +333,11 @@ class Session:
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
             if gittools.git(worktree, "rev-parse", "HEAD") != contract["payload"]["base_revision"]:
                 raise ValueError("Worktree base changed outside this approval; review a new plan")
+            identity = gittools.git_identity(worktree)
+            if (identity["branch"] != "brahma/" + self.key
+                    or not Path(identity["git_dir"]).resolve().is_relative_to(Path(identity["common_dir"]).resolve() / "worktrees")):
+                raise ValueError("Worktree Git identity does not match this session; it was not run")
+            self.settings._git_identity = identity
             self.store.set(self.key, worktree=str(worktree), status="running")
             self.emit(Event(kind="approved", text="Approved contract " + contract["digest"] + " in branch brahma/" + self.key))
             # Only fully verified task checkpoints are skipped; interrupted work stays for re-review.
@@ -403,11 +408,12 @@ class Session:
                 if result.status == "ready" and self.halted():
                     result = Result("brahma", "cancelled", self.halted() + "; checkpoint retained", result.usage)
                 if result.status == "ready":
-                    ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files], ignored_allow=self.settings.ignored_allowlist)
+                    ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files],
+                                                             ignored_allow=self.settings.ignored_allowlist, identity=identity)
                     if not ok:
                         result = Result("brahma", "blocked", message)
                     elif self.settings.auto_commit:
-                        commit = gittools.commit_changes(worktree, self.plan.summary)
+                        commit = gittools.commit_changes(worktree, self.plan.summary, identity)
                         result.text += "\nLocal commit: " + commit
                     if result.status == "ready" and self.settings.publish and not self.halted():
                         try:

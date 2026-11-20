@@ -1,7 +1,7 @@
 """Process exit codes (Round 9/11, version 0.4.0). One distinct code per outcome.
 
-The table is documented in the README and versioned: changing a code is a MINOR bump.
-It is the *proposed starting table* from decision Round 11; Abhinav has not yet confirmed the final one.
+The table is documented in the README and versioned.
+Locked at 1.0.0 (Round 14): changing a code is a MAJOR bump from then on.
 """
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ TABLE = {READY: "ready", WAITING: "waiting or queued", NEEDS_APPROVAL: "needs a 
 def for_result_status(status: str) -> int:
     """Exit code for an engine/session result status."""
     return {"ready": READY, "waiting": WAITING, "cancelled": CANCELLED, "interrupted": CANCELLED,
-            "needs_decision": NEEDS_APPROVAL}.get(status, BLOCKED)
+            "needs_decision": NEEDS_APPROVAL, "needs_checks": NEEDS_CHECKS}.get(status, BLOCKED)
 
 
 def for_session(saved: dict, job_state: str | None, has_checks: bool | None) -> int:

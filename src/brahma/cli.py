@@ -192,7 +192,9 @@ class _Parser(argparse.ArgumentParser):
 
 
 def main(argv=None):
-    """Run the CLI. Errors become exit code 20 (plain text, or one JSON object with --json)."""
+    """Run the CLI. Usage errors are exit code 20; anything else that stops a command is 13 (blocked) or 14 (interrupted).
+    With --json (global, or a command's own --json) every result and error is exactly one JSON object with `ok` and
+    `exit_code`; `events` prints JSON lines."""
     argv = list(sys.argv[1:] if argv is None else argv)
     wants_json = "--json" in argv
     try:
@@ -201,6 +203,22 @@ def main(argv=None):
         raise
     except ValueError as error:
         return fail(str(error), exitcodes.USAGE, wants_json)
+    except KeyboardInterrupt:
+        return fail("Interrupted", exitcodes.CANCELLED, wants_json)
+    except Exception as error:      # a provider, Git, database or filesystem problem: report it in the promised shape
+        from .safety import redact
+        return fail(redact(f"{type(error).__name__}: {error}")[:2000], exitcodes.BLOCKED, wants_json)
+
+
+def emit(payload: dict, text, code: int, as_json: bool) -> int:
+    """Print one result. JSON output is always the envelope: the payload plus `ok` and `exit_code`.
+    `text` may be a callable so human formatting is only done for humans."""
+    if as_json:
+        print(json.dumps({**payload, "ok": code == exitcodes.READY, "exit_code": code}, ensure_ascii=False))
+    else:
+        text = text() if callable(text) else text
+        print(text if text is not None else json.dumps(payload, indent=2, ensure_ascii=False))
+    return code
 
 
 def fail(message: str, code: int, wants_json: bool) -> int:
@@ -213,30 +231,31 @@ def fail(message: str, code: int, wants_json: bool) -> int:
 
 def _main(argv):
     args = parser().parse_args(argv)
+    as_json = args.json_output or bool(getattr(args, "json", False))
+    if args.json_output and args.command is None:
+        raise ValueError("--json needs a command; the interactive terminal has no JSON mode")
     if args.command == "models":
         from .model_selection import format_models, read_models
         try:
             root = repository(args.repo or Path.cwd())
         except ValueError as error:
             if args.repo:
-                return fail(str(error), exitcodes.USAGE, args.json_output)
+                return fail(str(error), exitcodes.USAGE, as_json)
             root = None
         try:
             settings = Settings.load(root) if root else Settings()
             names = (args.provider,) if args.provider else ("codex", "claude")
             report = asyncio.run(read_models(settings, names))
         except (ValueError, OSError) as error:
-            return fail(str(error), exitcodes.USAGE, args.json_output)
-        print(json.dumps(report, indent=2) if args.json else format_models(report))
-        return 0
+            return fail(str(error), exitcodes.USAGE, as_json)
+        return emit({"models": report}, lambda: format_models(report), exitcodes.READY, as_json)
     if args.command == "usage":
         from .usage import format_usage, read_usage
         store = Store(state_home())
         try:
             names = (args.provider,) if args.provider else ("codex", "claude")
             report = asyncio.run(read_usage(store, names))
-            print(json.dumps(report, indent=2) if args.json else format_usage(report))
-            return 0
+            return emit({"usage": report}, lambda: format_usage(report), exitcodes.READY, as_json)
         finally:
             store.close()
     if args.command == "doctor":
@@ -253,15 +272,16 @@ def _main(argv):
             finally:
                 store.close()
         readiness(rows, snapshots)
-        print(json.dumps({"version": __version__, "providers": rows, "api_fallback": False,
-                          "usage_remaining": "unknown; provider-reported limits only"}, indent=2))
-        return exitcodes.READY if all(r.get("available") for r in rows) else exitcodes.SIGN_IN
+        payload = {"version": __version__, "providers": rows, "api_fallback": False,
+                   "usage_remaining": "unknown; provider-reported limits only"}
+        code = exitcodes.READY if all(r.get("available") for r in rows) else exitcodes.SIGN_IN
+        return emit(payload, json.dumps(payload, indent=2), code, as_json)
     if args.command == "worker":
         from .scheduler import serve
         try:
             return asyncio.run(serve(args.home.expanduser().resolve(), once=args.once))
         except (ValueError, OSError) as error:
-            return fail(str(error), exitcodes.USAGE, args.json_output)
+            return fail(str(error), exitcodes.USAGE, as_json)
     if args.command == "service":
         from .scheduler import service
         try:
@@ -274,23 +294,17 @@ def _main(argv):
                     queued = len([j for j in store.pending() if j["state"] == "queued"])
                 finally:
                     store.close()
-            if args.json_output:
-                print(json.dumps({"ok": True, "action": args.action, "message": message,
-                                  "queued_approved_jobs": queued, "exit_code": 0}))
-            else:
-                print(message)
-                if queued is not None:
-                    print(f"Queued approved jobs: {queued}. Quota is checked from provider signals when work is due; "
-                          "unknown quota permits one bounded approved attempt; a reported limit suspends work.")
-            return exitcodes.READY
+            text = message + ("" if queued is None else
+                              f"\nQueued approved jobs: {queued}. Quota is checked from provider signals when work is due; "
+                              "unknown quota permits one bounded approved attempt; a reported limit suspends work.")
+            return emit({"action": args.action, "message": message, "queued_approved_jobs": queued}, text, exitcodes.READY, as_json)
         except subprocess.SubprocessError as error:
-            return fail(str(error) or "The service manager command failed", exitcodes.BLOCKED, args.json_output)
+            return fail(str(error) or "The service manager command failed", exitcodes.BLOCKED, as_json)
         except (ValueError, OSError) as error:
-            return fail(str(error), exitcodes.USAGE, args.json_output)
+            return fail(str(error), exitcodes.USAGE, as_json)
     home = state_home()
     def report(payload: dict, text: str) -> int:
-        print(json.dumps({"ok": True, **payload, "exit_code": 0}) if args.json_output else text)
-        return exitcodes.READY
+        return emit(payload, text, exitcodes.READY, as_json)
 
     if args.command == "kill":
         from . import halt
@@ -402,8 +416,7 @@ def _main(argv):
         try:
             if args.command == "status":
                 code, payload = session_status(store, args.session)
-                print(json.dumps(payload, indent=None if args.json_output else 2))
-                return code
+                return emit(payload, json.dumps(payload, indent=2), code, as_json)
             return stream_events(store, args.session, args.after, args.follow)
         finally:
             store.close()
@@ -411,11 +424,9 @@ def _main(argv):
         store = Store(home)
         try:
             sessions = store.recent()
-            print(json.dumps({"ok": True, "sessions": sessions, "exit_code": 0}) if args.json_output
-                  else json.dumps(sessions, indent=2))
         finally:
             store.close()
-        return 0
+        return emit({"sessions": sessions}, json.dumps(sessions, indent=2), exitcodes.READY, as_json)
     if args.command in ("plan", "run"):
         store = Store(home)
         try:
@@ -428,8 +439,10 @@ def _main(argv):
                 text = json.dumps(plan.to_dict(), ensure_ascii=False, indent=2)
                 if args.output:
                     args.output.write_text(text + "\n", encoding="utf-8")
-                print(text)
-                return 0
+                saved = store.session(session.key)
+                return emit({"session": session.key, "status": saved["status"], "plan": plan.to_dict(),
+                             "needs": "answers to the plan's questions" if plan.questions else "a human approval: brahma approve " + session.key},
+                            text, exitcodes.READY, as_json)
             if not args.approve:
                 raise ValueError("Execution requires --approve; inspect the plan and configured checks first")
             plan = Plan.parse(args.plan_file.read_text(encoding="utf-8"))
@@ -444,7 +457,7 @@ def _main(argv):
                               "summary": result.text, "exit_code": code}, indent=2))
             return code
         except (ValueError, OSError) as error:
-            return fail(str(error), exitcodes.USAGE, args.json_output)
+            return fail(str(error), exitcodes.USAGE, as_json)
         finally:
             store.close()
     from .ui import BrahmaApp

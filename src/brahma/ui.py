@@ -35,6 +35,19 @@ No automatic merges, releases or paid API fallback. Approved queues can continue
 Configure explicit test commands in brahma.toml. Without them a task stays needs_checks."""
 
 
+def run_settings_line(models: dict) -> str:
+    """The locked run settings as they will actually apply, defaults included (auto-commit is on by default)."""
+    default = Settings()
+    value = {name: models.get(name, getattr(default, name)) for name in ("publish", "auto_commit", "strict_enforcement")}
+    parts = ["local commit on the brahma/ branch when ready" if value["auto_commit"] else "no automatic commit",
+             "draft PR publication when ready" if value["publish"] else "no publication",
+             "strict read enforcement" if value["strict_enforcement"] else "reads not enforced (see README)"]
+    allow = models.get("ignored_allowlist")
+    if allow is not None and list(allow) != list(default.ignored_allowlist):
+        parts.append("ignored build caches: " + ", ".join(map(str, allow)))
+    return "Run settings: " + "; ".join(parts)
+
+
 class ConversationLog(RichLog):
     def on_resize(self, event):
         super().on_resize(event)
@@ -287,13 +300,11 @@ class BrahmaApp(App):
                                   contract["payload"]["feature"],
                                   "Checks: " + json.dumps(contract["payload"]["checks"]),
                                   *toolchain.describe(contract["payload"].get("toolchain", {})),
-                                  "Budget: 60 active minutes/task; at most 3 repairs; quota waiting excluded."))
+                                  "Budget: {:g} active minutes/task; at most {} repairs; quota waiting excluded.".format(
+                                      contract["payload"]["task_budget"]["active_seconds"] / 60, contract["payload"]["task_budget"]["repair_cycles"])))
                     models = contract["payload"]["models"]
                     # Locked settings that widen what a run does must be visible at approval, not only inside the digest.
-                    default = Settings()
-                    wide = [f"{name}={models.get(name)!r}" for name in ("publish", "auto_commit", "strict_enforcement", "ignored_allowlist")
-                            if models.get(name, getattr(default, name)) != getattr(default, name)]
-                    lines.append("Run settings changed from the defaults: " + ", ".join(wide) if wide else "Run settings: defaults (no publication, no auto-commit)")
+                    lines.append(run_settings_line(models))
                     risky = sorted({c[0].rsplit("/", 1)[-1] for c in contract["payload"]["checks"]
                                     if c and c[0].rsplit("/", 1)[-1] in ("sh", "bash", "zsh", "curl", "wget", "nc", "ssh", "scp")})
                     if risky:
