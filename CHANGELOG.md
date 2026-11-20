@@ -38,6 +38,9 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- The background worker loads all of Brahma at start and restarts itself (through the service's KeepAlive) when the
+  installed code changes, between jobs. Found in real use: an approved run resumed by a worker started before an
+  upgrade failed with an ImportError, because one new module was loaded beside old ones already in memory.
 - Independent review round 14: `$GIT_DIR/info/attributes` (read by Git whatever `--attr-source` says) must be empty,
   or the repository is refused at approval and every Brahma Git call stops; system attributes are off; tracked symlinks
   are verified as symlinks with their committed target (`core.symlinks=true` pinned); an allowlisted cache name is

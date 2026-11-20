@@ -5,12 +5,13 @@ import hashlib
 import json
 import os
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from brahma import gitsafe, gittools, session as session_mod, toolchain
+from brahma import gitsafe, gittools, scheduler, session as session_mod, toolchain
 from brahma.models import Event, Plan, Task
 from brahma.session import Session
 from brahma.store import Store
@@ -199,6 +200,34 @@ class Finding9VersioningPolicy(unittest.TestCase):
         intro = (ROOT / "CHANGELOG.md").read_text().split("## ", 1)[0]
         self.assertIn("MAJOR for any breaking change", intro)
         self.assertNotIn("MINOR for new capabilities or any change", intro)
+
+
+class WorkerRestartsAfterAnUpgrade(unittest.IsolatedAsyncioTestCase):
+    """Found in real use: an approved run resumed in a worker started before an upgrade failed with
+    `ImportError: cannot import name 'git_identity' from 'brahma.gittools'` (old module in memory, new engine on disk)."""
+
+    def test_the_code_fingerprint_changes_when_a_module_changes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / "a.py").write_text("x = 1\n")
+            before = scheduler.code_fingerprint(Path(tmp))
+            (Path(tmp) / "a.py").write_text("x = 22\n")
+            self.assertNotEqual(scheduler.code_fingerprint(Path(tmp)), before)
+
+    def test_every_module_is_loaded_at_start(self):
+        scheduler.load_all_modules()
+        for name in ("engine", "gittools", "session", "contracts", "toolchain", "ui"):
+            self.assertIn("brahma." + name, sys.modules)
+
+    async def test_an_upgraded_worker_exits_before_taking_a_job(self):
+        ticks = []
+
+        async def tick(store, stop=None):
+            ticks.append(1)
+        with tempfile.TemporaryDirectory() as tmp, \
+                patch.object(scheduler, "code_fingerprint", side_effect=["old", "new"]), \
+                patch.object(scheduler, "tick", tick), patch("brahma.procs.reap"):
+            self.assertEqual(await scheduler._serve(Path(tmp), once=False), 0)
+        self.assertEqual(ticks, [])
 
 
 if __name__ == "__main__":

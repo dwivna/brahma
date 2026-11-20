@@ -181,6 +181,34 @@ async def serve(home: Path, *, once: bool = False) -> int:
             os.environ["BRAHMA_STATE_DIR"] = previous
 
 
+_PACKAGE = Path(__file__).resolve().parent
+
+
+def code_fingerprint(package: Path | None = None) -> str:
+    """Identity of the installed Brahma code: every module's name, size, inode and modification time. An upgrade (or
+    an editable checkout being edited) changes it."""
+    import hashlib
+    digest = hashlib.sha256()
+    for path in sorted(Path(package or _PACKAGE).glob("*.py")):
+        try:
+            info = path.stat()
+        except OSError:
+            continue
+        digest.update(f"{path.name}\0{info.st_size}\0{info.st_ino}\0{info.st_mtime_ns}\n".encode())
+    return digest.hexdigest()
+
+
+def load_all_modules() -> None:
+    """Import every Brahma module now. Functions import lazily; in a long-lived worker a lazy import after an upgrade
+    would load a new module beside old ones already in memory (an approved run was blocked by exactly that ImportError).
+    Loaded together at start, one consistent version serves every job until the worker restarts."""
+    import importlib
+    import pkgutil
+    for module in pkgutil.iter_modules([str(_PACKAGE)]):
+        if module.name != "__main__":
+            importlib.import_module(f"{__package__}.{module.name}")
+
+
 async def _serve(home: Path, *, once: bool) -> int:
     store = Store(home)
     stop = asyncio.Event()
@@ -197,10 +225,17 @@ async def _serve(home: Path, *, once: bool) -> int:
             except BlockingIOError:
                 print("brahma: another scheduler already owns this state directory", file=sys.stderr)
                 return 0
+            started = code_fingerprint()
+            load_all_modules()
             from . import procs
             procs.reap(home)                 # stop worker groups whose coordinator died, before their jobs are requeued
             store.recover_jobs()
             while not stop.is_set():
+                if code_fingerprint() != started:
+                    # Brahma was upgraded under this worker. Exit between jobs; the service (KeepAlive) starts a fresh
+                    # worker with the new code, which recovers and continues the queue.
+                    print("brahma: Brahma was updated; the worker restarts to use the new code", file=sys.stderr, flush=True)
+                    return 0
                 try:
                     await tick(store, stop=stop)
                 except asyncio.CancelledError:
