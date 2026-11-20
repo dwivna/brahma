@@ -15,9 +15,14 @@ from pathlib import Path
 # helper, no stale untracked cache, and Git's full change detection. `core.trustctime=false`, `core.checkStat=minimal`
 # or `core.ignoreStat=true` would let a same-size edit with its modification time put back go unreported; the inode
 # change time (ctime) cannot be put back by an unprivileged process, so with these pinned every edit is seen.
-_GIT = ("git", "--literal-pathspecs", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false",
-        "-c", "core.untrackedCache=false", "-c", "core.trustctime=true", "-c", "core.checkStat=default",
-        "-c", "core.ignoreStat=false", "-c", "diff.ignoreSubmodules=none")
+# Attributes are read from the empty tree (and no global attributes file): no filter driver program can run on any
+# Brahma Git call (status, add, diff, checkout), whatever .gitattributes a worker writes, and no line-ending or ident
+# conversion applies, so Git compares and stores exactly the bytes that were checked. File modes are always compared.
+EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"     # SHA-1 repositories only (SHA-256 ones are refused)
+_GIT = ("git", "--literal-pathspecs", f"--attr-source={EMPTY_TREE}", "-c", "core.attributesFile=/dev/null",
+        "-c", "core.autocrlf=false", "-c", "core.fileMode=true", "-c", "core.hooksPath=/dev/null",
+        "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false", "-c", "core.trustctime=true",
+        "-c", "core.checkStat=default", "-c", "core.ignoreStat=false", "-c", "diff.ignoreSubmodules=none")
 
 
 # Environment variables that would inject Git configuration (which can name a program to run) or point Git at another
@@ -73,6 +78,8 @@ def unsupported_repository(repo: Path, revision: str = "HEAD") -> str | None:
     """Repository features Brahma 1.0 cannot verify, or None. Submodules: their contents are another repository's and
     are not ownership-checked. Filter drivers (Git LFS and similar): Git runs their helper programs outside the approved
     checks, and the committed bytes differ from the checked files."""
+    if run_git(repo, "rev-parse", "--show-object-format").stdout.strip() not in ("", "sha1"):
+        return "This repository uses the SHA-256 object format, which Brahma 1.0 does not support"
     listing = subprocess.run([*_GIT, "-C", str(repo), "ls-tree", "-r", "-z", "--full-tree", revision],
                              capture_output=True, timeout=60, env=git_env())
     if listing.returncode:

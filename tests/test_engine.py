@@ -170,8 +170,9 @@ class EngineTests(unittest.IsolatedAsyncioTestCase):
                                     tasks=[task(), task("Next")])
         self.assertEqual(result.status, "ready")
         baselines = [call.kwargs["baseline"] for call in self.mocks[2].call_args_list]
-        # Verified after the builder, after the reviewer (round 11, finding 18) and after the checks, per task.
-        self.assertEqual(baselines, [{"old.py": "one"}] * 3 + [{"Implement.py": "two"}] * 3)
+        # Verified after the builder, after the checks (round 13, finding 4), after the reviewer (round 11, finding 18)
+        # and before readiness, per task.
+        self.assertEqual(baselines, [{"old.py": "one"}] * 4 + [{"Implement.py": "two"}] * 4)
 
     async def test_resume_skips_only_recorded_ready_task_indices(self):
         result = await self.execute([Result("codex", "ok"), review()], tasks=[task(), task("Next")], completed={1})

@@ -156,7 +156,7 @@ class Finding18VerifiedAfterEveryWorker(unittest.IsolatedAsyncioTestCase):
             calls.append(role)
             text = json.dumps({"verdict": "changes_requested", "summary": "fix", "issues": ["x"]}) if role == "reviewer" else "built"
             return Result(provider, "ok", text)
-        p = engine_patches(owned=patch.object(gittools, "ownership_changes", side_effect=[(True, "ok"), (False, "outside.txt")]))
+        p = engine_patches(owned=patch.object(gittools, "ownership_changes", side_effect=[(True, "ok"), (True, "ok"), (False, "outside.txt")]))
         with p["context"], p["snapshot"], p["identity"], p["owned"], p["checks"], p["tree"], \
                 patch.object(engine, "_restore_note", return_value=""), patch.object(engine.providers, "run", side_effect=run):
             result = await engine.execute(Plan("G", [Task("T", "do", ["a"], ["ok"], "codex")]), Path("/repo"),

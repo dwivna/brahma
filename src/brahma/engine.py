@@ -629,6 +629,13 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if cancel.is_set():
                 _checkpoint(emit, index, task, "cancelled", attempt)
                 return guarded(index, "cancelled", task, "Stopped during checks; draft retained")
+            # Checks can change files whatever their outcome: verify (and restore) before a repair builder could hide it.
+            owned, reason = ownership_changes(worktree, task.files, baseline=baseline,
+                                              ignored_allow=settings.ignored_allowlist, identity=identity)
+            if not owned:
+                reason += _restore_note(worktree, task.files, baseline, settings, emit, identity)
+                _checkpoint(emit, index, task, "blocked", attempt, reason)
+                return result("blocked", task, "File ownership check failed after checks: " + reason)
             if not checked:
                 feedback = safety.redact("Actual checks failed:\n" + checks_text[-12000:])
                 budgets[index].update(phase="build", feedback=feedback, builder_session=None, reviewer_session=None)
@@ -805,11 +812,26 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             owned, reason = ownership_changes(worktree, everything, ignored_allow=settings.ignored_allowlist, identity=identity)
             return None if owned else reason + _restore_note(worktree, everything, reviewed["changes"], settings, emit, identity)
 
+        # Verification is charged to the approved budget of the last completed task: what its checkpoint had left,
+        # minus earlier resume verifications. An exhausted budget never gets a fresh allowance.
+        last = max(completed_indices)
+        saved_last = (task_progress or {}).get(last) or {}
+        left = saved_last.get("remaining_seconds")
+        allowance = min(3600, settings.task_timeout)
+        if isinstance(left, (int, float)) and not isinstance(left, bool) and math.isfinite(left):
+            allowance = min(allowance, left)
+        spent_before = saved_last.get("verification_spent", 0)
+        if isinstance(spent_before, (int, float)) and not isinstance(spent_before, bool) and math.isfinite(spent_before):
+            allowance -= max(0.0, spent_before)
+        if allowance <= 0:
+            return result("incomplete", detail="No active time is left in the approved budget to verify the completed "
+                                               "work again; approve a new plan to continue")
+        verify_started = time.monotonic()
         try:
-            checked, checks_text = await run_checks(worktree, settings.checks, cancel,
-                                                   min(3600, settings.task_timeout), emit, None,
+            checked, checks_text = await run_checks(worktree, settings.checks, cancel, allowance, emit, None,
                                                    getattr(settings, "bound_toolchain", None))
         except BaseException as error:
+            _emit(emit, "verification_spent", json.dumps({"index": last, "seconds": time.monotonic() - verify_started}))
             try:
                 problem = verify_after_checks()
             except Exception as failure:
@@ -819,6 +841,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             if problem:
                 _emit(emit, "checkpoint", "Resume ownership check failed: " + problem)
             raise
+        _emit(emit, "verification_spent", json.dumps({"index": last, "seconds": time.monotonic() - verify_started}))
         problem = verify_after_checks()
         if problem:
             return result("blocked", detail="Resume ownership check failed: " + problem)

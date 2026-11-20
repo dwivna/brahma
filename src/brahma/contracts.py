@@ -117,7 +117,7 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
                      task_timeout: float = 3600, repair_cycles: int = 3,
                      definitions: Iterable[Definition] = (), model_profiles: dict | None = None,
                      base_revision: str | None = None, toolchain_directory: Path | None = None,
-                     toolchain_basis: str = "repo") -> dict:
+                     toolchain_basis: str = "repo", instruction_root: Path | None = None) -> dict:
     # Revalidate objects built directly, not just planner JSON.
     plan = Plan.parse(json.dumps(plan.to_dict(), ensure_ascii=False))
     if plan.questions:
@@ -173,7 +173,9 @@ def prepare_contract(plan: Plan, repo: Path, checks: list[list[str]] | None = No
     payload = {"plan": plan.to_dict(), "feature": render_feature(plan),
                "checks": selected_checks, "repository": str(repo),
                "base_revision": revision,
-               "instructions": _instructions(repo, plan), "definitions": selected,
+               # Fingerprinted from the checkout the run will use (an existing worktree for a follow-on plan).
+               "instructions": _instructions(Path(instruction_root).resolve() if instruction_root else repo, plan),
+               "definitions": selected,
                "task_budget": {"active_seconds": task_timeout, "repair_cycles": repair_cycles,
                                "quota_wait_counts": False}, "models": model_profiles or {},
                "toolchain": {**toolchain.probe([["git"], *selected_checks], toolchain_directory or repo), "basis": toolchain_basis}}

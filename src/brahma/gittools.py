@@ -175,9 +175,29 @@ def ignored_paths(repo: Path, allow=None) -> list[str]:
     return found
 
 
+def special_paths(repo: Path, allow=None) -> list[str]:
+    """FIFOs, sockets and device nodes in the worktree. Git lists none of them (tracked, untracked or ignored), so they
+    are found by a walk that never follows symlinks; `.git` and allowlisted cache directories are skipped."""
+    allow = DEFAULT_IGNORED_ALLOWLIST if allow is None else tuple(allow)
+    root = Path(repo)
+    found = []
+    for directory, dirs, files in os.walk(root, followlinks=False):
+        base = Path(directory)
+        dirs[:] = [d for d in dirs if d != ".git" and not any(fnmatch.fnmatchcase(d, pattern) for pattern in allow)]
+        for name in files:
+            try:
+                kind = os.lstat(base / name).st_mode
+            except OSError:
+                continue
+            if not (stat.S_ISREG(kind) or stat.S_ISLNK(kind) or stat.S_ISDIR(kind)):
+                found.append((base / name).relative_to(root).as_posix())
+    return found
+
+
 def changed_paths(repo: Path, ignored_allow=None) -> list[str]:
-    """Every changed path for ownership review: tracked/untracked changes plus git-ignored files."""
-    return sorted(set(status_paths(repo)) | set(ignored_paths(repo, ignored_allow)))
+    """Every changed path for ownership review: tracked/untracked changes, git-ignored files, and special files (which
+    Git never lists)."""
+    return sorted(set(status_paths(repo)) | set(ignored_paths(repo, ignored_allow)) | set(special_paths(repo, ignored_allow)))
 
 
 _BLOB_CACHE: dict[tuple, str] = {}
@@ -187,8 +207,9 @@ def _hash_paths(repo: Path, names: list[str], *options: str) -> dict[str, str]:
     """`git hash-object` for each path. `--stdin-paths` is line-based and unquotes a leading `"`, so a name containing a
     line break or starting with a quote is hashed on its own as an argument instead; every name must get exactly one
     hash, or nothing is trusted."""
-    plain = [n for n in names if "\n" not in n and "\r" not in n and not n.startswith('"')]
-    odd = [n for n in names if n not in set(plain)]
+    plain, odd = [], []
+    for name in names:                                       # one pass (a set rebuilt per name was quadratic)
+        (odd if "\n" in name or "\r" in name or name.startswith('"') else plain).append(name)
     out: dict[str, str] = {}
     for start in range(0, len(plain), 2000):
         chunk = plain[start:start + 2000]
@@ -214,7 +235,7 @@ def content_changed_tracked(repo: Path) -> list[str]:
     listing = subprocess.run([*_GIT, "-C", str(repo), "ls-files", "-s", "-z"], capture_output=True, check=True,
                              timeout=60, env=git_env()).stdout.decode("utf-8", "surrogateescape")
     root = Path(repo).resolve()
-    expected, keys, missing = {}, {}, []
+    expected, keys, missing, mode_changed = {}, {}, [], []
     for row in listing.split("\0"):
         if "\t" not in row:
             continue
@@ -228,15 +249,17 @@ def content_changed_tracked(repo: Path) -> list[str]:
             continue                           # deleted: status reports it
         if not stat.S_ISREG(info.st_mode):
             continue                           # type changed: status reports it
+        if bool(info.st_mode & stat.S_IXUSR) != (mode == "100755"):
+            mode_changed.append(name)          # executable bit changed, whatever core.fileMode says
         key = (str(root), name, info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
         expected[name], keys[name] = blob, key
         if key not in _BLOB_CACHE:
             missing.append(name)
     if len(_BLOB_CACHE) > 200000:
         _BLOB_CACHE.clear()
-    for name, blob in _hash_paths(repo, missing).items():
+    for name, blob in _hash_paths(repo, missing, "--no-filters").items():     # raw bytes: what was really checked
         _BLOB_CACHE[keys[name]] = blob
-    return sorted(name for name in expected if _BLOB_CACHE.get(keys[name]) != expected[name])
+    return sorted({name for name in expected if _BLOB_CACHE.get(keys[name]) != expected[name]} | set(mode_changed))
 
 
 def status_paths(repo: Path) -> list[str]:
@@ -633,11 +656,7 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
     paths = status_paths(worktree)
     if not paths:
         return git(worktree, "rev-parse", "HEAD")
-    from .gitsafe import filtered_paths
-    filtered = filtered_paths(worktree, paths)
-    if filtered:      # `git add` would run the filter's program and commit bytes other than the checked files
-        raise ValueError("Not committed: a Git filter driver applies to " + ", ".join(filtered[:5]))
-    git(worktree, "add", "--", *paths)
+    git(worktree, "add", "--", *paths)       # attributes come from the empty tree: no filter or conversion applies
     staged_differs = _staged_differs(worktree, paths)
     if staged_differs:
         git(worktree, "restore", "--staged", "--", *paths)          # unstage; the files themselves are untouched
@@ -647,7 +666,8 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
     return git(worktree, "rev-parse", "HEAD")
 
 
-def publish(worktree: Path, summary: str, body: str, expected_head: str) -> str:
+def publish(worktree: Path, summary: str, body: str, expected_head: str, expected_uncommitted: dict | None = None,
+            ignored_allow=None) -> str:
     """Push exactly the commit that was verified ready, and open a draft PR. Anything added after readiness (a commit, an
     uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed."""
     import shutil
@@ -664,6 +684,9 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str) -> str:
         raise ValueError("Not published: the branch has moved since it was verified ready; run and verify it again")
     if status_paths(worktree) or hidden_index_entries(worktree):
         raise ValueError("Not published: the worktree has changes that were not part of the verified, committed result")
+    if expected_uncommitted is None or snapshot_changes(worktree, ignored_allow) != expected_uncommitted:
+        # Ignored files (a new `.env`, a planted script) and special files are compared with the verified receipt too.
+        raise ValueError("Not published: ignored or special files changed after the work was verified ready")
     git(worktree, "push", "--set-upstream", "origin", f"{branch}:{branch}")  # explicit destination: never a default branch
     result = subprocess.run([gh, "pr", "create", "--draft", "--head", branch,
                              "--title", summary[:120], "--body-file", "-"], cwd=worktree,

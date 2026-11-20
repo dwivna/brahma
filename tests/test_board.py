@@ -148,6 +148,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp, patch("brahma.providers.doctor", doctor):
             root = init_repo(Path(tmp) / "repo")
             app = BrahmaApp(root, home=Path(tmp) / "state")
+            self.addCleanup(app.store.close)
             notices = []
             async with app.run_test(size=(120, 40)) as pilot:
                 app.notify = lambda text, **kw: notices.append(text)

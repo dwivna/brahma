@@ -38,6 +38,14 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Independent review round 13: ownership compares raw file bytes and executable bits (line-ending conversion and
+  `core.fileMode=false` no longer hide a change); Brahma's Git calls read attributes from the empty tree, so no filter
+  driver program can run during inspection, restoration or commit, whatever `.gitattributes` a worker writes; FIFOs,
+  sockets and device nodes, which Git never lists, are found by a filesystem walk and treated as violations; ownership is
+  verified after checks whatever their outcome, before a repair builder can start; stored usage keeps only counters;
+  publication compares ignored and special files with the ready receipt; resume verification is charged to the remaining
+  approved budget; file-fingerprint maps keep their path keys; follow-on plans fingerprint instructions from the
+  worktree they run in; hashing dispatch is linear.
 - Independent review round 12: a dispute decision is bound to its plan generation and to the escalation it answers;
   credential-field redaction matches whole name segments (file paths used as keys keep their fingerprints, `token` numbers
   are hidden, usage counters kept); resume checks verify and restore ownership on every exit, including failure and

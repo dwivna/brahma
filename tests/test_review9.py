@@ -167,7 +167,7 @@ class SessionFlow(unittest.TestCase):
             ready.tree = engine._tree(worktree, settings)          # what the checks and review covered
             return ready
 
-        def publish(worktree, summary, body, expected_head):
+        def publish(worktree, summary, body, expected_head, *receipt):
             published.append(expected_head)
             return "https://example.invalid/pr/1"
         with patch("brahma.engine.execute", engine_run), patch("brahma.gittools.publish", publish):

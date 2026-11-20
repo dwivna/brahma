@@ -104,6 +104,7 @@ class Proposals(unittest.TestCase):
             subprocess.run(["git", "-C", str(self.repo), "-c", "user.email=t@t", "-c", "user.name=t", *args],
                            check=True, capture_output=True)
         self.store = Store(Path(self.tmp.name) / "state")
+        self.addCleanup(self.store.close)
         self.memory = Memory(self.store)
         self.repo_id = memory_mod.repo_id(self.repo)
 

@@ -114,7 +114,7 @@ class Store:
         return datetime.now(timezone.utc).isoformat()
 
     # Event kinds whose text is machine-readable JSON read back by the coordinator: not rewritten by redaction.
-    STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome", "dispute_reply", "disagreement", "dispute_decision",
+    STRUCTURED_EVENTS = frozenset({"quota", "task_state", "wait", "plan_created", "routing", "outcome", "dispute_reply", "disagreement", "dispute_decision", "verification_spent",
                                "user_note", "context_expansion", "checks_failing", "signin_lost", "review_notes",
                                "ready_receipt"})
 
@@ -129,9 +129,10 @@ class Store:
                 event.text = safety.redact(event.text)
         elif isinstance(event.text, str):
             event.text = safety.redact(event.text)  # the one chokepoint before events reach logs and screens
+        usage = safety.usage_counters(event.usage)      # usage is counters only: never a credential-named number
         self.db.execute("INSERT INTO events(session,created,provider,role,kind,text,usage) VALUES(?,?,?,?,?,?,?)",
                         (session, self.now(), event.provider, event.role, event.kind, event.text,
-                         json.dumps(event.usage, ensure_ascii=False)))
+                         json.dumps(usage, ensure_ascii=False)))
         self.db.commit()
 
     def set(self, session: str, **values) -> None:

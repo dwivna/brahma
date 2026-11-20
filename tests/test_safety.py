@@ -280,8 +280,9 @@ class PublishDestination(unittest.TestCase):
             with patch("brahma.gittools.git", fake_git), patch("shutil.which", lambda name, **kw: "/usr/bin/gh"), \
                     patch("brahma.gittools.status_paths", return_value=[]), \
                     patch("brahma.gittools.hidden_index_entries", return_value=[]), \
+                    patch("brahma.gittools.snapshot_changes", return_value={}), \
                     patch("brahma.gittools.subprocess.run", lambda *a, **k: fake_run):
-                gittools.publish(repo, "summary", "body", "h1")
+                gittools.publish(repo, "summary", "body", "h1", {})
             push = [c for c in calls if c[0] == "push"][0]
             self.assertEqual(push, ("push", "--set-upstream", "origin", "brahma/abc123def456:brahma/abc123def456"))
             self.assertIsNone(gittools.refuse(push))

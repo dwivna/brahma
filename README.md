@@ -458,10 +458,11 @@ they do not automatically spawn child processes.
 
 These are deliberate limits of the first release, not hidden defects:
 
-- **No submodules or Git filter drivers.** A repository with submodules, or whose files use a configured filter driver
-  (Git LFS and similar), is refused at approval: submodule contents cannot be ownership-checked, and a filter runs its
-  own program and commits bytes other than the files that were checked. A commit is refused if Git would store
-  anything other than the exact checked bytes (for example an `eol` or `ident` conversion).
+- **No submodules, Git filter drivers or SHA-256 repositories; Git 2.42 or newer.** A repository with submodules, or
+  whose files use a configured filter driver (Git LFS and similar), is refused at approval: submodule contents cannot be
+  ownership-checked, and a filter runs its own program and commits bytes other than the files that were checked.
+  Brahma's own Git calls ignore `.gitattributes` (attributes are read from the empty tree), so no filter program or
+  line-ending/`ident` conversion ever runs on them and a commit stores exactly the checked bytes.
 - **No sandbox.** Workers and approved checks run as you. They can read anything your user can read (secret protection
   on reads is a prompt instruction; neither provider CLI can enforce it), and a check can change files outside the
   worktree. Brahma verifies and restores changes *inside* the worktree only.

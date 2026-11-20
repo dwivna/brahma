@@ -18,6 +18,8 @@ from tests import provider_guard  # noqa: F401,E402  (no test may launch a real 
 
 
 def run_cli(*argv, state):
+    import gc
+    gc.collect()      # an earlier test's unclosed store must not print its ResourceWarning into this command's stderr
     out, err = io.StringIO(), io.StringIO()
     with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(state)}), \
             contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):

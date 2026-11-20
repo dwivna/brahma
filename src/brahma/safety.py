@@ -72,6 +72,24 @@ def credential_field(name: str) -> bool:
             or any(pair in _CREDENTIAL_PAIRS for pair in zip(words, words[1:])))
 
 
+def usage_counters(value) -> dict:
+    """Only provider usage counters survive: non-negative numbers named `...tokens` (input_tokens,
+    cache_read_input_tokens, ...) or `num_turns`. Anything else, such as a numeric `access_token`, is dropped."""
+    if not isinstance(value, dict):
+        return {}
+    out = {}
+    for key, count in value.items():
+        key = str(key)
+        if isinstance(count, dict) and not credential_field(key):
+            nested = usage_counters(count)                 # per-invocation maps: {"task_1_..._builder@run.1": {...}}
+            if nested:
+                out[key] = nested
+        elif ((_usage_counter(key, count) or key == "num_turns") and isinstance(count, (int, float))
+              and not isinstance(count, bool) and count >= 0):
+            out[key] = count
+    return out
+
+
 def _usage_counter(name: str, value) -> bool:
     """Provider usage counters (`input_tokens`, `cache_read_input_tokens`, ...): numbers whose name ends in "tokens"."""
     words = _words(name)
@@ -89,14 +107,27 @@ def _hide_all(value):
     return REDACTED if value != "" else value
 
 
+# Structured fields that map repository paths to content fingerprints (ownership baselines, ready snapshots, trees).
+PATH_MAPS = frozenset({"snapshot", "baseline", "changes", "uncommitted"})
+
+
 def redact_deep(value):
     """redact() applied to every string inside JSON-like data. Dict keys are names and are kept; a value under a key that
     names a credential is hidden entirely, at any depth."""
     if isinstance(value, str):
         return redact(value)
     if isinstance(value, dict):
-        return {key: _hide_all(item) if credential_field(str(key)) and not _usage_counter(str(key), item)
-                else redact_deep(item) for key, item in value.items()}
+        out = {}
+        for key, item in value.items():
+            if str(key) in PATH_MAPS and isinstance(item, dict):
+                # A file-fingerprint map: its keys are repository paths, never field names, so they are kept as they
+                # are (a file called `tokenizer` keeps its fingerprint); the values still go through redact().
+                out[key] = {path: redact_deep(fingerprint) for path, fingerprint in item.items()}
+            elif credential_field(str(key)) and not _usage_counter(str(key), item):
+                out[key] = _hide_all(item)
+            else:
+                out[key] = redact_deep(item)
+        return out
     if isinstance(value, (list, tuple)):
         return [redact_deep(item) for item in value]
     return value

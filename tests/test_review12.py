@@ -164,9 +164,10 @@ class Finding8FilterDrivers(unittest.TestCase):
             git(repo, "checkout", "-q", "-b", "brahma/s")
             (repo / ".gitattributes").write_text("*.txt ident\n")
             (repo / "x.txt").write_text("$Id: not the blob $\n")      # `git add` would collapse this to $Id$
-            with self.assertRaisesRegex(ValueError, "staged content differs"):
-                gittools.commit_changes(repo, "s")
-            self.assertEqual(git(repo, "diff", "--cached", "--name-only"), "")   # nothing left staged
+            # Brahma's Git calls read attributes from the empty tree (round 13): no conversion applies, so the commit
+            # stores exactly the checked bytes.
+            gittools.commit_changes(repo, "s")
+            self.assertEqual(git(repo, "show", "HEAD:x.txt"), "$Id: not the blob $")
 
 
 class Finding9Submodules(unittest.TestCase):

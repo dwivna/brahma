@@ -50,9 +50,9 @@ class Redaction(unittest.TestCase):
     def test_publish_text_is_redacted_before_it_is_sent(self):
         with patch("shutil.which", return_value="/usr/bin/gh"), patch.object(gittools, "git", side_effect=["brahma/x", "h1", ""]), \
                 patch.object(gittools, "status_paths", return_value=[]), patch.object(gittools, "hidden_index_entries", return_value=[]), \
-                patch("subprocess.run") as run:
+                patch.object(gittools, "snapshot_changes", return_value={}), patch("subprocess.run") as run:
             run.return_value.returncode, run.return_value.stdout = 0, "url"
-            gittools.publish(Path("/w"), "Fix " + SECRET, "body " + SECRET, "h1")
+            gittools.publish(Path("/w"), "Fix " + SECRET, "body " + SECRET, "h1", {})
             call = run.call_args
             self.assertNotIn("SYNTHETIC", json.dumps(call.args[0]) + call.kwargs["input"])
 

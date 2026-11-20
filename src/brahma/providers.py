@@ -159,11 +159,8 @@ async def doctor(provider: str) -> dict[str, Any]:
 
 def _usage(value: Any) -> dict[str, int | float]:
     # Provider-reported counts only. No inferred spend, savings or quota claims.
-    if not isinstance(value, dict):
-        return {}
-    return {str(key): count for key, count in value.items()
-            if isinstance(count, (int, float)) and not isinstance(count, bool)
-            and count >= 0 and ("token" in str(key).lower() or key in ("num_turns",))}
+    from .safety import usage_counters
+    return usage_counters(value)
 
 
 def _native_id(value: str) -> str:

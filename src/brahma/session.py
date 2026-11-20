@@ -299,12 +299,14 @@ class Session:
         basis_directory, basis_label = self._toolchain_basis()       # decided once for this plan
         if not plan.questions:
             checks = plan.checks or settings.checks
+            existing = self.store.session(self.key)["worktree"]
             candidate = prepare_contract(plan, self.repo, checks, task_timeout=settings.task_timeout,
                                          repair_cycles=settings.repair_cycles,
                                          definitions=catalog.entries,
                                          model_profiles=profiles,
-                                         base_revision=(gittools.git(Path(self.store.session(self.key)["worktree"]), "rev-parse", "HEAD")
-                                                        if self.store.session(self.key)["worktree"] else None),
+                                         base_revision=gittools.git(Path(existing), "rev-parse", "HEAD") if existing else None,
+                                         # A follow-on plan runs in the existing worktree: its instructions are read there.
+                                         instruction_root=Path(existing) if existing else None,
                                          # A follow-on plan runs in the existing worktree, so its toolchain is read from there.
                                          toolchain_directory=basis_directory, toolchain_basis=basis_label)
             # Check required context before asking for approval; never silently truncate it.
@@ -547,6 +549,15 @@ class Session:
             head = gittools.git(worktree, "rev-parse", "HEAD")
             current_index = None
             decisions = self._decisions()
+            verification_spent: dict[int, float] = {}      # resume verifications charged to a task's approved budget
+            for event in self.store.events_since(self.key, self.store.latest_seq(self.key, "plan_created")):
+                if event["kind"] == "verification_spent":
+                    try:
+                        spent = json.loads(event["text"])
+                        if type(spent.get("index")) is int and isinstance(spent.get("seconds"), (int, float)):
+                            verification_spent[spent["index"]] = verification_spent.get(spent["index"], 0) + max(0, spent["seconds"])
+                    except (ValueError, TypeError, AttributeError):
+                        pass
             for event in self.store.events(self.key):
                 if event["kind"] == "native_session" and current_index in progress and event["role"] in ("builder", "reviewer"):
                     progress[current_index][event["role"] + "_session"] = event["text"]
@@ -575,6 +586,9 @@ class Session:
                             completed.add(index)
                         else:
                             completed.discard(index)
+            for index, spent in verification_spent.items():
+                if index in progress:
+                    progress[index] = dict(progress[index], verification_spent=spent)
             for index, (side, digest) in decisions.items():
                 # A decision applies only to the exact dispute it was made on (same positions), in this plan generation.
                 waiting = (progress.get(index) or {}).get("dispute")
@@ -624,14 +638,17 @@ class Session:
                     if result.status == "ready":
                         # What was verified, bound to the exact commit: publication may push this and nothing else.
                         receipt = {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
-                                   "committed": not gittools.status_paths(worktree)}
+                                   "committed": not gittools.status_paths(worktree),
+                                   # Ignored and special files as verified: publication refuses if any of them changed.
+                                   "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist)}
                         self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
                     if receipt and self.settings.publish and not self.halted():
                         try:
                             if not receipt["committed"]:
                                 raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
                             result.text += "\nDraft PR: " + gittools.publish(worktree, self.plan.summary, result.text,
-                                                                              receipt["head"])
+                                                                              receipt["head"], receipt["uncommitted"],
+                                                                              self.settings.ignored_allowlist)
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                             result.text += "\nNot published: " + str(error)

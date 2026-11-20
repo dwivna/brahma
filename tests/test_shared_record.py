@@ -58,7 +58,9 @@ class Migration(unittest.TestCase):
             self.assertEqual(store.session("old1")["status"], "blocked")
             self.assertEqual(store.events("old1")[0]["text"], "kept")
             store.close()
-            self.assertEqual(sqlite3.connect(home / "state.sqlite3").execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+            check = sqlite3.connect(home / "state.sqlite3")
+            self.assertEqual(check.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
+            check.close()
 
     def test_task_state_and_attention_survive_reopening(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -241,6 +243,7 @@ class RepositoryMemory(unittest.TestCase):
         self.repo_a, self.repo_b = make_repo(self.root / "a"), make_repo(self.root / "b")
         self.home = self.root / "state"
         self.store = Store(self.home)
+        self.addCleanup(self.store.close)
         self.memory = Memory(self.store)
 
     def test_identity_is_stable_across_worktrees_and_distinct_between_repositories(self):
