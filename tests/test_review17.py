@@ -83,7 +83,7 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
 
 
 class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
-    async def test_publish_clears_a_stale_cancel_when_issued_and_names_durable_controls(self):
+    async def test_a_stale_cancel_does_not_block_publication_and_durable_controls_are_named(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
             store = Store(Path(tmp) / "state")
@@ -91,6 +91,7 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
             session = Session(store, repo)
             session.plan = Plan("Goal", [Task("T", "do", ["src/**"], ["ok"])])
             store.set(session.key, worktree=str(repo))
+            session.cancel.set()          # left by an earlier run, a lifted kill switch or a resumed pause
             seen = []
             with patch.object(gittools, "publish", lambda *args: seen.append(args) or "u"):
                 await session.publish_ready_in_thread({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
@@ -100,9 +101,9 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
         ui = (ROOT / "src" / "brahma" / "ui.py").read_text()
         start = ui.index('elif value == "/publish":')
         block = ui[start:ui.index("elif value ==", start + 10)]
-        # A stale cancel is cleared when the person issues /publish; a quit during the Touch ID prompt refuses.
-        self.assertLess(block.index("self.session.cancel.clear()"), block.index("presence.require"))
-        self.assertLess(block.index("presence.require"), block.index("if self.session.cancel.is_set()"))
+        # A quit during the Touch ID prompt refuses; nothing clears the session's state on the way.
+        self.assertLess(block.index("presence.require"), block.index("if self.session.closing.is_set()"))
+        self.assertNotIn("cancel.clear()", block)
 
     def test_automatic_publication_runs_off_the_event_loop(self):
         source = (ROOT / "src" / "brahma" / "session.py").read_text()
@@ -196,14 +197,17 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp)
             arguments, abandoned = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
+            session.cancel.set()                                # stale (a lifted kill switch, a resumed pause): ignored
             self.assertIsNone(arguments[6]())
-            abandoned.set()                                     # the awaiting task was cancelled
-            self.assertIn("Cancelled", arguments[6]())
-            abandoned.clear()
-            session.cancel.set()                                # a quit or service stop, before its grace period
-            self.assertIn("Cancelled", arguments[6]())
-            session.store.stop(session.key)                     # a durable Stop is named first, even while closing
+            session.store.stop(session.key)                     # a durable Stop is named
             self.assertEqual(arguments[6](), "Stopped by user")
+            session.closing.set()                               # a quit or service stop: seen first, with no I/O
+            with patch.object(Store, "halt_reason", side_effect=AssertionError("database read while closing")):
+                self.assertIn("Cancelled", arguments[6]())
+            session.closing.clear()
+            abandoned.set()                                     # the awaiting task was cancelled
+            with patch.object(Store, "halt_reason", side_effect=AssertionError("database read while closing")):
+                self.assertIn("Cancelled", arguments[6]())
 
     def test_a_stuck_publication_holding_the_lock_ends_the_wait_at_a_deadline(self):
         import fcntl
@@ -328,10 +332,14 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
     async def test_a_service_stop_or_quit_ends_the_push_within_its_grace_and_the_run_stays_ready(self):
         # scheduler.tick and the terminal UI's quit set session.cancel, then wait a grace period before cancelling.
         with tempfile.TemporaryDirectory() as tmp:
-            store, session, result, seen = await self._run(tmp, lambda session, work: session.cancel.set())
+            def closing(session, work):     # what scheduler.tick and the terminal UI's quit do first
+                session.closing.set()
+                session.cancel.set()
+            store, session, result, seen = await self._run(tmp, closing)
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])  # the push itself was stopped
             self.assertEqual(result.status, "ready", result.text)       # verified and committed: /publish still works
             self.assertIn("Not published", result.text)
+            self.assertNotIn("Not published: Not published", result.text)
             self.assertEqual(store.session(session.key)["status"], "ready")
 
     async def test_a_forced_cancellation_is_not_swallowed_and_the_run_is_recorded_ready(self):
@@ -341,6 +349,9 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIsInstance(outcome, asyncio.CancelledError)     # the caller's cancellation continues
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])
             self.assertEqual(store.session(session.key)["status"], "ready")   # not requeued; /publish works
+            self.assertNotEqual(store.job(session.key)["state"], "running")   # the job is closed
+            summaries = [e["text"] for e in store.events(session.key) if e["kind"] == "summary"]
+            self.assertTrue(summaries and "Brahma closed during publication" in summaries[-1])
 
 
 if __name__ == "__main__":

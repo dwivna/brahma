@@ -106,11 +106,13 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
         if not work.done():
             # Service stop: let child work stop cleanly and keep its checkpoint.
             interrupted = True
+            session.closing.set()
             session.cancel.set()
             await asyncio.wait({work}, timeout=grace)
         await settle()
     except asyncio.CancelledError:
         # Outer cancellation: ask child work to checkpoint, then force it, then re-raise.
+        session.closing.set()
         session.cancel.set()
         try:
             await asyncio.wait({work}, timeout=grace)
