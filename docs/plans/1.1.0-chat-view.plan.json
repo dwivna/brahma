@@ -1,0 +1,123 @@
+{
+  "summary": "Brahma 1.1.0 (docs/decisions.md Rounds 17-20): show the conversation between You, Brahma, Codex and Claude as one timed chat in the terminal UI and in `brahma run` output, with every displayed time in the system timezone; and give Brahma six-field work reports (Completed, Evidence, Current work, Next work, Where we are, Needs you) after each task and at the end of each run, following a mirrored `work-report` skill. Stored events, `brahma events` and existing --json fields stay as they are; `brahma --json status` gains an additive `report` field.",
+  "tasks": [
+    {
+      "title": "Chat renderer and local time formatting",
+      "instructions": "Create src/brahma/chat.py: a pure display module that turns stored events (models.Event plus its stored `created` UTC ISO time) into chat messages, with no I/O, no provider calls and no change to how events are stored. Speakers: provider brahma with role user -> 'You'; other brahma events -> 'Brahma'; codex -> 'Codex'; claude -> 'Claude'. A message may name who it is for ('Brahma -> Claude', 'Codex -> Claude'); Codex and Claude never message each other directly (Brahma relays a reviewer's findings in the builder's next brief), so an arrow shows the addressee, not a direct channel. Translate every known event kind into one plain sentence from its speaker: task_state (assigned, building, checking, reviewing, ready, blocked, waiting, incomplete, with the task number and title), routing (who was chosen and why, one line), model_selected, progress (the worker's own words), check and checks_failing (counts and which check), review_notes / reviewer verdicts (verdict, number of findings, each finding id, severity, path and text, addressed to the builder), dispute_* events, wait (provider and reset time), approval/approved/user/user_note/dispute_decision/capacity_confirmed from the user (speaker You), publication, ready_receipt (one line, no JSON), work_report (introduced by task 2: JSON with the keys completed, evidence, current_work, next_work, where_we_are, needs_you; render it as one Brahma message with six labelled rows in that order), summary, error, warning, information, enforcement, restore, context_expansion, note_applied, signin_lost, verification_spent, outcome. Hide from the chat: usage (it belongs to the status bar), native_session, plan and plan_created JSON, and quota events that repeat the previous quota state of the same provider (show the first and any change, as one sentence). Any other kind gets a short readable fallback ('Brahma: <kind> recorded'), never raw JSON. Every displayed text passes the existing redaction boundary (safety.redact) and the existing displayable cleaning of control, C1 and Unicode format characters; multi-line worker text may keep its line breaks. Times: format with the system timezone (datetime.astimezone() / time.localtime, tzname from the system), e.g. '14:38 IST'; show the full date ('Sat 21 Nov 2026') on the first message and whenever the local day changes; helper functions for a time, a date-time and a reset time are public so other modules reuse them. Write tests in tests/test_chat.py; make them deterministic by setting the TZ environment variable and calling time.tzset() (restore afterwards), covering Asia/Kolkata and at least one other zone. Add a test that scans src/brahma for every event kind string emitted (Event(... kind ...) and _emit(emit, \"kind\", ...)) and fails if a kind has neither a chat rule nor an explicit hidden entry. Tests must never launch the real claude or codex CLIs and must import tests.provider_guard like the other tests.",
+      "files": [
+        "src/brahma/chat.py",
+        "tests/test_chat.py"
+      ],
+      "acceptance": [
+        "chat.py renders every event kind emitted in src/brahma or lists it as hidden, and a test enforces this",
+        "A work_report event renders as one Brahma message with six labelled rows in the fixed order",
+        "Speakers are You, Brahma, Codex and Claude; addressed messages show the addressee",
+        "No raw JSON appears in any rendered chat message",
+        "Repeated identical quota events are shown once; usage, native_session, plan and plan_created are hidden",
+        "Times use the system timezone with its abbreviation; the full date appears on the first message and on each local day change",
+        "Rendered text is redacted and stripped of control, C1 and Unicode format characters",
+        "Stored events and their JSON are not changed",
+        "Tests pass deterministically under TZ=Asia/Kolkata and another timezone, without launching provider CLIs"
+      ],
+      "provider": "auto",
+      "complexity": "routine",
+      "scenarios": [
+        "Scenario: a worker's progress reads as a chat message\n  Given the system timezone is Asia/Kolkata\n  And Claude as builder emitted the progress text \"Reading the review docs\" at 2026-11-21T09:08:00Z\n  When the event is rendered\n  Then the message reads \"14:38 IST  Claude: Reading the review docs\"",
+        "Scenario: Brahma hands a task to a worker\n  Given a task_state event assigning task 1 \"Chat renderer\" to builder claude at critical complexity\n  When the event is rendered\n  Then the message is from Brahma addressed to Claude and names task 1 and its title\n  And it contains no JSON",
+        "Scenario: review findings are addressed to the builder\n  Given Codex reviewed Claude's task 1 and reported finding F1 high at src/x.py with text \"wrong total\"\n  When the review event is rendered\n  Then the message reads as Codex addressed to Claude with F1, high, src/x.py and \"wrong total\"",
+        "Scenario: repeated quota and usage stay out of the chat\n  Given two identical quota events for claude followed by a usage event\n  When the events are rendered in order\n  Then exactly one quota sentence is shown and the usage event shows nothing",
+        "Scenario: the owner's own actions appear as You\n  Given the approval event \"Approved by the device owner: contract ee24ddff...\"\n  When the event is rendered\n  Then the speaker is You",
+        "Scenario: the date appears when the day changes\n  Given messages at 23:58 IST on 21 Nov 2026 and 00:03 IST on 22 Nov 2026\n  When they are rendered in order\n  Then the second message is preceded by the date Sun 22 Nov 2026",
+        "Scenario: secrets and terminal controls never reach the screen\n  Given an event text containing a credential-shaped value and an escape sequence\n  When the event is rendered\n  Then the value is redacted and the escape sequence is removed",
+        "Scenario: an unknown event kind gets a readable fallback\n  Given an event of a kind with no chat rule and JSON text\n  When the event is rendered\n  Then a short readable line is shown and no JSON appears",
+        "Scenario: a work report reads as six rows\n  Given a work_report event with all six fields\n  When it is rendered\n  Then one Brahma message shows Completed, Evidence, Current work, Next work, Where we are and Needs you in that order"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    },
+    {
+      "title": "Brahma's six-field work reports and the mirrored work-report skill",
+      "instructions": "Write the work-report skill once and mirror it byte for byte at .claude/skills/work-report/SKILL.md and .agents/skills/work-report/SKILL.md (same frontmatter style as .claude/skills/brahma-grill-me/SKILL.md). Its rules, addressed to the owner with no person's name or project: after every finished task or handoff item, report in this order: Completed (what was finished, its resulting behaviour, and the commit reference), Evidence (measured test results or scores, with their scope and what is still unverified), Current work (the task being worked on now), Next work (the next task in the agreed order), Where we are (position in the plan, readiness, and reviews still owed), Needs you (a specific decision for the owner, or \"None\"); report significant problems immediately; give brief progress updates during longer work; expand only when a failure or a decision needs explanation; keep implementation, tests, measured results, independent review and release status distinct; a passing code test is never a claimed ability. Create src/brahma/report.py: build a report (a dict with exactly the keys completed, evidence, current_work, next_work, where_we_are, needs_you, all strings) only from what Brahma recorded for the current plan (events since the latest plan_created): task_state transitions, the checks Brahma ran (command and result), the reviewer's provider, verdict and findings by severity, ownership verification, the local commit, the ready receipt and the publication outcome. Never copy a worker's claims into Evidence; say what is unverified (for example no checks configured, or a review is a model's judgement). Needs you names the concrete action (brahma decide for a disputed review, resume after a pause or the kill switch, the provider and reset time for a quota wait, a new plan when the attempt budget is exhausted) or \"None\". In src/brahma/session.py: after a task_state event whose state is ready, blocked, incomplete, waiting, needs_decision or cancelled is stored, and once after the run's summary event, emit Event(kind=\"work_report\") whose text is the report as JSON. This is best effort: a failure to build or store a report is swallowed and never changes the run's status, its job, its commit, its receipt or its publication; do not change any other behaviour of session.py. Add a public function in report.py that returns the latest stored report of a session (or None), for task 3. Tests in tests/test_report.py: field order and keys; evidence from recorded checks and reviews only (a worker's 'all tests pass' text never appears in Evidence); Needs you for each waiting/blocked/decision case; a report failure leaves the run's outcome unchanged; the two SKILL.md files are byte-identical. Tests must never launch the real claude or codex CLIs.",
+      "files": [
+        ".claude/skills/work-report/SKILL.md",
+        ".agents/skills/work-report/SKILL.md",
+        "src/brahma/report.py",
+        "src/brahma/session.py",
+        "tests/test_report.py"
+      ],
+      "acceptance": [
+        "The two work-report SKILL.md files exist, are byte-identical, name no person or project, and state the six fields, their order and the rules",
+        "Brahma stores a work_report event after each task ends and once at the end of each run",
+        "Each report has exactly the six fields in order, built only from recorded facts",
+        "Evidence never contains a worker's own claims and states what is unverified",
+        "Needs you names a concrete action or says None",
+        "A failure to build or store a report never changes the run's status, job, commit, receipt or publication",
+        "No other behaviour of session.py changes",
+        "Tests pass without launching provider CLIs"
+      ],
+      "provider": "auto",
+      "complexity": "critical",
+      "scenarios": [
+        "Scenario: a ready task gets a report\n  Given task 1 ended ready after Brahma's checks passed and the reviewer passed it\n  When the task_state event is stored\n  Then a work_report event follows whose Evidence names the checks Brahma ran and the reviewer's verdict\n  And whose Next work names task 2",
+        "Scenario: a disputed review needs the owner\n  Given task 1 is waiting for the owner's decision on a disputed high finding\n  When its report is built\n  Then Needs you names brahma decide for that session",
+        "Scenario: a quota wait names the reset\n  Given task 2 is waiting for Codex until Wed 25 Nov 2026 21:40 IST\n  When its report is built\n  Then Needs you names Codex and that reset time",
+        "Scenario: a worker's claim is not evidence\n  Given the builder wrote \"all tests pass\" and Brahma ran no checks\n  When the report is built\n  Then Evidence says no checks were run and does not repeat the claim",
+        "Scenario: a report failure changes nothing\n  Given building the report raises an error\n  When the task ends ready\n  Then the run's status, job, commit and receipt are as without reports",
+        "Scenario: the run ends with a report\n  Given a run of two tasks ends\n  When its summary event is stored\n  Then one more work_report covers the whole run"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    },
+    {
+      "title": "Show the chat and the reports everywhere a person reads the conversation",
+      "instructions": "Use src/brahma/chat.py (task 1) and src/brahma/report.py (task 2) without editing them, everywhere a person reads the conversation or a time. src/brahma/ui.py: replace the three conversation panes (#manager, #codex, #claude) with one shared chat timeline in time order, each message coloured by speaker (keep the existing colours for Brahma, Codex and Claude; add one for You); keep the status bar, controls and slash commands working; usage still updates the status bar. src/brahma/cli.py: the stderr `log` callback of `brahma run` prints chat lines (time, speaker, optional addressee, text) instead of '[provider/role] text'; use colour only when stderr is a terminal and NO_COLOR is unset. src/brahma/board.py and src/brahma/usage.py: show reset and observation times in the system timezone via chat.py's helpers instead of UTC. Add a `report` field to `brahma --json status` (the latest work report's six fields, or null) and show the latest report in the human `brahma status` output. Do not change any other --json field, `brahma events` (JSON lines), exit codes, stored events, stored timestamps (UTC) or the approval screen's contract text. Update the existing tests that assert the old display (tests/test_ui.py pane ids and layout, tests/test_review11.py _pane_entries, tests/test_usage.py 'UTC') to the new behaviour without weakening what they protect (redaction at the rendering boundary, narrow-terminal layout). Add tests/test_chat_display.py for the CLI log lines, the TUI timeline and local reset times, deterministic via TZ and time.tzset(). Tests must never launch the real claude or codex CLIs.",
+      "files": [
+        "src/brahma/ui.py",
+        "src/brahma/cli.py",
+        "src/brahma/board.py",
+        "src/brahma/usage.py",
+        "tests/test_chat_display.py",
+        "tests/test_ui.py",
+        "tests/test_review11.py",
+        "tests/test_usage.py"
+      ],
+      "acceptance": [
+        "The terminal UI shows one shared chat timeline with speakers You, Brahma, Codex and Claude",
+        "`brahma run` prints chat lines with local times, and no raw JSON, to stderr",
+        "Colour is used only on a terminal and never when NO_COLOR is set",
+        "Usage resets and the board show local times with the timezone abbreviation",
+        "`brahma --json status` has a `report` field with the latest six-field report or null; no other JSON field changes",
+        "--json outputs, `brahma events`, exit codes, stored events and the approval contract text are unchanged",
+        "Existing tests are updated without weakening redaction or the narrow-terminal behaviour",
+        "Tests pass deterministically without launching provider CLIs"
+      ],
+      "provider": "auto",
+      "complexity": "critical",
+      "scenarios": [
+        "Scenario: brahma run shows the chat\n  Given an approved session whose events include a task assignment, worker progress and a review\n  When brahma run prints its log to stderr\n  Then each line has a local time, a speaker and readable text\n  And no line contains raw JSON",
+        "Scenario: the terminal UI shows one timeline\n  Given a session with messages from You, Brahma, Codex and Claude\n  When the terminal UI shows the session\n  Then the messages appear in one timeline in time order with each speaker named",
+        "Scenario: machine-readable output is unchanged\n  Given the same session\n  When brahma events and brahma --json status are run\n  Then their output is identical in shape and content to version 1.0.0",
+        "Scenario: reset times are local\n  Given the system timezone is Asia/Kolkata and a provider resets at 2026-11-25T16:10:58Z\n  When the usage report or the board is shown\n  Then the reset reads Wed 25 Nov 2026 21:40 IST",
+        "Scenario: no colour off a terminal\n  Given stderr is not a terminal or NO_COLOR is set\n  When brahma run prints its log\n  Then the lines contain no colour escape sequences",
+        "Scenario: status carries the latest report\n  Given a session whose latest work_report is stored\n  When brahma --json status is run\n  Then its report field holds that report's six fields\n  And every other field is unchanged"
+      ],
+      "allowed_skills": [],
+      "allowed_agents": []
+    }
+  ],
+  "questions": [],
+  "checks": [
+    [
+      "env",
+      "PYTHONPATH=src",
+      "PYTHONDONTWRITEBYTECODE=1",
+      "/Users/dwivabh/Developer/development/brahma/.venv/bin/python",
+      "-m",
+      "unittest",
+      "discover",
+      "-s",
+      "tests"
+    ]
+  ],
+  "feature": ""
+}

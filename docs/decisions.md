@@ -345,3 +345,75 @@ complete it". This amends Round 15, item 1, for 1.0.0 only.
    fixed in a 1.0.x patch release, not waved through.
 3. **Unchanged:** the suite and smoke test on the release commit, one real `brahma approve` by Abhinav, and merge/tag
    only on Abhinav's explicit instruction.
+
+## Rounds 17–20 — 21 November 2026 (1.1.0: conversation as chat, local times, Brahma's work reports)
+
+Asked by Abhinav: "internally they communicate via json but when user see them in terminal it should show to user in
+chat format - Example 3 person doing chat brahma, codex, claude. Display everywhere times and date in IST format or as
+per system", and "add same reporting skill to brahma that currently claude and codex is follwing for reporting work".
+Answers below are the options Abhinav chose, quoted by question.
+
+**Round 17**
+1. Q1 (where the chat appears): "CLI and TUI". One renderer gives `brahma run` output and the terminal UI the same chat.
+   Stored events, `brahma events` and every `--json` output stay as they are.
+2. Q2 (layout): "One shared timeline", e.g. `14:38 IST  Brahma → Claude: Task 1 is yours (critical, Opus 5.5).` An
+   arrow names who a message is for; Codex and Claude still never message each other directly (Brahma relays a
+   reviewer's findings in the builder's next brief).
+3. Q3 (technical events): "Translate, hide repeats". Each known kind becomes one plain sentence; a quota event is shown
+   only when it changes; usage goes to the status bar; raw JSON stays in `brahma events` and `--json`.
+4. Q4 (times): "System timezone". Every displayed time uses the computer's timezone with its abbreviation (IST on
+   Abhinav's Mac); the full date on the first message and when the day changes. Stored times stay UTC.
+
+**Round 18**
+1. Q1 (worker verbosity): "Progress summaries". Workers speak in their progress messages and results only.
+2. Q2 (the owner in the chat): "Yes, as 'You'". Approval, notes, decisions and stop/pause appear as messages from You.
+3. Q3 (release): "1.1.0 now; security 1.2.0". The chat view is 1.1.0; the planned security skills move to 1.2.0.
+4. Q4 (builder): "Through Brahma". Claude Code prepares the contract; Abhinav approves it; Brahma runs it.
+
+**Round 19**
+1. Q1 (who reports in the six fields Completed, Evidence, Current work, Next work, Where we are, Needs you): "Brahma
+   only". Workers reply as now.
+2. Q2 (sharing the rule): "Repo skill, mirrored". One `work-report` skill, identical in `.claude/skills` and
+   `.agents/skills`; Brahma's own reports follow the same rules.
+3. Q3 (other skills for workers): "Only those the plan names". Unchanged: a task gets a skill only through its approved
+   `allowed_skills`.
+4. Q4 (when to run): "Approve after both reset". Observed on 21 November: Codex's weekly window 100% used until
+   Wed 25 Nov 2026 21:40 IST; Claude's 95% used until Wed 25 Nov 2026 13:30 IST. The contract is approved after both.
+
+**Round 20**
+1. Q1 (workers and the skill): "Not given to workers". The skill serves Brahma's report rules and interactive sessions.
+2. Q2 (when Brahma reports): "Each task end + run end": after a task ends ready, blocked, incomplete, waiting or
+   needing a decision, and once when the run ends.
+3. Q3 (where reports live): "Chat + stored + status". A Brahma chat message, a stored `work_report` event with the six
+   fields as JSON, and an additive `report` field in `brahma --json status`.
+4. Q4 (wording): "Generic, same rules". Same fields, order and rules, addressed to the owner, without a name or project.
+
+## Round 21 — 21 November 2026 (is Brahma worth it: measure, benchmark, next features)
+
+Abhinav asked Claude, as a worker of Brahma, about its benefits, whether it reduces or increases the owner's effort,
+benchmarks, future value and features. Facts recorded at the time from Brahma's state: 20 sessions, none ran to ready
+(8 planning only, 8 never approved, 3 incomplete, 3 blocked, 1 interrupted); 6 tasks reached ready; 23 of 24 reviews
+requested changes; repository memory for learned routing held 0 items; no benchmark existed. Claude's view: the value
+is cross-vendor review and unattended runs on subscriptions, but it was not yet measurably reducing effort; as a
+builder in Brahma, Claude cannot run tests (Read, Glob, Grep, Edit, Write only), and medium/low findings also force
+repairs. Codex was out of usage and was not asked.
+
+1. Q1 (the deciding metric): "Your minutes per accepted change" — the owner's time (planning, approving, reading,
+   deciding, fixing) per change that is merged.
+2. Q2 (benchmark): "Fixed suite, A/B" — a fixed task suite in a sample repository, run through Brahma and through an
+   interactive session, comparing owner minutes, wall time, quota and escaped defects, before each release.
+3. Q3 (features after 1.1.0): "Claude builder runs checks", "Benchmark + effort log", "Calibrated review" (only high
+   and medium findings force a repair; low findings become notes). Not chosen: notifications.
+4. Q4 (Codex's view): "Yes, after its reset" — the same questions go to Codex, read-only, after Wed 25 Nov 2026 21:40
+   IST; both answers are recorded side by side.
+
+## Round 22 — 21 November 2026 (order and shape of the next features)
+
+1. Q1 (order): "Measure first". 1.2.0 benchmark and effort log (a baseline measured on 1.1.0); 1.3.0 the Claude builder
+   runs checks; 1.4.0 calibrated review; the security skills follow. **This amends Round 18, item 3**, which had put the
+   security skills in 1.2.0.
+2. Q2 (how the Claude builder runs checks): "Approved checks only". Brahma gives the builder one tool that runs exactly
+   the contract's approved check commands in the worktree and returns the result; no general shell.
+3. Q3 (measuring the owner's minutes): "Automatic + your estimate". Brahma logs the owner's touch points automatically
+   (approve, decide, notes, resume, time the UI is focused on a session) and asks one optional question at merge for
+   minutes spent outside Brahma; observed and estimated minutes stay separate.
