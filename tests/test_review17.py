@@ -405,6 +405,28 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIn("a halt was seen during this run (Paused by user)", result.text)
 
 
+class KillSwitchCount(unittest.TestCase):
+    def test_a_hand_made_flag_is_counted_when_released_and_a_failed_count_never_stops_the_switch(self):
+        from brahma import halt
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp)
+            halt.flag(home).write_text("x")             # engaged by creating the file, not by engage()
+            before = halt.epoch(home)
+            self.assertTrue(halt.release(home))
+            self.assertGreater(halt.epoch(home), before)
+            real = Path.write_text
+
+            def count_fails(path, *args, **kwargs):     # the count cannot be written (read-only, full disk)
+                if path.name == halt.NAME + ".count":
+                    raise OSError("read-only")
+                return real(path, *args, **kwargs)
+            with patch.object(Path, "write_text", count_fails), \
+                    patch("brahma.procs.reap", return_value=([], [])) as reap:
+                halt.kill_everything(home)              # the switch still engages and every worker is still reaped
+            self.assertTrue(halt.engaged(home))
+            reap.assert_called_once()
+
+
 class ForcedCancellationClosesTheJob(unittest.TestCase):
     def test_a_ready_run_cancelled_while_publishing_closes_a_running_job_but_keeps_a_hold(self):
         from brahma import scheduler

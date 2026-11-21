@@ -48,7 +48,7 @@ security reviews that followed.
   closing signal, never stale) ends a running push or PR creation at its next quarter-second check and starts no new
   one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic publication is
   refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted since (read from
-  durable records taken at the very start of the run, including a new count of kill-switch engagements, so a halt
+  durable records taken at the very start of the run, including a new count of kill-switch engagements and releases (best effort: it never stops the switch), so a halt
   made while the final checks block the event loop counts); any publication failure is reported, never raised, and
   the run ends ready; a forced cancellation during publication keeps the committed run ready, closes its job and
   records its summary; a Stop or Pause during

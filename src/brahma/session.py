@@ -509,6 +509,10 @@ class Session:
             abandoned.set()                 # the thread ends its running step at the next poll; nothing new starts
             raise
 
+    def _job_held(self) -> bool:
+        job = self.store.job(self.key)
+        return bool(job and job["state"] == "held")
+
     def begin_closing(self):
         """Brahma is closing (terminal UI quit, service stop): not durable, never cleared on this object. Running work
         checkpoints; publication stops at its next check and starts nothing new."""
@@ -744,7 +748,7 @@ class Session:
                             # external write. Durable records cover the moments the sampling monitor cannot run.
                             if seen_halt:
                                 seen = seen_halt[0]
-                            elif halt.epoch(self.store.home) != run_kills:
+                            elif halt.epoch(self.store.home) != run_kills or self._job_held():
                                 seen = "Kill switch engaged"
                             elif self.store.controls_after(self.key, run_control):
                                 seen = "Stopped or paused by user"
