@@ -892,8 +892,7 @@ class Session:
                     final = "ready" if receipt_stored else "blocked"
                     _best_effort(lambda: self.store.set(self.key, status=final))
                     _best_effort(lambda: self.store.close_finished_job(self.key) if receipt_stored
-                                 else self.store.finish_job(self.key, "cancelled" if self.store.session(self.key)["stopped"]
-                                                            else "blocked"))
+                                 else self.store.finish_job(self.key, "blocked"))
                     _best_effort(lambda: self.emit(Event(kind="publication", text=note)))
                     _best_effort(lambda: self.emit(Event(kind="summary", text=f"{final}: {result.text}\n{note}",
                                                          usage=result.usage)))

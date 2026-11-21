@@ -142,11 +142,18 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
     def test_a_file_in_a_folders_place_never_redirects_a_restore(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
-            (repo / "docs").write_text("a file where a folder was\n")
+            (repo / "docs").mkdir()
+            (repo / "docs" / "a.txt").write_text("tracked\n")
+            subprocess.run(["git", "-C", str(repo), "add", "docs/a.txt"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-qm", "docs"], check=True, capture_output=True)
+            shutil.rmtree(repo / "docs")
+            (repo / "docs").write_text("a file where the tracked folder was\n")   # Git would write through it
             with patch.object(gittools, "violating_paths", return_value=["docs/a.txt"]):
                 restored, kept = gittools.restore_violations(repo, ["src/**"], {})
             self.assertEqual(restored, [])
             self.assertIn("docs/a.txt", kept)
+            self.assertEqual((repo / "docs").read_text(), "a file where the tracked folder was\n")
 
     def test_a_symlink_loop_that_violates_is_itself_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
