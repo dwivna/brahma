@@ -190,10 +190,13 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
     async def test_a_cancel_that_arrives_during_publication_stops_it_but_a_stale_one_does_not(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp)
-            arguments = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
+            session.cancel.set()                                # stale: left from before this publication
+            arguments, _ = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
             self.assertIsNone(arguments[6]())
-            session.cancel.set()
+            session.cancel.set()                                # a quit during publication
             self.assertIn("Cancelled", arguments[6]())
+            session.store.stop(session.key)                     # a durable Stop is named as a stop
+            self.assertEqual(arguments[6](), "Stopped by user")
 
     def test_a_stuck_publication_holding_the_lock_ends_the_wait_at_a_deadline(self):
         import fcntl
@@ -222,6 +225,39 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
                 with self.assertRaisesRegex(ValueError, "pushed to brahma/s"):
                     gittools.publish(repo, "s", "b", head, snapshot)
 
+    def test_a_stopped_or_failed_pr_step_also_says_the_commit_was_pushed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, head, snapshot = verified_branch(tmp)
+            for failure in (ValueError("Publication stopped: Stopped by user"), UnicodeEncodeError("utf-8", "", 0, 1, "x")):
+                def step(argv, worktree, stopped, **kwargs):
+                    if "push" in argv:
+                        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+                    raise failure
+                with self.subTest(failure=type(failure).__name__), \
+                        patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(Path(tmp) / "state")}), \
+                        patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
+                        patch.object(gittools, "_run_publication_step", step):
+                    with self.assertRaisesRegex(ValueError, "pushed to brahma/s"):
+                        gittools.publish(repo, "s", "b", head, snapshot)
+
+    def test_an_owned_file_missing_for_a_moment_is_kept_not_reset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            tracked = next(p for p in (repo / "src").iterdir() if p.is_file())
+            name = tracked.relative_to(repo).as_posix()
+            with patch.object(gittools, "violating_paths", return_value=[name]), \
+                    patch.object(gittools.os, "lstat", side_effect=FileNotFoundError):
+                restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertEqual(restored, [])
+            self.assertIn(name, kept)
+
+    def test_a_stored_placeholder_is_not_reported_as_a_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            stored = {"notes/[REDACTED].txt": "33188:" + "0" * 64}     # a file that existed, stored redacted
+            restored, kept = gittools.restore_violations(repo, ["src/**"], stored)
+            self.assertNotIn("notes/[REDACTED].txt", restored + kept)
+
 
 class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
     def test_the_suite_runs_with_a_private_state_directory(self):
@@ -232,3 +268,41 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
+    async def test_a_quit_during_automatic_publication_marks_the_run_interrupted_not_ready(self):
+        from brahma.models import Result
+        from tests.test_halt import approved_job
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+            self.addCleanup(store.close)
+            original = Session.approved_contract
+
+            def approved(self_, *args, **kwargs):      # the approved settings enable commit and publication
+                contract, settings, catalog = original(self_, *args, **kwargs)
+                settings.auto_commit = settings.publish = True
+                return contract, settings, catalog
+
+            async def ready(*args, **kwargs):
+                result = Result("brahma", "ready", "done")
+                result.tree = "verified-tree"
+                return result
+
+            def publishing(*args):
+                session.cancel.set()                    # the terminal UI quits / the service stops mid-push
+                reason = args[6]()
+                raise ValueError("Publication stopped: " + reason)
+            identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
+                                   "common_dir": "/c", "head": "h", "hidden": []}
+            with patch("brahma.engine.execute", ready), patch("brahma.engine._tree", return_value="verified-tree"), \
+                    patch.object(Session, "approved_contract", approved), \
+                    patch.object(gittools, "commit_changes", return_value="c"), \
+                    patch.object(gittools, "status_paths", return_value=[]), \
+                    patch.object(gittools, "snapshot_changes", return_value={}), \
+                    patch.object(gittools, "publish", publishing), \
+                    patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
+                    patch.object(gittools, "git_identity", side_effect=identity):
+                result = await session.execute(scheduled=True)
+            self.assertEqual(result.status, "cancelled", result.text)        # the scheduler requeues it; it is not "ready"
+            self.assertIn("Brahma is closing", result.text)

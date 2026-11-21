@@ -8,6 +8,7 @@ import re
 import stat
 from pathlib import Path
 import signal
+import sqlite3
 import subprocess
 import time
 
@@ -536,6 +537,8 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     tracked_files = set(listing.decode("utf-8", errors="surrogateescape").split("\0"))
     for name in candidates:
         target = worktree / name
+        if redacted_baseline and REDACTED in name and not os.path.lexists(target):
+            continue                        # a stored placeholder, not a file in the worktree
         if name in baseline or (redacted_baseline and redact(name) in baseline):
             kept.append(name)
             continue
@@ -546,7 +549,7 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
             try:
                 regular = stat.S_ISREG(os.lstat(target).st_mode)
             except OSError:
-                regular = False
+                regular = True              # missing or unreadable for a moment: kept, never reset or reported restored
             if regular:
                 kept.append(name)
                 continue
@@ -813,10 +816,8 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
     of one worktree are serialized, and `stopped()` (kill switch, stop or pause) is checked before every external write
     and while each one runs."""
     import fcntl
-    from .config import state_home
     # The lock lives in Brahma's own state directory (never in the worktree or its Git directory, which a worker can
     # write), one per worktree, opened without following a link and only if it is a regular file.
-    import sqlite3
     stopped = stopped or (lambda: None)
     try:
         lock = publish_lock_path(worktree)
@@ -879,16 +880,16 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
     pushed = _run_publication_step([*guarded(worktree), *push], worktree, halted, env=git_env())
     if pushed.returncode:
         raise ValueError(pushed.stderr.strip() or "Push failed; nothing was published")
-    import sqlite3
-    try:
+    try:                                    # from here on, every failure says that the commit is already on the remote
         reason = halted()
         if reason:
-            raise ValueError(f"Not published as a PR: {reason}. The verified commit was pushed to {branch}")
+            raise ValueError(f"Not published as a PR: {reason}")
         result = _run_publication_step([gh, "pr", "create", "--draft", "--head", branch, "--title", summary[:120],
                                         "--body-file", "-"], worktree, halted, input_text=body, timeout=60)
-    except (OSError, sqlite3.Error) as error:
-        raise ValueError(f"Not published as a PR ({type(error).__name__}: {error}). "
-                         f"The verified commit was pushed to {branch}") from None
-    if result.returncode:
-        raise ValueError("Draft PR creation failed; pushed branch is preserved. Check gh auth and repository access")
+        if result.returncode:
+            raise ValueError("Draft PR creation failed. Check gh auth and repository access")
+    except Exception as error:
+        text = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) \
+            else f"Not published as a PR ({type(error).__name__}: {error})"
+        raise ValueError(f"{text}. The verified commit was pushed to {branch}") from None
     return result.stdout.strip()

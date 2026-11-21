@@ -465,35 +465,40 @@ class Session:
             raise ValueError("The readiness receipt does not record the verified ignored files; run and verify it again")
         return receipts[-1]
 
-    def _publish_arguments(self, receipt: dict, body: str) -> tuple:
-        # Read on the caller's thread: the store's SQLite connection belongs to the thread that opened it.
+    def _publish_arguments(self, receipt: dict, body: str) -> tuple[tuple, threading.Event]:
+        """The arguments of gittools.publish, and the event that abandons it. Read on the caller's thread: the store's
+        SQLite connection belongs to the thread that opened it."""
         worktree = Path(self.store.session(self.key)["worktree"])
         home, key, cancel = self.store.home, self.key, self.cancel
-        stale = cancel.is_set()             # left by an earlier run, a lifted kill switch or a resumed pause
+        # Publication starts only from a ready receipt with no stop, pause or kill switch in force, so an in-memory
+        # cancel still set now is stale (an earlier run, a lifted kill switch, a resumed pause): cleared, so that a quit
+        # or service stop during publication is seen at once.
+        cancel.clear()
         abandoned = threading.Event()       # set when the awaiting coroutine is cancelled (quit, service stop)
 
         def stopped() -> str | None:
             # Called from the publication thread: no use of this session's own database connection. Durable controls
-            # (stop, pause, kill switch) always count; an in-memory cancel counts only if it arrived during publication
-            # (quitting the terminal UI or stopping the service writes nothing durable).
-            if abandoned.is_set() or (cancel.is_set() and not stale):
-                return "Cancelled (Brahma is closing)"
-            return Store.halt_reason(home, key)
-        stopped.abandon = abandoned.set
-        return (worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
-                stopped)
+            # (stop, pause, kill switch) first, so they are named; then an in-memory cancel, which quitting the
+            # terminal UI or stopping the service sets without writing anything durable.
+            reason = Store.halt_reason(home, key)
+            if reason:
+                return reason
+            return "Cancelled (Brahma is closing)" if abandoned.is_set() or cancel.is_set() else None
+        return ((worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
+                 stopped), abandoned)
 
     def publish_ready(self, receipt: dict, body: str) -> str:
         """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
-        return gittools.publish(*self._publish_arguments(receipt, body))
+        arguments, _ = self._publish_arguments(receipt, body)
+        return gittools.publish(*arguments)
 
     async def publish_ready_in_thread(self, receipt: dict, body: str) -> str:
         """publish_ready for an event loop: the state is read here, only the Git/GitHub work runs in a thread."""
-        arguments = self._publish_arguments(receipt, body)
+        arguments, abandoned = self._publish_arguments(receipt, body)
         try:
             return await asyncio.to_thread(gittools.publish, *arguments)
         except asyncio.CancelledError:
-            arguments[-1].abandon()         # the thread ends its running step at the next poll; nothing new starts
+            abandoned.set()                 # the thread ends its running step at the next poll; nothing new starts
             raise
 
     def stop(self):
@@ -715,10 +720,17 @@ class Session:
                         try:
                             if not receipt["committed"]:
                                 raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
+                            if self.cancel.is_set():
+                                raise ValueError("Not published: Cancelled (Brahma is closing)")
                             result.text += "\nDraft PR: " + await self.publish_ready_in_thread(receipt, result.text)
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                             result.text += "\nNot published: " + str(error)
+                            if "Brahma is closing" in str(error) and not self.halted():
+                                # A quit or service stop, not a failure: the run is interrupted, so the scheduler keeps
+                                # its job and the next start verifies and publishes again.
+                                result = Result("brahma", "cancelled", result.text + "; checkpoint retained",
+                                                result.usage)
                 # A durable stop takes precedence over an automatic restart.
                 reason = self.halted()
                 if reason:
