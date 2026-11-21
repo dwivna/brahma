@@ -467,11 +467,13 @@ class Session:
     def _publish_arguments(self, receipt: dict, body: str) -> tuple:
         # Read on the caller's thread: the store's SQLite connection belongs to the thread that opened it.
         worktree = Path(self.store.session(self.key)["worktree"])
-        home, key, cancel = self.store.home, self.key, self.cancel
+        home, key = self.store.home, self.key
 
         def stopped() -> str | None:
-            # Called from the publication thread: no use of this session's own database connection.
-            return "Stopped by user" if cancel.is_set() else Store.halt_reason(home, key)
+            # Called from the publication thread: no use of this session's own database connection. Only durable
+            # controls count (stop, pause and the kill switch are all written before they are signalled), so a stale
+            # in-memory cancel left by an earlier run, a lifted kill switch or a resumed pause never blocks publishing.
+            return Store.halt_reason(home, key)
         return (worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
                 stopped)
 
@@ -703,7 +705,7 @@ class Session:
                         try:
                             if not receipt["committed"]:
                                 raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
-                            result.text += "\nDraft PR: " + self.publish_ready(receipt, result.text)
+                            result.text += "\nDraft PR: " + await self.publish_ready_in_thread(receipt, result.text)
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                             result.text += "\nNot published: " + str(error)

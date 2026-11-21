@@ -331,3 +331,17 @@ answered "ok continue, ship 1.0.0", then "ok go ahead" to the stated interpretat
    no model requests) and one real `brahma approve` by Abhinav still apply.
 2. **Unchanged:** merging to master and tagging `v1.0.0` are Abhinav's explicit decisions (Round 2); nothing is merged
    or tagged without his instruction.
+
+## Round 16 — 21 November 2026 (reviewer when Codex is out of usage)
+
+Codex review round 17 stopped at its usage limit ("try again at Nov 25th, 2026 9:40 PM") without findings or a
+verdict. Abhinav, asked how to proceed, answered: "You take charge of it, today is last day to finish work on brahma,
+complete it". This amends Round 15, item 1, for 1.0.0 only.
+
+1. **Substitute reviewer:** the changes Codex has not reviewed (`0901567..` the release commit) are reviewed by a fresh
+   Claude review with no authoring context (`/code-review` at high effort), plus the automated security review. Its
+   HIGH findings block 1.0.0 exactly as Codex's would; MEDIUM and LOW go to the CHANGELOG "Known limits".
+2. **Codex still reviews:** when Codex usage resets, round 17 runs on the released commit. Any HIGH finding there is
+   fixed in a 1.0.x patch release, not waved through.
+3. **Unchanged:** the suite and smoke test on the release commit, one real `brahma approve` by Abhinav, and merge/tag
+   only on Abhinav's explicit instruction.

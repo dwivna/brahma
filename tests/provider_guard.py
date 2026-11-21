@@ -21,6 +21,8 @@ if not os.environ.get("BRAHMA_TEST_PROVIDER_GUARD"):
         _stub.chmod(0o755)
     os.environ["PATH"] = str(_folder) + os.pathsep + os.environ.get("PATH", "")
     os.environ["BRAHMA_TEST_PROVIDER_GUARD"] = str(_log)
+    # A test that forgets its own state directory must never touch the owner's real one (kill switch, locks, sessions).
+    os.environ.setdefault("BRAHMA_STATE_DIR", str(_folder / "state"))
 
     def _report() -> None:
         if _log.exists() and _log.read_text().strip():

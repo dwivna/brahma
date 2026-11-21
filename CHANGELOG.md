@@ -38,6 +38,14 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
+- Review of the round-16 fixes (decision Round 16, while Codex was out of usage): draft PR creation no longer fails
+  when `gh` takes longer than a quarter second (its body was re-sent to stdin, which Python refuses); a baseline saved
+  with a redacted path name never deletes anything on resume; an owned output Brahma cannot verify (unreadable, special,
+  still being written) blocks readiness but is never deleted; automatic publication runs off the event loop, so Stop and
+  Kill in the terminal UI take effect during a push; publication reads only durable controls, so a lifted kill switch
+  or a resumed pause no longer refuses `/publish`; a publication waiting for another one of the same worktree stops on
+  a stop; an unusable state directory or lock refuses publication instead of crashing the run; the state database is
+  opened by a properly escaped URI; the test suite never touches the real Brahma state directory.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
   serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and
   while the push or PR creation runs (which are ended at once); fingerprint-map path keys are redacted like any text;
@@ -116,6 +124,14 @@ security reviews that followed.
   Checks are not sandboxed.
 - Human-only actions need macOS Touch ID or the login password; they protect Brahma's own commands. A process running as
   the same user can still write Brahma's state database (including an approval) or edit Brahma itself.
+- Independent review: the 1.0.0 release commit was reviewed by a fresh Claude review (`/code-review`, high), not by
+  Codex, whose round 17 could not run (usage limit until 25 November 2026). Codex reviews the released commit when it
+  can; a HIGH finding there is fixed in a 1.0.x patch (decision Round 16).
+- Open findings from that review (MEDIUM/LOW): the sensitive-file scan walks every ignored cache (`node_modules`,
+  `.venv`, ...) on each ownership check, which is slow in a very large cache; repositories using SHA-256 object format
+  cannot be published (commit ids must be 40-hex; SHA-256 repositories are unsupported in general, see README); a file
+  whose *name* looks like a credential is stored redacted, so readiness and publication fail closed while it exists;
+  a changed file is hashed twice per ownership check.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 

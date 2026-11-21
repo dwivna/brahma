@@ -230,7 +230,7 @@ class Store:
         from . import halt
         if halt.engaged(home):
             return "Kill switch engaged"
-        database = sqlite3.connect(f"file:{Path(home) / 'state.sqlite3'}?mode=ro", uri=True, timeout=30)
+        database = sqlite3.connect((Path(home) / "state.sqlite3").resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
         try:
             row = database.execute("SELECT stopped, paused FROM sessions WHERE id=?", (session,)).fetchone()
         finally:

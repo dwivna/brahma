@@ -506,6 +506,11 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     """
     restored, kept = [], []
     root = worktree.resolve()
+    from .safety import REDACTED
+    if any(REDACTED in str(name) for name in baseline):
+        # A baseline loaded from storage whose path names were redacted no longer names the files that existed at
+        # launch, so "absent from the baseline" no longer means "created by the worker". Never delete on its word.
+        return [], ["every change (the saved baseline has a redacted path name; nothing was restored)"]
     if identity:
         # Rollback writes through Git. If the repository, its common directory or the branch moved, Git would act on
         # whatever they now point to (perhaps another checkout), so nothing is restored and the run stays blocked.
@@ -533,6 +538,11 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     for name in candidates:
         target = worktree / name
         if name in baseline:
+            kept.append(name)
+            continue
+        if any(ownership.owns(pattern, name) for pattern in files) and not _sensitive(name):
+            # An owned path is a violation only because it cannot be verified (unreadable, special, still being
+            # written). It is the task's own output: readiness stays blocked, but it is never deleted.
             kept.append(name)
             continue
         if not (target.parent.resolve() / target.name).resolve(strict=False).is_relative_to(root) and not target.is_symlink():
@@ -758,13 +768,15 @@ def _run_publication_step(argv: list[str], worktree: Path, stopped, *, input_tex
                                stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
     deadline = time.monotonic() + timeout
     finished = False
+    pending = input_text or None    # communicate() takes the input once; a retry after a timeout continues sending it
     try:
         while True:
             try:
-                out, err = process.communicate(input_text, timeout=0.25)
+                out, err = process.communicate(pending, timeout=0.25)
                 finished = True
                 return subprocess.CompletedProcess(argv, process.returncode, out, err)
             except subprocess.TimeoutExpired:
+                pending = None
                 try:
                     reason = stopped()
                 except Exception as error:          # a stop check that cannot answer is treated as a stop
@@ -793,18 +805,31 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
     from .config import state_home
     # The lock lives in Brahma's own state directory (never in the worktree or its Git directory, which a worker can
     # write), one per worktree, opened without following a link and only if it is a regular file.
-    locks = state_home() / "publish-locks"
-    locks.mkdir(mode=0o700, parents=True, exist_ok=True)
-    name = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:32] + ".lock"
-    descriptor = os.open(locks / name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    import sqlite3
+    stopped = stopped or (lambda: None)
     try:
-        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-            raise ValueError("Not published: the publication lock is not a regular file")
-        fcntl.flock(descriptor, fcntl.LOCK_EX)
-        return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow,
-                        stopped or (lambda: None))
-    finally:
-        os.close(descriptor)
+        locks = state_home() / "publish-locks"
+        locks.mkdir(mode=0o700, parents=True, exist_ok=True)
+        name = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:32] + ".lock"
+        descriptor = os.open(locks / name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        try:
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise ValueError("Not published: the publication lock is not a regular file")
+            while True:     # wait for another publication of this worktree, but never past a stop or the deadline
+                try:
+                    fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    reason = stopped()
+                    if reason:
+                        raise ValueError("Not published: " + reason) from None
+                    time.sleep(0.25)
+            return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped)
+        finally:
+            os.close(descriptor)
+    except (OSError, sqlite3.Error) as error:
+        # The caller handles ValueError; an unreadable state directory or lock must refuse, not crash the run.
+        raise ValueError(f"Not published: {type(error).__name__}: {error}") from None
 
 
 def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped) -> str:
