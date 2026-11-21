@@ -31,16 +31,19 @@ class Finding1SlowStepWithInput(unittest.TestCase):
 
 
 class Finding2RedactedBaselineNeverDeletes(unittest.TestCase):
-    def test_a_baseline_with_a_redacted_path_restores_nothing(self):
+    def test_a_redacted_baseline_keeps_what_it_may_name_and_restores_the_rest(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
             mine = repo / "notes" / "ghp_0123456789abcdefghijklmnopqrstuvwxyz.txt"   # the user's own file at launch
             mine.parent.mkdir()
             mine.write_text("mine\n")
+            (repo / "stray.txt").write_text("x\n")                  # a worker's file outside ownership
             restored, kept = gittools.restore_violations(repo, ["src/**"], {"notes/[REDACTED].txt": "absent"})
-            self.assertEqual(restored, [])
             self.assertTrue(mine.exists())
-            self.assertIn("redacted", kept[0])
+            self.assertIn("notes/ghp_0123456789abcdefghijklmnopqrstuvwxyz.txt", kept)
+            # Second review: one redacted name must not switch off restoration of everything else.
+            self.assertEqual(restored, ["stray.txt"])
+            self.assertFalse((repo / "stray.txt").exists())
 
 
 class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
@@ -116,8 +119,8 @@ class Finding6StateErrorsRefuseInsteadOfCrashing(unittest.TestCase):
             repo, head, snapshot = verified_branch(tmp)
             state = Path(tmp) / "state"
             (state / "publish-locks").mkdir(parents=True)
-            name = __import__("hashlib").sha256(str(repo.resolve()).encode()).hexdigest()[:32] + ".lock"
-            os.mkfifo(state / "publish-locks" / name)           # O_WRONLY|O_NONBLOCK on a FIFO: ENXIO
+            with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(state)}):
+                os.mkfifo(gittools.publish_lock_path(repo))           # O_WRONLY|O_NONBLOCK on a FIFO: ENXIO
             with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(state)}), \
                     patch.object(gittools, "_run_publication_step") as step:
                 with self.assertRaisesRegex(ValueError, "Not published"):
@@ -130,8 +133,8 @@ class Finding6StateErrorsRefuseInsteadOfCrashing(unittest.TestCase):
             repo, head, snapshot = verified_branch(tmp)
             state = Path(tmp) / "state"
             (state / "publish-locks").mkdir(parents=True)
-            name = __import__("hashlib").sha256(str(repo.resolve()).encode()).hexdigest()[:32] + ".lock"
-            holder = os.open(state / "publish-locks" / name, os.O_WRONLY | os.O_CREAT, 0o600)
+            with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(state)}):
+                holder = os.open(gittools.publish_lock_path(repo), os.O_WRONLY | os.O_CREAT, 0o600)
             self.addCleanup(os.close, holder)
             fcntl.flock(holder, fcntl.LOCK_EX)                  # another publication of this worktree is running
             stop_at = time.monotonic() + 0.5
@@ -145,10 +148,85 @@ class Finding6StateErrorsRefuseInsteadOfCrashing(unittest.TestCase):
             step.assert_not_called()
 
 
+class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
+    def _session(self, tmp):
+        repo = make_repo(Path(tmp) / "r")
+        store = Store(Path(tmp) / "state")
+        self.addCleanup(store.close)
+        session = Session(store, repo)
+        session.plan = Plan("Goal", [Task("T", "do", ["src/**"], ["ok"])])
+        store.set(session.key, worktree=str(repo))
+        return session
+
+    async def test_quitting_while_publishing_stops_the_publication_thread(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._session(tmp)
+            seen = []
+
+            def publishing(*args):          # a long push: polls its stop check like _run_publication_step
+                for _ in range(200):
+                    reason = args[6]()
+                    if reason:
+                        seen.append(reason)
+                        return "stopped"
+                    time.sleep(0.02)
+                seen.append("ran to the end")
+                return "u"
+            with patch.object(gittools, "publish", publishing):
+                job = asyncio.ensure_future(session.publish_ready_in_thread(
+                    {"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b"))
+                await asyncio.sleep(0.1)
+                job.cancel()                # the terminal UI quit, or the service stopped: nothing durable written
+                with self.assertRaises(asyncio.CancelledError):
+                    await job
+                for _ in range(100):
+                    if seen:
+                        break
+                    await asyncio.sleep(0.02)
+            self.assertEqual(len(seen), 1)
+            self.assertIn("Cancelled", seen[0])
+
+    async def test_a_cancel_that_arrives_during_publication_stops_it_but_a_stale_one_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            session = self._session(tmp)
+            arguments = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
+            self.assertIsNone(arguments[6]())
+            session.cancel.set()
+            self.assertIn("Cancelled", arguments[6]())
+
+    def test_a_stuck_publication_holding_the_lock_ends_the_wait_at_a_deadline(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, head, snapshot = verified_branch(tmp)
+            with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(Path(tmp) / "state")}):
+                lock = gittools.publish_lock_path(repo)
+                lock.parent.mkdir(parents=True)
+                holder = os.open(lock, os.O_WRONLY | os.O_CREAT, 0o600)
+                self.addCleanup(os.close, holder)
+                fcntl.flock(holder, fcntl.LOCK_EX)
+                with self.assertRaisesRegex(ValueError, "still running"):
+                    gittools.publish(repo, "s", "b", head, snapshot, lock_wait=0.5)
+
+    def test_an_error_after_the_push_says_the_commit_was_pushed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, head, snapshot = verified_branch(tmp)
+
+            def step(argv, worktree, stopped, **kwargs):
+                if "push" in argv:
+                    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+                raise FileNotFoundError("gh")
+            with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(Path(tmp) / "state")}), \
+                    patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
+                    patch.object(gittools, "_run_publication_step", step):
+                with self.assertRaisesRegex(ValueError, "pushed to brahma/s"):
+                    gittools.publish(repo, "s", "b", head, snapshot)
+
+
 class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
     def test_the_suite_runs_with_a_private_state_directory(self):
-        real = Path.home() / ".local/state/brahma"
-        self.assertNotEqual(Path(os.environ["BRAHMA_STATE_DIR"]).resolve(), real.resolve())
+        guard = Path(os.environ["BRAHMA_TEST_PROVIDER_GUARD"]).parent
+        self.assertEqual(Path(os.environ["BRAHMA_STATE_DIR"]), guard / "state")
         self.assertFalse((ROOT / "brahma-publish.lock").exists())
 
 

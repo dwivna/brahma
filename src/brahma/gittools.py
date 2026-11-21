@@ -506,11 +506,10 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     """
     restored, kept = [], []
     root = worktree.resolve()
-    from .safety import REDACTED
-    if any(REDACTED in str(name) for name in baseline):
-        # A baseline loaded from storage whose path names were redacted no longer names the files that existed at
-        # launch, so "absent from the baseline" no longer means "created by the worker". Never delete on its word.
-        return [], ["every change (the saved baseline has a redacted path name; nothing was restored)"]
+    from .safety import REDACTED, redact
+    # A baseline loaded from storage has credential-shaped path names redacted. A path whose redacted form is in it may
+    # have existed at launch, so it is treated as pre-existing and never deleted; every other path is restored as usual.
+    redacted_baseline = any(REDACTED in str(name) for name in baseline)
     if identity:
         # Rollback writes through Git. If the repository, its common directory or the branch moved, Git would act on
         # whatever they now point to (perhaps another checkout), so nothing is restored and the run stays blocked.
@@ -537,7 +536,7 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     tracked_files = set(listing.decode("utf-8", errors="surrogateescape").split("\0"))
     for name in candidates:
         target = worktree / name
-        if name in baseline:
+        if name in baseline or (redacted_baseline and redact(name) in baseline):
             kept.append(name)
             continue
         if any(ownership.owns(pattern, name) for pattern in files) and not _sensitive(name):
@@ -799,8 +798,14 @@ def _run_publication_step(argv: list[str], worktree: Path, stopped, *, input_tex
             process.communicate()
 
 
+def publish_lock_path(worktree: Path) -> Path:
+    """One lock per worktree, in Brahma's own state directory."""
+    from .config import state_home
+    return state_home() / "publish-locks" / (hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:32] + ".lock")
+
+
 def publish(worktree: Path, summary: str, body: str, expected_head: str, expected_uncommitted: dict | None = None,
-            ignored_allow=None, stopped=None) -> str:
+            ignored_allow=None, stopped=None, lock_wait: float = 300) -> str:
     """Push exactly the commit that was verified ready, and open a draft PR. Anything added after readiness (a commit, an
     uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed.
 
@@ -814,19 +819,20 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
     import sqlite3
     stopped = stopped or (lambda: None)
     try:
-        locks = state_home() / "publish-locks"
-        locks.mkdir(mode=0o700, parents=True, exist_ok=True)
-        name = hashlib.sha256(str(Path(worktree).resolve()).encode()).hexdigest()[:32] + ".lock"
-        descriptor = os.open(locks / name, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+        lock = publish_lock_path(worktree)
+        lock.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        descriptor = os.open(lock, os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
         try:
             if not stat.S_ISREG(os.fstat(descriptor).st_mode):
                 raise ValueError("Not published: the publication lock is not a regular file")
+            deadline = time.monotonic() + lock_wait
             while True:     # wait for another publication of this worktree, but never past a stop or the deadline
                 try:
                     fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
                     break
                 except BlockingIOError:
-                    reason = stopped()
+                    reason = stopped() or ("another publication of this worktree is still running"
+                                           if time.monotonic() > deadline else None)
                     if reason:
                         raise ValueError("Not published: " + reason) from None
                     time.sleep(0.25)
@@ -873,11 +879,16 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
     pushed = _run_publication_step([*guarded(worktree), *push], worktree, halted, env=git_env())
     if pushed.returncode:
         raise ValueError(pushed.stderr.strip() or "Push failed; nothing was published")
-    reason = halted()
-    if reason:
-        raise ValueError(f"Not published as a PR: {reason}. The verified commit was pushed to {branch}")
-    result = _run_publication_step([gh, "pr", "create", "--draft", "--head", branch, "--title", summary[:120],
-                                    "--body-file", "-"], worktree, halted, input_text=body, timeout=60)
+    import sqlite3
+    try:
+        reason = halted()
+        if reason:
+            raise ValueError(f"Not published as a PR: {reason}. The verified commit was pushed to {branch}")
+        result = _run_publication_step([gh, "pr", "create", "--draft", "--head", branch, "--title", summary[:120],
+                                        "--body-file", "-"], worktree, halted, input_text=body, timeout=60)
+    except (OSError, sqlite3.Error) as error:
+        raise ValueError(f"Not published as a PR ({type(error).__name__}: {error}). "
+                         f"The verified commit was pushed to {branch}") from None
     if result.returncode:
         raise ValueError("Draft PR creation failed; pushed branch is preserved. Check gh auth and repository access")
     return result.stdout.strip()

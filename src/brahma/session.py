@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import contextlib
 import fcntl
 import os
@@ -467,13 +468,18 @@ class Session:
     def _publish_arguments(self, receipt: dict, body: str) -> tuple:
         # Read on the caller's thread: the store's SQLite connection belongs to the thread that opened it.
         worktree = Path(self.store.session(self.key)["worktree"])
-        home, key = self.store.home, self.key
+        home, key, cancel = self.store.home, self.key, self.cancel
+        stale = cancel.is_set()             # left by an earlier run, a lifted kill switch or a resumed pause
+        abandoned = threading.Event()       # set when the awaiting coroutine is cancelled (quit, service stop)
 
         def stopped() -> str | None:
-            # Called from the publication thread: no use of this session's own database connection. Only durable
-            # controls count (stop, pause and the kill switch are all written before they are signalled), so a stale
-            # in-memory cancel left by an earlier run, a lifted kill switch or a resumed pause never blocks publishing.
+            # Called from the publication thread: no use of this session's own database connection. Durable controls
+            # (stop, pause, kill switch) always count; an in-memory cancel counts only if it arrived during publication
+            # (quitting the terminal UI or stopping the service writes nothing durable).
+            if abandoned.is_set() or (cancel.is_set() and not stale):
+                return "Cancelled (Brahma is closing)"
             return Store.halt_reason(home, key)
+        stopped.abandon = abandoned.set
         return (worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
                 stopped)
 
@@ -484,7 +490,11 @@ class Session:
     async def publish_ready_in_thread(self, receipt: dict, body: str) -> str:
         """publish_ready for an event loop: the state is read here, only the Git/GitHub work runs in a thread."""
         arguments = self._publish_arguments(receipt, body)
-        return await asyncio.to_thread(gittools.publish, *arguments)
+        try:
+            return await asyncio.to_thread(gittools.publish, *arguments)
+        except asyncio.CancelledError:
+            arguments[-1].abandon()         # the thread ends its running step at the next poll; nothing new starts
+            raise
 
     def stop(self):
         self.store.stop(self.key)
