@@ -159,8 +159,8 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
     try:
         status = store.session(session.key)["status"]
         if status == "ready":
-            # Cancelled while publishing a verified, committed result: the run is complete. Close its job unless a
-            # pause or the kill switch already holds it (that decision stands).
+            # Cancelled while publishing a verified, committed result: the run is complete, so its job is closed even
+            # if held (the same rule as a run that ends normally).
             store.close_running_job(session.key)
             return
         if status in ("waiting", "blocked", "incomplete"):

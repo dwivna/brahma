@@ -278,7 +278,7 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None):
+    async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None, before=None, ownership=None):
         import asyncio
         import threading
         from brahma.models import Result
@@ -297,6 +297,8 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             result.tree = "verified-tree"
             return result
         started, seen = threading.Event(), []
+        if before:
+            before(session)
 
         def publishing(*args):                         # a long push that polls its stop check
             started.set()
@@ -317,7 +319,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 patch.object(gittools, "status_paths", return_value=[]), \
                 patch.object(gittools, "snapshot_changes", return_value={}), \
                 patch.object(gittools, "publish", publish or publishing), \
-                patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
+                patch.object(gittools, "ownership_changes", side_effect=ownership or (lambda *a, **k: (True, "ok"))), \
                 patch.object(gittools, "git_identity", side_effect=identity):
             work = asyncio.ensure_future(session.execute(scheduled=True))
             if interrupt:
@@ -363,9 +365,9 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIn("Not published (TimeoutExpired", result.text)
             self.assertEqual(store.session(session.key)["status"], "ready")
 
-    async def test_a_halt_made_and_lifted_during_the_commit_still_blocks_automatic_publication(self):
-        # The final checks and the commit run in a thread, so the halt monitor keeps sampling during them; the durable
-        # stop/pause records cover a pause even between samples.
+    async def test_a_halt_made_and_lifted_during_the_final_steps_still_blocks_automatic_publication(self):
+        # The final checks and the commit block the event loop, so the halt monitor cannot sample during them; the
+        # durable stop/pause records and the job a kill switch release holds still show the halt.
         from brahma import halt
 
         def pause_and_resume(session):          # from another process: its own connection
@@ -374,15 +376,12 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             other.resume(session.key)
             other.close()
 
-        def kill_release_and_resume(session):      # no hold is left behind: only the halt monitor can see it
+        def kill_and_release(session):             # `brahma kill` then `brahma kill --release` (which holds the job)
             halt.engage(session.store.home)
-            time.sleep(0.6)                        # the commit runs in a thread, so the monitor keeps sampling
+            session.store.hold_all("kill switch released")
             halt.release(session.store.home)
-            other = Store(session.store.home)
-            other.resume(session.key)
-            other.close()
         for name, during_commit, expected in (("pause", pause_and_resume, "(Stopped or paused by user)"),
-                                              ("kill", kill_release_and_resume, "(Kill switch engaged)")):
+                                              ("kill", kill_and_release, "(Kill switch engaged)")):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 store, session, result, seen = await self._run(tmp, None, during_commit=during_commit)
                 self.assertEqual(seen, [])             # the publication never started
@@ -409,14 +408,21 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIn("a halt was seen during this run (Paused by user)", result.text)
 
 
-    async def test_the_final_checks_and_the_commit_run_off_the_event_loop(self):
-        import threading
-        threads = []
+    async def test_a_halt_during_the_final_checks_prevents_the_commit(self):
+        committed = []
+
+        def stop_during_checks(*args, **kwargs):          # ownership_changes is the last final check before the commit
+            other = Store(self._home)
+            other.stop(self._key)
+            other.close()
+            return True, "ok"
         with tempfile.TemporaryDirectory() as tmp:
-            def record(session):
-                threads.append(threading.current_thread() is threading.main_thread())
-            store, session, result, seen = await self._run(tmp, None, during_commit=record)
-            self.assertEqual(threads, [False])
+            store, session, result, seen = await self._run(
+                tmp, None, during_commit=lambda session: committed.append(True),
+                before=lambda session: setattr(self, "_home", session.store.home) or setattr(self, "_key", session.key),
+                ownership=stop_during_checks)
+            self.assertEqual(committed, [])
+            self.assertEqual(result.status, "cancelled")
 
     async def test_a_finished_run_closes_a_job_a_kill_switch_release_held(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -437,17 +443,19 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):
-    def test_a_ready_run_cancelled_while_publishing_closes_a_running_job_but_keeps_a_hold(self):
+    def test_a_ready_runs_job_is_always_closed_and_another_outcome_keeps_its_hold(self):
         from brahma import scheduler
         from tests.test_scheduler import approved_job
-        for state, expected in (("running", "done"), ("held", "held")):
-            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+        for status, state, expected in (("ready", "running", "done"), ("ready", "held", "done"),
+                                        ("blocked", "held", "held")):
+            with self.subTest(status=status, state=state), tempfile.TemporaryDirectory() as tmp:
                 store, session, digest = approved_job(tmp)
                 self.addCleanup(store.close)
-                store.set(session.key, status="ready")
+                store.set(session.key, status=status)
                 store.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session.key))
                 store.db.commit()
                 scheduler._requeue_interrupted(store, session, store.job(session.key))
+                store.close_running_job(session.key)
                 self.assertEqual(store.job(session.key)["state"], expected)
 
 

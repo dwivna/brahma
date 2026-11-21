@@ -245,10 +245,10 @@ class Store:
         return halt.engaged(self.home)
 
     def close_running_job(self, session: str) -> None:
-        """Close the session's job only if it is still marked running (a hold or a requeue already decided stands): as
-        cancelled for a stopped session, otherwise done."""
+        """Close the session's job: always for a ready (complete) session, otherwise only if it is still marked running
+        (a hold or a requeue already decided stands). As cancelled for a stopped session, otherwise done."""
         current = self.job(session)
-        if current and current["state"] == "running":
+        if current and (current["state"] == "running" or self.session(session)["status"] == "ready"):
             self.finish_job(session, "cancelled" if self.session(session)["stopped"] else "done")
 
     def finish_job(self, session: str, state: str = "done") -> None:

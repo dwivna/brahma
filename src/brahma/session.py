@@ -712,38 +712,34 @@ class Session:
                 if result.status == "ready" and self.halted():
                     result = Result("brahma", "cancelled", self.halted() + "; checkpoint retained", result.usage)
                 if result.status == "ready":
-                    # The final checks, the commit and the receipt run in a thread: they can take seconds on a large
-                    # worktree, and the halt monitor must keep sampling (a stop, pause or kill switch made meanwhile is
-                    # seen, and blocks publication even if lifted again).
-                    def final_checks():
-                        owned = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files],
-                                                           ignored_allow=self.settings.ignored_allowlist,
-                                                           identity=identity)
-                        try:
-                            unchanged = result.tree is not None and engine._tree(worktree, self.settings) == result.tree
-                        except (OSError, ValueError, subprocess.SubprocessError):
-                            unchanged = False
-                        return owned, unchanged
-                    (ok, message), same = await asyncio.to_thread(final_checks)
+                    # The final checks and the commit run on the loop, not in a thread: a cancellation can then never
+                    # leave a commit landing after the run has unwound (and released its worktree lock).
+                    ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files],
+                                                             ignored_allow=self.settings.ignored_allowlist, identity=identity)
+                    try:
+                        same = result.tree is not None and engine._tree(worktree, self.settings) == result.tree
+                    except (OSError, ValueError, subprocess.SubprocessError):
+                        same = False
                     if not ok:
                         result = Result("brahma", "blocked", message)
                     elif not same:
                         # Readiness covers exactly what was checked and reviewed; never commit or publish anything else.
                         result = Result("brahma", "blocked", "Files changed after they were checked and reviewed; "
                                         "nothing was committed. Resume to check and review them again.", result.usage)
+                    elif self.halted():
+                        # A stop, pause or kill switch arrived during the final checks: nothing is committed.
+                        result = Result("brahma", "cancelled", self.halted() + "; checkpoint retained", result.usage)
                     elif self.settings.auto_commit:
-                        commit = await asyncio.to_thread(gittools.commit_changes, worktree, self.plan.summary, identity)
+                        commit = gittools.commit_changes(worktree, self.plan.summary, identity)
                         result.text += "\nLocal commit: " + commit
                     receipt = None
                     if result.status == "ready":
                         # What was verified, bound to the exact commit: publication may push this and nothing else.
-                        def verified():
-                            return {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
-                                    "committed": not gittools.status_paths(worktree),
-                                    # Ignored and special files as verified: publication refuses if any changed.
-                                    "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist),
-                                    "ignored_allowlist": list(self.settings.ignored_allowlist)}
-                        receipt = await asyncio.to_thread(verified)
+                        receipt = {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
+                                   "committed": not gittools.status_paths(worktree),
+                                   # Ignored and special files as verified: publication refuses if any of them changed.
+                                   "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist),
+                                   "ignored_allowlist": list(self.settings.ignored_allowlist)}
                         self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
                     if receipt and self.settings.publish and not self.halted():
                         try:
@@ -752,8 +748,8 @@ class Session:
                             if self.closing.is_set():
                                 raise ValueError("Brahma is closing; the verified commit is ready for /publish")
                             # A stop, pause or kill switch during this run, even if lifted since, never leads to an
-                            # external write: what the halt monitor saw (it samples throughout, the final checks run in
-                            # a thread), the durable stop/pause records, and a job held by a kill switch release.
+                            # external write: what the halt monitor saw, the durable stop/pause records (they cover the
+                            # moments the monitor cannot sample), and a job held by a kill switch release.
                             if seen_halt:
                                 seen = seen_halt[0]
                             elif self._job_held():
@@ -772,7 +768,7 @@ class Session:
                             # Any failure of publication is reported, never raised: the run is verified and committed,
                             # so it ends ready and /publish can try again. Only a cancellation propagates.
                             publishing = None
-                            text = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) else \
+                            text = str(error) if type(error) is ValueError else \
                                 f"Not published ({type(error).__name__}: {error}). Check the remote branch, then use /publish"
                             text = text if text.startswith("Not published") else "Not published: " + text
                             self.emit(Event(kind="publication", text=text))
@@ -786,8 +782,7 @@ class Session:
                     # A pause or the kill switch keeps the approved continuation; only `resume` queues it again.
                     self.store.hold(self.key, self.generation, contract["digest"], reason + "; resume to continue")
                 elif seen_halt and result.status == "cancelled" and not self.store.session(self.key)["stopped"]:
-                    job = self.store.job(self.key)
-                    if set(seen_halt) == {"Paused by user"} and not (job and job["state"] == "held"):
+                    if set(seen_halt) == {"Paused by user"} and not self._job_held():
                         # Only a pause was seen, and `resume` has already released it: continue as the person asked.
                         self.store.enqueue(self.key, self.generation, contract["digest"], time.time(),
                                            "Resumed after a pause")
@@ -803,8 +798,10 @@ class Session:
                         next_at = None  # Never spin on an expired/unknown reset.
                     self.store.enqueue(self.key, self.generation, contract["digest"], next_at,
                                        latest.get("reason", "Waiting for observed provider capacity"))
-                else:
-                    self.store.finish_job(self.key)     # a finished run's job is closed, held or not: nothing to resume
+                elif result.status == "ready" or not self._job_held():
+                    # A ready run is complete: its job is closed even if held (`resume` must not re-queue it). Any other
+                    # outcome keeps a hold decided during the run (a kill switch release): `resume` continues it.
+                    self.store.finish_job(self.key)
                 self.emit(Event(kind="summary", text=f"{result.status}: {result.text}", usage=result.usage))
                 return result
             except BaseException:
