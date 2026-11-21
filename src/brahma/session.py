@@ -100,6 +100,14 @@ def verification_charges(events: list[dict], generation: str) -> dict[int, float
             charges[row["index"]] = charges.get(row["index"], 0.0) + max(0.0, row["seconds"])
     return charges
 
+
+def _best_effort(record) -> None:
+    """A record made while an exception or cancellation propagates: a failure here must never replace it."""
+    try:
+        record()
+    except Exception:
+        pass
+
 class Session:
     def __init__(self, store: Store, repo: Path, emit=lambda event: None, key: str | None = None):
         self.store, self.repo, self.callback = store, gittools.repository(repo), emit
@@ -609,6 +617,9 @@ class Session:
         job = self.store.job(self.key)
         if job and job["state"] == "held" and not scheduled:
             raise ValueError("This session's work is held (pause or kill switch); `brahma resume " + self.key + "` queues it again")
+        # Taken before any blocking step: a stop, pause or kill switch recorded after this was made during the run.
+        from . import halt
+        run_control, run_kills = self.store.last_control(self.key), halt.epoch(self.store.home)
         self.cancel.clear()
         with self.lock():
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
@@ -684,7 +695,6 @@ class Session:
                     await asyncio.sleep(.2)
             monitor = asyncio.create_task(monitor_stop())
             publishing = None           # the ready, committed result while it is being published
-            run_control = self.store.last_control(self.key)     # stop/pause records after this were made during the run
             capacity = Capacity(self.store, self.cancel)
             async def gate(provider):
                 self.approved_contract()
@@ -732,19 +742,26 @@ class Session:
                                 raise ValueError("Brahma is closing; the verified commit is ready for /publish")
                             # A stop, pause or kill switch during this run, even if lifted since, never leads to an
                             # external write. Durable records cover the moments the sampling monitor cannot run.
-                            job = self.store.job(self.key)
-                            seen = (seen_halt[0] if seen_halt
-                                    else "A stop or pause" if self.store.controls_after(self.key, run_control)
-                                    else "The kill switch" if job and job["state"] == "held" else None)
+                            if seen_halt:
+                                seen = seen_halt[0]
+                            elif halt.epoch(self.store.home) != run_kills:
+                                seen = "Kill switch engaged"
+                            elif self.store.controls_after(self.key, run_control):
+                                seen = "Stopped or paused by user"
+                            else:
+                                seen = None
                             if seen:
-                                raise ValueError(f"{seen} was seen during this run; the verified commit is ready "
-                                                 "for /publish")
+                                raise ValueError(f"a halt was seen during this run ({seen}); the verified commit is "
+                                                 "ready for /publish")
                             publishing = result
                             result.text += "\nDraft PR: " + await self.publish_ready_in_thread(receipt, result.text)
                             publishing = None
-                        except ValueError as error:
+                        except Exception as error:
+                            # Any failure of publication is reported, never raised: the run is verified and committed,
+                            # so it ends ready and /publish can try again. Only a cancellation propagates.
                             publishing = None
-                            text = str(error)
+                            text = str(error) if isinstance(error, ValueError) else \
+                                f"Not published ({type(error).__name__}: {error}). Check the remote branch, then use /publish"
                             text = text if text.startswith("Not published") else "Not published: " + text
                             self.emit(Event(kind="publication", text=text))
                             result.text += "\n" + text
@@ -775,28 +792,25 @@ class Session:
                     self.store.enqueue(self.key, self.generation, contract["digest"], next_at,
                                        latest.get("reason", "Waiting for observed provider capacity"))
                 else:
-                    self.store.finish_job(self.key)
+                    current = self.store.job(self.key)
+                    if not (current and current["state"] == "held"):    # a hold decided during the run stands
+                        self.store.finish_job(self.key)
                 self.emit(Event(kind="summary", text=f"{result.status}: {result.text}", usage=result.usage))
                 return result
             except BaseException:
+                # Records made while something propagates are best effort: they must never replace it.
                 if publishing is not None:
-                    # Anything that ends the run while its verified, committed result is being published (a forced
-                    # cancellation, an unexpected error): the run is complete and stays ready, so it is not requeued (it
-                    # could not resume from its own commit) and /publish still works. These records are best effort:
-                    # they must never replace what is propagating.
-                    note = ("Not published: Brahma closed or failed during publication. Check the remote branch and "
-                            "any draft PR, then use /publish")
-                    for record in (lambda: self.store.set(self.key, status="ready"),
-                                   lambda: self.store.close_running_job(self.key),
-                                   lambda: self.emit(Event(kind="publication", text=note)),
-                                   lambda: self.emit(Event(kind="summary", text=f"ready: {publishing.text}\n{note}",
-                                                           usage=publishing.usage))):
-                        try:
-                            record()
-                        except Exception:
-                            pass
+                    # Cancelled while the verified, committed result was being published: the run is complete and stays
+                    # ready, so it is not requeued (it could not resume from its own commit) and /publish still works.
+                    note = ("Not published: Brahma closed during publication. Check the remote branch and any draft "
+                            "PR, then use /publish")
+                    _best_effort(lambda: self.store.set(self.key, status="ready"))
+                    _best_effort(lambda: self.store.close_running_job(self.key))
+                    _best_effort(lambda: self.emit(Event(kind="publication", text=note)))
+                    _best_effort(lambda: self.emit(Event(kind="summary", text=f"ready: {publishing.text}\n{note}",
+                                                         usage=publishing.usage)))
                 else:
-                    self.store.set(self.key, status="interrupted")
+                    _best_effort(lambda: self.store.set(self.key, status="interrupted"))
                 raise
             finally:
                 monitor.cancel()

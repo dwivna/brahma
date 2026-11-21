@@ -353,13 +353,14 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             summaries = [e["text"] for e in store.events(session.key) if e["kind"] == "summary"]
             self.assertTrue(summaries and summaries[-1].startswith("ready:"))
 
-    async def test_an_unexpected_error_while_publishing_keeps_the_committed_run_ready(self):
+    async def test_an_unexpected_error_while_publishing_is_reported_and_the_run_ends_ready(self):
         import subprocess as sp
         with tempfile.TemporaryDirectory() as tmp:
             def failing(*args):
                 raise sp.TimeoutExpired(["git", "status"], 60)        # not a ValueError
-            store, session, outcome, seen = await self._run(tmp, None, publish=failing)
-            self.assertIsInstance(outcome, sp.TimeoutExpired)
+            store, session, result, seen = await self._run(tmp, None, publish=failing)
+            self.assertEqual(result.status, "ready")            # reported, never raised: the scheduler and CLI see ready
+            self.assertIn("Not published (TimeoutExpired", result.text)
             self.assertEqual(store.session(session.key)["status"], "ready")
 
     async def test_a_halt_made_and_lifted_while_the_loop_is_blocked_still_blocks_automatic_publication(self):
@@ -371,16 +372,38 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             session.store.pause(session.key)
             session.store.resume(session.key)
 
-        def kill_and_release(session):
+        def kill_release_and_resume(session):      # no hold is left behind: only the kill switch's own record shows it
             halt.engage(session.store.home)
             session.store.hold_all("kill switch released")
             halt.release(session.store.home)
-        for name, during_commit, expected in (("pause", pause_and_resume, "A stop or pause was seen"),
-                                              ("kill", kill_and_release, "The kill switch was seen")):
+            session.store.resume(session.key)
+        for name, during_commit, expected in (("pause", pause_and_resume, "(Stopped or paused by user)"),
+                                              ("kill", kill_release_and_resume, "(Kill switch engaged)")):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 store, session, result, seen = await self._run(tmp, None, during_commit=during_commit)
                 self.assertEqual(seen, [])             # the publication never started
                 self.assertIn(expected, result.text)
+
+    async def test_a_halt_the_monitor_saw_and_that_was_lifted_blocks_automatic_publication(self):
+        from brahma import halt
+
+        def engine_sees_a_pause(session):
+            async def ready(*args, **kwargs):
+                import asyncio
+                from brahma.models import Result
+                session.store.pause(session.key)       # the monitor (every 0.2 s) sees it ...
+                await asyncio.sleep(0.6)
+                session.store.resume(session.key)      # ... and it is lifted before publication
+                result = Result("brahma", "ready", "done")
+                result.tree = "verified-tree"
+                return result
+            return ready
+        with tempfile.TemporaryDirectory() as tmp, patch.object(halt, "epoch", return_value=0), \
+                patch.object(Store, "controls_after", return_value=set()):  # only the monitor can report it here
+            store, session, result, seen = await self._run(tmp, None, engine=engine_sees_a_pause)
+            self.assertEqual(seen, [])
+            self.assertIn("a halt was seen during this run (Paused by user)", result.text)
+
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):
     def test_a_ready_run_cancelled_while_publishing_closes_a_running_job_but_keeps_a_hold(self):
