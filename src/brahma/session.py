@@ -792,7 +792,7 @@ class Session:
                             event = Event(kind="ready_receipt", text=json.dumps(receipt))
                             self.store.record_ready(self.key, event)     # the receipt and the ready status, together
                             receipt_stored = True       # /publish can find it, whatever the display does next
-                            self.callback(event)
+                            self.callback(Event(kind=event.kind, text=CONTROL.sub("", event.text)))   # cleaned to show
                         try:
                             made, receipt = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:

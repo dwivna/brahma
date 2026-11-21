@@ -125,9 +125,9 @@ class Store:
     def record_ready(self, session: str, event) -> None:
         """Store the verified receipt and mark the session ready in one transaction: from then on the run is complete,
         and both records exist or neither does. A new plan resets the status, so an older receipt never counts."""
-        self._insert_event(session, event)
-        self.db.execute("UPDATE sessions SET status='ready' WHERE id=?", (session,))
-        self.db.commit()
+        with self.db:                       # commits both, or rolls both back (never a pending receipt left behind)
+            self._insert_event(session, event)
+            self.db.execute("UPDATE sessions SET status='ready' WHERE id=?", (session,))
 
     def _insert_event(self, session: str, event) -> None:
         from . import safety

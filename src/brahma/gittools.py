@@ -555,12 +555,19 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
                 kept.append(name)
                 continue
         try:
-            # The parent folder must be exactly where the name says: a symlinked folder (out of the worktree, or to
-            # another folder in it) would redirect the restore to a file the checks above never looked at.
-            parent_in_place = target.parent.resolve() == root.joinpath(*Path(name).parts[:-1])
-            escapes = not target.resolve(strict=False).is_relative_to(root) and not target.is_symlink()
+            # Every parent folder must be a real folder where the name says (checked with lstat, on any Python): a
+            # symlinked folder (out of the worktree, to another folder in it, or a loop) would redirect the restore to
+            # a file the checks above never looked at.
+            parent_in_place, here = True, root
+            for part in Path(name).parts[:-1]:
+                here = here / part
+                if not stat.S_ISDIR(os.lstat(here).st_mode):
+                    parent_in_place = False
+                    break
+            # A symlink itself is removed, never followed; anything else must resolve inside the worktree.
+            escapes = not target.is_symlink() and not target.resolve(strict=False).is_relative_to(root)
         except (OSError, RuntimeError):
-            parent_in_place, escapes = False, True          # a symlink loop or unreadable folder: never acted on
+            parent_in_place, escapes = False, True          # an unreadable folder or a loop: never acted on
         if not parent_in_place or escapes:
             kept.append(name)  # never act outside the worktree, or on a path its folder redirects
             continue

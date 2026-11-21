@@ -138,7 +138,7 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
         # blocked (it could not resume from its own commit).
         store.close_finished_job(key)
         if error is not None:
-            _note(store, session, key, "Scheduled task completed; a later step failed: " + str(error))
+            _note(store, session, key, "Scheduled task ended with an error; the session is ready: " + str(error))
         return True
     if interrupted and error is None and (result is None or result.status == "cancelled"):
         _requeue_interrupted(store, session, job)

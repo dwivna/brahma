@@ -111,6 +111,15 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
             self.assertIn("a/x", kept)
             self.assertEqual(restored, ["stray.txt"])
 
+    def test_a_symlink_loop_that_violates_is_itself_removed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            os.symlink("stray", repo / "stray")
+            with patch.object(gittools, "violating_paths", return_value=["stray"]):
+                restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertEqual(restored, ["stray"])
+            self.assertFalse(os.path.lexists(repo / "stray"))
+
     def test_an_unowned_new_file_is_still_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
@@ -585,6 +594,40 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
             self.assertTrue(notes and "not committed" in notes[-1])
             self.assertNotIn("push the branch", notes[-1])
+
+    def test_a_failed_ready_record_leaves_neither_record_pending(self):
+        from brahma.models import Event
+        from tests.test_halt import approved_job
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+            self.addCleanup(store.close)
+            before = store.session(session.key)["status"]
+            original = store.db
+
+            class FailingUpdate:
+                def __init__(self, db):
+                    self._db = db
+
+                def execute(self, sql, *args):
+                    if sql.startswith("UPDATE sessions SET status='ready'"):
+                        raise sqlite3.OperationalError("database is locked")
+                    return self._db.execute(sql, *args)
+
+                def __getattr__(self, name):
+                    return getattr(self._db, name)
+
+                def __enter__(self):
+                    return self._db.__enter__()
+
+                def __exit__(self, *exc):
+                    return self._db.__exit__(*exc)
+            store.db = FailingUpdate(original)
+            with self.assertRaises(sqlite3.OperationalError):
+                store.record_ready(session.key, Event(kind="ready_receipt", text="{}"))
+            store.db = original
+            store.event(session.key, Event(kind="note", text="a later, unrelated write"))   # commits
+            self.assertEqual([e for e in store.events(session.key) if e["kind"] == "ready_receipt"], [])
+            self.assertEqual(store.session(session.key)["status"], before)
 
     async def test_the_receipt_and_the_ready_status_are_written_together(self):
         original = Store.set

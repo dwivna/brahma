@@ -162,7 +162,9 @@ security reviews that followed.
   approve a new plan; a kill switch, the terminal UI's forced quit and the service's stop grace do not end a final step
   in flight (they take effect when it finishes); if the state database cannot be read when a scheduled run ends, its job
   stays claimed until the next daemon start; a database error after the run became ready makes `brahma run` exit 13
-  (blocked) although the session is ready.
+  (blocked) although the session is ready; the session shows ready while its automatic publication runs, so a `/publish`
+  started then waits for it and pushes the same verified commit again (a second draft PR is refused by `gh` and
+  reported).
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 
