@@ -119,6 +119,17 @@ class Store:
                                "ready_receipt"})
 
     def event(self, session: str, event) -> None:
+        self._insert_event(session, event)
+        self.db.commit()
+
+    def record_ready(self, session: str, event) -> None:
+        """Store the verified receipt and mark the session ready in one transaction: from then on the run is complete,
+        and both records exist or neither does. A new plan resets the status, so an older receipt never counts."""
+        self._insert_event(session, event)
+        self.db.execute("UPDATE sessions SET status='ready' WHERE id=?", (session,))
+        self.db.commit()
+
+    def _insert_event(self, session: str, event) -> None:
         from . import safety
         if event.kind in self.STRUCTURED_EVENTS and isinstance(event.text, str):
             # Structured JSON read back by the coordinator: every string inside it is redacted (reviews, check output and
@@ -133,7 +144,6 @@ class Store:
         self.db.execute("INSERT INTO events(session,created,provider,role,kind,text,usage) VALUES(?,?,?,?,?,?,?)",
                         (session, self.now(), event.provider, event.role, event.kind, event.text,
                          json.dumps(usage, ensure_ascii=False)))
-        self.db.commit()
 
     def set(self, session: str, **values) -> None:
         if not values or set(values) - {"status", "plan", "worktree", "stopped", "paused", "contract", "approved_digest"}:
@@ -291,18 +301,6 @@ class Store:
                                "ORDER BY seq LIMIT ?", (key, after, limit))
         return [dict(zip(("seq", "created", "provider", "role", "kind", "text", "usage"),
                          (*row[:6], json.loads(row[6])))) for row in rows]
-
-    def run_complete(self, key: str, digest: str) -> bool:
-        """A run of this approval is complete: the session is ready, or its newest verified receipt is for this approval
-        (the ready status is written best effort while Brahma closes, so it can be missing)."""
-        if self.session(key)["status"] == "ready":
-            return True
-        row = self.db.execute("SELECT text FROM events WHERE session=? AND kind='ready_receipt' ORDER BY seq DESC LIMIT 1",
-                              (key,)).fetchone()
-        try:
-            return bool(row) and json.loads(row[0]).get("digest") == digest
-        except (ValueError, TypeError, AttributeError):
-            return False
 
     def latest_seq(self, key: str, kind: str) -> int:
         """Sequence number of the newest event of `kind` (0 if none): where the current plan's records start."""

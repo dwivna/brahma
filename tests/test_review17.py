@@ -90,6 +90,27 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
             self.assertIn("link/x", kept)
             self.assertTrue(os.path.lexists(outside / "x"))
 
+    def test_a_folder_symlinked_inside_the_worktree_never_redirects_a_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            (repo / "src" / "x").write_text("owned output\n")
+            os.symlink(repo / "src", repo / "dir")
+            with patch.object(gittools, "violating_paths", return_value=["dir/x"]):
+                restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertEqual(restored, [])
+            self.assertIn("dir/x", kept)
+            self.assertTrue((repo / "src" / "x").exists())
+
+    def test_a_symlink_loop_never_stops_the_rest_of_the_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            os.symlink("a", repo / "a")
+            (repo / "stray.txt").write_text("x\n")
+            with patch.object(gittools, "violating_paths", return_value=["a/x", "stray.txt"]):
+                restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertIn("a/x", kept)
+            self.assertEqual(restored, ["stray.txt"])
+
     def test_an_unowned_new_file_is_still_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
@@ -533,7 +554,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
     async def test_a_failed_receipt_write_is_surfaced_and_the_committed_run_stays_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(Store, "event", failing_receipt_write(Store.event)):
+            with patch.object(Store, "_insert_event", failing_receipt_write(Store._insert_event)):
                 store, session, outcome, seen = await self._run(tmp, None, publish_on=True)
             self.assertIsInstance(outcome, sqlite3.OperationalError)       # surfaced, not swallowed
             self.assertEqual(store.session(session.key)["status"], "ready")   # complete: never "interrupted"
@@ -557,13 +578,26 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
     async def test_a_failed_receipt_write_without_auto_commit_never_says_push_the_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with patch.object(Store, "event", failing_receipt_write(Store.event)), \
+            with patch.object(Store, "_insert_event", failing_receipt_write(Store._insert_event)), \
                     patch.object(gittools, "status_paths", return_value=["src/left.txt"]):
                 store, session, outcome, seen = await self._run(tmp, None, publish_on=True, auto_commit=False,
                                                                 status_patch=False)
             notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
             self.assertTrue(notes and "not committed" in notes[-1])
             self.assertNotIn("push the branch", notes[-1])
+
+    async def test_the_receipt_and_the_ready_status_are_written_together(self):
+        original = Store.set
+
+        def status_write_fails(self_, key, **values):
+            if values.get("status") == "ready":
+                raise sqlite3.OperationalError("database is locked")       # every later "ready" write fails
+            return original(self_, key, **values)
+        with tempfile.TemporaryDirectory() as tmp:
+            with patch.object(Store, "set", status_write_fails):
+                store, session, outcome, seen = await self._run(tmp, None, publish_on=False)
+            self.assertEqual(store.session(session.key)["status"], "ready")   # recorded with the receipt
+            self.assertEqual(store.job(session.key)["state"], "done")
 
     async def test_closing_during_the_final_step_without_auto_commit_says_it_is_not_committed(self):
         import asyncio
@@ -645,21 +679,22 @@ class SchedulerCompletedThenFailed(unittest.IsolatedAsyncioTestCase):
                 finally:
                     store.close()
 
-    async def test_a_recorded_receipt_closes_the_job_when_the_ready_status_was_not_written(self):
-        import asyncio
+    async def test_an_earlier_plans_receipt_never_marks_a_later_run_complete(self):
         from brahma import scheduler
         from brahma.models import Event
         from tests.test_scheduler import approved_job
         with tempfile.TemporaryDirectory() as tmp:
             store, session, digest = approved_job(tmp)
             try:
-                async def receipt_then_cancelled(self_, *, scheduled=False):
-                    store.event(session.key, Event(kind="ready_receipt", text=json.dumps({"digest": digest})))
-                    raise asyncio.CancelledError     # Brahma closing; its best-effort ready status was never written
-                with patch.object(Session, "execute", receipt_then_cancelled):
+                # A receipt for the same digest from an earlier run of an identical plan.
+                store.event(session.key, Event(kind="ready_receipt", text=json.dumps({"digest": digest})))
+
+                async def blocked(self_, *, scheduled=False):
+                    raise ValueError("a check failed")
+                with patch.object(Session, "execute", blocked):
                     await scheduler.tick(store)
-                self.assertEqual(store.job(session.key)["state"], "done")     # never re-queued from its own commit
-                self.assertEqual(store.session(session.key)["status"], "ready")
+                self.assertEqual(store.job(session.key)["state"], "blocked")
+                self.assertNotEqual(store.session(session.key)["status"], "ready")
             finally:
                 store.close()
 

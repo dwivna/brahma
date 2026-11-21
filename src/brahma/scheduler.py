@@ -127,16 +127,18 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
     error = None if work.cancelled() else work.exception()
     result = None if work.cancelled() or error else work.result()
     try:
-        complete = store.run_complete(key, job["digest"])
-    except sqlite3.Error:
-        # Unknown, so change nothing: the job stays claimed, and the next daemon start checks it again.
+        complete = store.session(key)["status"] == "ready"   # written with the verified receipt, in one transaction
+    except sqlite3.Error as unreadable:
+        # Unknown, so change nothing: the job stays claimed until the next daemon start, which checks it again.
+        _note(store, session, key, f"Scheduled task ended ({error or 'no error'}); its state could not be read: "
+                                   f"{unreadable}")
         return True
     if complete:
         # The run is complete (its verified result recorded), however it ended: its job is closed, never re-queued or
-        # blocked (it could not resume from its own commit). The session has recorded how it ended.
-        if store.session(key)["status"] != "ready":
-            store.set(key, status="ready")
+        # blocked (it could not resume from its own commit).
         store.close_finished_job(key)
+        if error is not None:
+            _note(store, session, key, "Scheduled task completed; a later step failed: " + str(error))
         return True
     if interrupted and error is None and (result is None or result.status == "cancelled"):
         _requeue_interrupted(store, session, job)
@@ -170,14 +172,12 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
     Store.enqueue is a no-op for a durably stopped/paused session, so a user stop is never undone.
     """
     try:
-        if store.run_complete(session.key, job["digest"]):
-            # Cancelled while publishing a verified, committed result: the run is complete, so its job is closed even
-            # if held (the same rule as a run that ends normally).
-            if store.session(session.key)["status"] != "ready":
-                store.set(session.key, status="ready")
+        status = store.session(session.key)["status"]
+        if status == "ready":
+            # Cancelled once the verified result was recorded: the run is complete, so its job is closed even if held
+            # (the same rule as a run that ends normally).
             store.close_finished_job(session.key)
             return
-        status = store.session(session.key)["status"]
         if status in ("waiting", "blocked", "incomplete"):
             return
         store.enqueue(session.key, session.generation, job["digest"], time.time(),

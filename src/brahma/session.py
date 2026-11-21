@@ -789,8 +789,8 @@ class Session:
                             nonlocal receipt_stored
                             if made:
                                 result.text += "\nLocal commit: " + made
-                            event = Event(kind="ready_receipt", text=CONTROL.sub("", json.dumps(receipt)))
-                            self.store.event(self.key, event)
+                            event = Event(kind="ready_receipt", text=json.dumps(receipt))
+                            self.store.record_ready(self.key, event)     # the receipt and the ready status, together
                             receipt_stored = True       # /publish can find it, whatever the display does next
                             self.callback(event)
                         try:
