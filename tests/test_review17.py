@@ -83,7 +83,7 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
 
 
 class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
-    async def test_a_stale_in_memory_cancel_does_not_block_publication(self):
+    async def test_publish_clears_a_stale_cancel_when_issued_and_names_durable_controls(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
             store = Store(Path(tmp) / "state")
@@ -91,13 +91,18 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
             session = Session(store, repo)
             session.plan = Plan("Goal", [Task("T", "do", ["src/**"], ["ok"])])
             store.set(session.key, worktree=str(repo))
-            session.cancel.set()          # left by an earlier kill that was lifted, or a resumed pause
             seen = []
             with patch.object(gittools, "publish", lambda *args: seen.append(args) or "u"):
                 await session.publish_ready_in_thread({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
             self.assertIsNone(seen[0][6]())
             store.pause(session.key)
             self.assertEqual(seen[0][6](), "Paused by user")      # a pause is named as a pause, read durably
+        ui = (ROOT / "src" / "brahma" / "ui.py").read_text()
+        start = ui.index('elif value == "/publish":')
+        block = ui[start:ui.index("elif value ==", start + 10)]
+        # A stale cancel is cleared when the person issues /publish; a quit during the Touch ID prompt refuses.
+        self.assertLess(block.index("self.session.cancel.clear()"), block.index("presence.require"))
+        self.assertLess(block.index("presence.require"), block.index("if self.session.cancel.is_set()"))
 
     def test_automatic_publication_runs_off_the_event_loop(self):
         source = (ROOT / "src" / "brahma" / "session.py").read_text()
@@ -187,17 +192,18 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(seen), 1)
             self.assertIn("Cancelled", seen[0])
 
-    async def test_only_durable_controls_or_an_abandoned_await_stop_publication(self):
+    async def test_closing_and_durable_controls_stop_publication_and_durable_ones_are_named(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp)
-            session.cancel.set()           # the in-memory event can be stale (lifted kill switch, resumed pause)
             arguments, abandoned = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
             self.assertIsNone(arguments[6]())
-            self.assertTrue(session.cancel.is_set())            # not cleared: a quit during approval is not discarded
-            session.store.stop(session.key)                     # a durable Stop is named as a stop
-            self.assertEqual(arguments[6](), "Stopped by user")
             abandoned.set()                                     # the awaiting task was cancelled
             self.assertIn("Cancelled", arguments[6]())
+            abandoned.clear()
+            session.cancel.set()                                # a quit or service stop, before its grace period
+            self.assertIn("Cancelled", arguments[6]())
+            session.store.stop(session.key)                     # a durable Stop is named first, even while closing
+            self.assertEqual(arguments[6](), "Stopped by user")
 
     def test_a_stuck_publication_holding_the_lock_ends_the_wait_at_a_deadline(self):
         import fcntl
@@ -270,58 +276,71 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
-    async def test_a_quit_during_automatic_publication_stops_it_and_keeps_the_run_ready(self):
+    async def _run(self, tmp, interrupt):
         import asyncio
         import threading
         from brahma.models import Result
         from tests.test_halt import approved_job
+        store, session, _ = approved_job(tmp)
+        self.addCleanup(store.close)
+        original = Session.approved_contract
+
+        def approved(self_, *args, **kwargs):          # the approved settings enable commit and publication
+            contract, settings, catalog = original(self_, *args, **kwargs)
+            settings.auto_commit = settings.publish = True
+            return contract, settings, catalog
+
+        async def ready(*args, **kwargs):
+            result = Result("brahma", "ready", "done")
+            result.tree = "verified-tree"
+            return result
+        started, seen = threading.Event(), []
+
+        def publishing(*args):                         # a long push that polls its stop check
+            started.set()
+            for _ in range(500):
+                reason = args[6]()
+                if reason:
+                    seen.append(reason)
+                    raise ValueError("Publication stopped: " + reason)
+                time.sleep(0.02)
+            return "https://example.invalid/pr/1"
+        identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
+                               "common_dir": "/c", "head": "h", "hidden": []}
+        with patch("brahma.engine.execute", ready), patch("brahma.engine._tree", return_value="verified-tree"), \
+                patch.object(Session, "approved_contract", approved), \
+                patch.object(gittools, "commit_changes", return_value="c"), \
+                patch.object(gittools, "status_paths", return_value=[]), \
+                patch.object(gittools, "snapshot_changes", return_value={}), \
+                patch.object(gittools, "publish", publishing), \
+                patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
+                patch.object(gittools, "git_identity", side_effect=identity):
+            work = asyncio.ensure_future(session.execute(scheduled=True))
+            await asyncio.to_thread(started.wait, 10)
+            interrupt(session, work)
+            outcome = (await asyncio.gather(work, return_exceptions=True))[0]
+            for _ in range(100):
+                if seen:
+                    break
+                await asyncio.sleep(0.02)
+        return store, session, outcome, seen
+
+    async def test_a_service_stop_or_quit_ends_the_push_within_its_grace_and_the_run_stays_ready(self):
+        # scheduler.tick and the terminal UI's quit set session.cancel, then wait a grace period before cancelling.
         with tempfile.TemporaryDirectory() as tmp:
-            store, session, _ = approved_job(tmp)
-            self.addCleanup(store.close)
-            original = Session.approved_contract
-
-            def approved(self_, *args, **kwargs):      # the approved settings enable commit and publication
-                contract, settings, catalog = original(self_, *args, **kwargs)
-                settings.auto_commit = settings.publish = True
-                return contract, settings, catalog
-
-            async def ready(*args, **kwargs):
-                result = Result("brahma", "ready", "done")
-                result.tree = "verified-tree"
-                return result
-            started, seen = threading.Event(), []
-
-            def publishing(*args):                     # a long push that polls its stop check
-                started.set()
-                for _ in range(500):
-                    reason = args[6]()
-                    if reason:
-                        seen.append(reason)
-                        raise ValueError("Publication stopped: " + reason)
-                    time.sleep(0.02)
-                return "https://example.invalid/pr/1"
-            identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
-                                   "common_dir": "/c", "head": "h", "hidden": []}
-            with patch("brahma.engine.execute", ready), patch("brahma.engine._tree", return_value="verified-tree"), \
-                    patch.object(Session, "approved_contract", approved), \
-                    patch.object(gittools, "commit_changes", return_value="c"), \
-                    patch.object(gittools, "status_paths", return_value=[]), \
-                    patch.object(gittools, "snapshot_changes", return_value={}), \
-                    patch.object(gittools, "publish", publishing), \
-                    patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
-                    patch.object(gittools, "git_identity", side_effect=identity):
-                work = asyncio.ensure_future(session.execute(scheduled=True))
-                await asyncio.to_thread(started.wait, 10)
-                work.cancel()                          # the terminal UI quits / the service stops mid-push
-                result = await work
-                for _ in range(100):
-                    if seen:
-                        break
-                    await asyncio.sleep(0.02)
-            self.assertEqual(result.status, "ready", result.text)     # verified and committed: /publish still works
-            self.assertIn("Brahma closed during publication", result.text)
-            self.assertEqual(store.session(session.key)["status"], "ready")
+            store, session, result, seen = await self._run(tmp, lambda session, work: session.cancel.set())
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])  # the push itself was stopped
+            self.assertEqual(result.status, "ready", result.text)       # verified and committed: /publish still works
+            self.assertIn("Not published", result.text)
+            self.assertEqual(store.session(session.key)["status"], "ready")
+
+    async def test_a_forced_cancellation_is_not_swallowed_and_the_run_is_recorded_ready(self):
+        import asyncio
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, outcome, seen = await self._run(tmp, lambda session, work: work.cancel())
+            self.assertIsInstance(outcome, asyncio.CancelledError)     # the caller's cancellation continues
+            self.assertEqual(seen, ["Cancelled (Brahma is closing)"])
+            self.assertEqual(store.session(session.key)["status"], "ready")   # not requeued; /publish works
 
 
 if __name__ == "__main__":

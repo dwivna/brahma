@@ -470,15 +470,19 @@ class Session:
         SQLite connection belongs to the thread that opened it."""
         worktree = Path(self.store.session(self.key)["worktree"])
         home, key = self.store.home, self.key
-        abandoned = threading.Event()       # set when the awaiting task is cancelled (terminal UI quit, service stop)
+        cancel = self.cancel
+        abandoned = threading.Event()       # set when the awaiting task is cancelled
 
         def stopped() -> str | None:
-            # Called from the publication thread: no use of this session's own database connection. Only two things
-            # stop a publication: the awaiting task being cancelled, and a durable stop, pause or kill switch. The
-            # in-memory cancel event is not consulted: it can be stale (a lifted kill switch, a resumed pause).
-            if abandoned.is_set():
-                return "Cancelled (Brahma is closing)"
-            return Store.halt_reason(home, key)
+            # Called from the publication thread: no use of this session's own database connection. A durable stop,
+            # pause or kill switch first, so it is named; then closing: the in-memory cancel that a terminal UI quit or
+            # a service stop sets before its grace period, or the awaiting task being cancelled. Callers start a
+            # publication only with that event clear (execute clears it at start and refuses if it is set; /publish
+            # clears a stale one when the person issues the command), so a set event here is a real closing.
+            reason = Store.halt_reason(home, key)
+            if reason:
+                return reason
+            return "Cancelled (Brahma is closing)" if abandoned.is_set() or cancel.is_set() else None
         return ((worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
                  stopped), abandoned)
 
@@ -672,6 +676,7 @@ class Session:
                         return
                     await asyncio.sleep(.2)
             monitor = asyncio.create_task(monitor_stop())
+            verified_ready = False      # set once the run is verified and committed, before publication starts
             capacity = Capacity(self.store, self.cancel)
             async def gate(provider):
                 self.approved_contract()
@@ -715,22 +720,24 @@ class Session:
                         try:
                             if not receipt["committed"]:
                                 raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
+                            if self.cancel.is_set():
+                                # Brahma is closing (or a halt was seen and lifted during the run): publish nothing
+                                # now; the verified commit stays ready for /publish.
+                                raise ValueError("Not published: Brahma is closing; the verified commit is ready "
+                                                 "for /publish")
                             result.text += "\nDraft PR: " + await self.publish_ready_in_thread(receipt, result.text)
                         except ValueError as error:
                             self.emit(Event(kind="publication", text=str(error)))
                             result.text += "\nNot published: " + str(error)
                         except asyncio.CancelledError:
-                            # A quit or service stop during publication. The run is verified and committed, so it stays
-                            # ready (a requeued run could not resume from its own commit); the publication thread was
-                            # told to stop, and the person publishes with /publish. The cancellation is absorbed so
-                            # the outcome is recorded.
-                            task = asyncio.current_task()
-                            if task is not None:
-                                task.uncancel()
-                            text = ("Not published: Brahma closed during publication. The verified commit is ready; "
-                                    "check the remote branch, then use /publish")
+                            # Forced cancellation while publishing (the thread did not stop within the grace period).
+                            # The verified, committed run is recorded as ready before the cancellation continues, so
+                            # it is not requeued (it could not resume from its own commit) and /publish still works.
+                            text = ("Not published: Brahma closed during publication. Check the remote branch and "
+                                    "any draft PR, then use /publish")
                             self.emit(Event(kind="publication", text=text))
-                            result.text += "\n" + text
+                            verified_ready = True
+                            raise
                 # A durable stop takes precedence over an automatic restart.
                 reason = self.halted()
                 if reason:
@@ -762,7 +769,9 @@ class Session:
                 self.emit(Event(kind="summary", text=f"{result.status}: {result.text}", usage=result.usage))
                 return result
             except BaseException:
-                self.store.set(self.key, status="interrupted")
+                # A run cancelled during publication is already verified and committed: it stays ready (a requeued run
+                # could not resume from its own commit, and /publish still works). Anything earlier is interrupted.
+                self.store.set(self.key, status="ready" if verified_ready else "interrupted")
                 raise
             finally:
                 monitor.cancel()

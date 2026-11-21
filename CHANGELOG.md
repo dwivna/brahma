@@ -45,8 +45,9 @@ security reviews that followed.
   Kill in the terminal UI take effect during a push; publication reads only durable controls, so a lifted kill switch
   or a resumed pause no longer refuses `/publish`; a publication waiting for another one of the same worktree stops on
   a stop (and gives up after five minutes); quitting the terminal UI or stopping the service ends a running
-  publication (once the closing task is cancelled); the run stays ready with its verified commit and says to use
-  `/publish`; a Stop or Pause during publication is named as such; every error after the push says the commit was
+  publication within a quarter second (well inside the closing grace period); the run stays ready with its verified
+  commit and says to use `/publish`; `/publish` clears a stale cancel when issued and refuses if Brahma starts closing
+  during the Touch ID prompt; a Stop or Pause during publication is named as such; every error after the push says the commit was
   pushed; an owned output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the run; the state database is
   opened by a properly escaped URI; the test suite never touches the real Brahma state directory.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
@@ -136,7 +137,8 @@ security reviews that followed.
   cannot be published (commit ids must be 40-hex; SHA-256 repositories are unsupported in general, see README); a file
   whose *name* looks like a credential is stored redacted, so readiness and publication fail closed while it exists;
   a changed file is hashed twice per ownership check; during publication every quarter-second stop check opens the
-  state database afresh, so a write-locked database delays a stop by up to 30 seconds.
+  state database afresh, so a write-locked database delays a stop by up to 30 seconds; if Brahma is force-closed while
+  `gh pr create` is in flight, the draft PR may exist although the run says "Not published" (it says to check).
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 
