@@ -1,7 +1,9 @@
 """Review of 0901567..263e2b9 (substitute for Codex round 17, decision Round 16): one regression per fixed finding."""
 from __future__ import annotations
 
+import contextlib
 import os
+import sqlite3
 import stat
 import tempfile
 import time
@@ -318,7 +320,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 patch.object(gittools, "commit_changes",
                              side_effect=lambda *a: (during_commit(session) if during_commit else None) or "c"), \
                 (patch.object(gittools, "status_paths", return_value=[]) if status_patch
-                 else __import__("contextlib").nullcontext()), \
+                 else contextlib.nullcontext()), \
                 patch.object(gittools, "snapshot_changes", return_value={}), \
                 patch.object(gittools, "publish", publish or publishing), \
                 patch.object(gittools, "ownership_changes", side_effect=ownership or (lambda *a, **k: (True, "ok"))), \
@@ -520,12 +522,15 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
             def emit(self_, event, *args, **kwargs):
                 if getattr(event, "kind", "") == "ready_receipt":
-                    raise OSError("database is locked")
+                    raise sqlite3.OperationalError("database is locked")
                 return original(self_, event, *args, **kwargs)
             with patch.object(Session, "emit", emit):
-                store, session, outcome, seen = await self._run(tmp, None, publish_on=False)
-            self.assertIsInstance(outcome, OSError)                  # surfaced, not swallowed
+                store, session, outcome, seen = await self._run(tmp, None, publish_on=True)
+            self.assertIsInstance(outcome, sqlite3.OperationalError)       # surfaced, not swallowed
             self.assertEqual(store.session(session.key)["status"], "ready")   # complete: never "interrupted"
+            notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
+            self.assertTrue(notes and "/publish cannot use it" in notes[-1])  # never a false "use /publish"
+            self.assertEqual(seen, [])
 
     async def test_closing_during_the_final_step_without_auto_commit_says_it_is_not_committed(self):
         import asyncio
@@ -579,6 +584,23 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
             store, session, result, seen = await self._run(tmp, None, publish=undecodable)
             self.assertIn("Not published (UnicodeDecodeError", result.text)
+
+
+class SchedulerCompletedThenFailed(unittest.IsolatedAsyncioTestCase):
+    async def test_a_ready_run_that_fails_afterwards_is_not_marked_blocked(self):
+        from brahma import scheduler
+        from brahma.models import Result  # noqa: F401
+        from tests.test_scheduler import approved_job
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, digest = approved_job(tmp)
+            self.addCleanup(store.close)
+
+            async def completes_then_fails(self_, *, scheduled=False):
+                store.set(session.key, status="ready")
+                raise sqlite3.OperationalError("database is locked")
+            with patch.object(Session, "execute", completes_then_fails):
+                await scheduler.tick(store)
+            self.assertEqual(store.job(session.key)["state"], "done")
 
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):

@@ -145,6 +145,10 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
     elif isinstance(error, ValueError):
         store.finish_job(key, "blocked")
         _note(store, session, key, "Scheduled task blocked: " + str(error))
+    elif store.session(key)["status"] == "ready":
+        # The run completed (its verified result recorded) and failed afterwards: it is not a blocked task.
+        store.close_finished_job(key)
+        _note(store, session, key, "Scheduled task completed, then failed: " + str(error))
     else:
         store.finish_job(key, "blocked")
         _note(store, session, key, "Scheduled task failed; checkpoint preserved: " + str(error))
