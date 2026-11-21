@@ -558,15 +558,16 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
             # Every parent folder must be a real folder where the name says, or missing (Git recreates it), checked
             # with lstat on any Python: a symlinked folder (out of the worktree, to another folder in it, or a loop)
             # or a file in its place would redirect the restore to a file the checks above never looked at.
-            parts = Path(name).parts
-            parent_in_place, here = not Path(name).is_absolute() and ".." not in parts, root
+            path = Path(name)
+            parts = path.parts
+            parent_in_place, here = not path.is_absolute() and ".." not in parts, root
             for part in parts[:-1] if parent_in_place else ():
                 here = here / part
                 try:
-                    kind = os.lstat(here).st_mode
+                    parent_mode = os.lstat(here).st_mode
                 except FileNotFoundError:
                     break                                   # deleted with its folder: restored through Git
-                if not stat.S_ISDIR(kind):
+                if not stat.S_ISDIR(parent_mode):
                     parent_in_place = False
                     break
             # A symlink itself is removed, never followed; anything else must resolve inside the worktree.

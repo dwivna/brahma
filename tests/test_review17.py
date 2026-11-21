@@ -132,10 +132,21 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
             repo = make_repo(Path(tmp) / "r")
             (repo / "a").mkdir()
             os.symlink(Path(tmp) / "elsewhere", Path(tmp) / "link")
-            with patch.object(gittools, "violating_paths", return_value=["a/../../link"]):
+            for name in ("a/../../link", str(Path(tmp) / "link")):          # a parent part, an absolute name
+                with self.subTest(name=name), patch.object(gittools, "violating_paths", return_value=[name]):
+                    restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+                    self.assertEqual(restored, [])
+                    self.assertIn(name, kept)
+                    self.assertTrue(os.path.lexists(Path(tmp) / "link"))
+
+    def test_a_file_in_a_folders_place_never_redirects_a_restore(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            (repo / "docs").write_text("a file where a folder was\n")
+            with patch.object(gittools, "violating_paths", return_value=["docs/a.txt"]):
                 restored, kept = gittools.restore_violations(repo, ["src/**"], {})
             self.assertEqual(restored, [])
-            self.assertTrue(os.path.lexists(Path(tmp) / "link"))
+            self.assertIn("docs/a.txt", kept)
 
     def test_a_symlink_loop_that_violates_is_itself_removed(self):
         with tempfile.TemporaryDirectory() as tmp:

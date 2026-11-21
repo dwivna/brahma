@@ -869,8 +869,8 @@ class Session:
             except BaseException as error:
                 # Records made while something propagates are best effort: they must never replace it.
                 if receipt is not None:
-                    # The verified result exists: the run is complete and stays ready, so it is not requeued (it could not
-                    # resume from its own commit) and /publish still works. Say only what is true.
+                    # The verified result exists: the run is never requeued (it could not resume from its own commit). With
+                    # its receipt stored it stays ready and /publish works; without, it is blocked. Say only what is true.
                     ended = ("Brahma closed" if isinstance(error, asyncio.CancelledError)
                              else f"The run ended with {type(error).__name__}")
                     if not receipt["committed"]:
@@ -892,7 +892,8 @@ class Session:
                     final = "ready" if receipt_stored else "blocked"
                     _best_effort(lambda: self.store.set(self.key, status=final))
                     _best_effort(lambda: self.store.close_finished_job(self.key) if receipt_stored
-                                 else self.store.finish_job(self.key, "blocked"))
+                                 else self.store.finish_job(self.key, "cancelled" if self.store.session(self.key)["stopped"]
+                                                            else "blocked"))
                     _best_effort(lambda: self.emit(Event(kind="publication", text=note)))
                     _best_effort(lambda: self.emit(Event(kind="summary", text=f"{final}: {result.text}\n{note}",
                                                          usage=result.usage)))

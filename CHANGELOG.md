@@ -164,7 +164,9 @@ security reviews that followed.
   stays claimed until the next daemon start; a database error after the run became ready makes `brahma run` exit 13
   (blocked) although the session is ready; the session shows ready while its automatic publication runs, so a `/publish`
   started then waits for it and pushes the same verified commit again (a second draft PR is refused by `gh` and
-  reported).
+  reported); if the database stays write-locked after the ready receipt fails, the blocked status may not be written
+  either, and the next daemon start re-queues the run, which then stops as "Worktree base changed" (its own commit);
+  resuming a run blocked that way gives the same message.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 
