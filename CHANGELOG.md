@@ -47,7 +47,9 @@ security reviews that followed.
   a stop (and gives up after five minutes); quitting the terminal UI or stopping the service (a dedicated
   closing signal, never stale) ends a running push or PR creation at its next quarter-second check and starts no new
   one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic publication is
-  refused if a stop, pause or kill switch was seen during the run, even if lifted since; a Stop or Pause during
+  refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted since (read from
+  the durable records, so a halt made while the final checks block the event loop counts); a forced cancellation or an
+  unexpected error during publication keeps the committed run ready, closes its job and records its summary; a Stop or Pause during
   publication is named as such (unless Brahma is also closing); every error after the push says the commit was
   pushed; an owned output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the run; the state database is
   opened by a properly escaped URI; the test suite never touches the real Brahma state directory.

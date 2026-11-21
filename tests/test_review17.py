@@ -278,7 +278,7 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, tmp, interrupt, engine=None):
+    async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None):
         import asyncio
         import threading
         from brahma.models import Result
@@ -312,10 +312,11 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
         with patch("brahma.engine.execute", engine(session) if engine else ready), \
                 patch("brahma.engine._tree", return_value="verified-tree"), \
                 patch.object(Session, "approved_contract", approved), \
-                patch.object(gittools, "commit_changes", return_value="c"), \
+                patch.object(gittools, "commit_changes",
+                             side_effect=lambda *a: (during_commit(session) if during_commit else None) or "c"), \
                 patch.object(gittools, "status_paths", return_value=[]), \
                 patch.object(gittools, "snapshot_changes", return_value={}), \
-                patch.object(gittools, "publish", publishing), \
+                patch.object(gittools, "publish", publish or publishing), \
                 patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
                 patch.object(gittools, "git_identity", side_effect=identity):
             work = asyncio.ensure_future(session.execute(scheduled=True))
@@ -332,7 +333,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
     async def test_a_service_stop_or_quit_ends_the_push_within_its_grace_and_the_run_stays_ready(self):
         # scheduler.tick and the terminal UI's quit set session.cancel, then wait a grace period before cancelling.
         with tempfile.TemporaryDirectory() as tmp:
-            store, session, result, seen = await self._run(tmp, lambda session, work: session.close())
+            store, session, result, seen = await self._run(tmp, lambda session, work: session.begin_closing())
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])  # the push itself was stopped
             self.assertEqual(result.status, "ready", result.text)       # verified and committed: /publish still works
             self.assertIn("Not published", result.text)
@@ -347,27 +348,39 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])
             self.assertEqual(store.session(session.key)["status"], "ready")   # not requeued; /publish works
             notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
-            self.assertTrue(notes and "Brahma closed during publication" in notes[-1])
+            self.assertTrue(notes and "during publication" in notes[-1])
+            self.assertNotEqual(store.job(session.key)["state"], "running")   # closed without the scheduler (UI, CLI)
+            summaries = [e["text"] for e in store.events(session.key) if e["kind"] == "summary"]
+            self.assertTrue(summaries and summaries[-1].startswith("ready:"))
 
-    async def test_a_halt_seen_during_the_run_and_lifted_blocks_automatic_publication(self):
+    async def test_an_unexpected_error_while_publishing_keeps_the_committed_run_ready(self):
+        import subprocess as sp
+        with tempfile.TemporaryDirectory() as tmp:
+            def failing(*args):
+                raise sp.TimeoutExpired(["git", "status"], 60)        # not a ValueError
+            store, session, outcome, seen = await self._run(tmp, None, publish=failing)
+            self.assertIsInstance(outcome, sp.TimeoutExpired)
+            self.assertEqual(store.session(session.key)["status"], "ready")
+
+    async def test_a_halt_made_and_lifted_while_the_loop_is_blocked_still_blocks_automatic_publication(self):
+        # The final checks and the commit block the event loop, so the sampling monitor cannot see a halt that is made
+        # and lifted during them; the durable records (control events, a held job) do.
         from brahma import halt
 
-        def engine_sees_a_kill(session):
-            async def ready(*args, **kwargs):
-                import asyncio
-                from brahma.models import Result
-                halt.engage(session.store.home)        # the kill switch fires near the end of the run ...
-                await asyncio.sleep(0.5)               # ... the run's halt monitor sees it ...
-                halt.release(session.store.home)       # ... and it is lifted before publication
-                result = Result("brahma", "ready", "done")
-                result.tree = "verified-tree"
-                return result
-            return ready
-        with tempfile.TemporaryDirectory() as tmp:
-            store, session, result, seen = await self._run(tmp, None, engine=engine_sees_a_kill)
-            self.assertEqual(seen, [])                 # nothing was published
-            self.assertIn("halt was seen during this run", result.text)
+        def pause_and_resume(session):
+            session.store.pause(session.key)
+            session.store.resume(session.key)
 
+        def kill_and_release(session):
+            halt.engage(session.store.home)
+            session.store.hold_all("kill switch released")
+            halt.release(session.store.home)
+        for name, during_commit, expected in (("pause", pause_and_resume, "A stop or pause was seen"),
+                                              ("kill", kill_and_release, "The kill switch was seen")):
+            with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
+                store, session, result, seen = await self._run(tmp, None, during_commit=during_commit)
+                self.assertEqual(seen, [])             # the publication never started
+                self.assertIn(expected, result.text)
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):
     def test_a_ready_run_cancelled_while_publishing_closes_a_running_job_but_keeps_a_hold(self):

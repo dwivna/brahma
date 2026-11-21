@@ -244,6 +244,13 @@ class Store:
         from . import halt
         return halt.engaged(self.home)
 
+    def close_running_job(self, session: str) -> None:
+        """Close the session's job only if it is still marked running (a hold or a requeue already decided stands): as
+        cancelled for a stopped session, otherwise done."""
+        current = self.job(session)
+        if current and current["state"] == "running":
+            self.finish_job(session, "cancelled" if self.session(session)["stopped"] else "done")
+
     def finish_job(self, session: str, state: str = "done") -> None:
         self.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session))
         self.db.commit()

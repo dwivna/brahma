@@ -106,12 +106,12 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
         if not work.done():
             # Service stop: let child work stop cleanly and keep its checkpoint.
             interrupted = True
-            session.close()
+            session.begin_closing()
             await asyncio.wait({work}, timeout=grace)
         await settle()
     except asyncio.CancelledError:
         # Outer cancellation: ask child work to checkpoint, then force it, then re-raise.
-        session.close()
+        session.begin_closing()
         try:
             await asyncio.wait({work}, timeout=grace)
         finally:
@@ -134,11 +134,10 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
             # A pause or the kill switch holds the work; it is not a stop, so the approved job is kept, held until `resume`.
             store.hold(key, session.generation, job["digest"], "Held by a pause or the kill switch; resume to continue")
             return True
-        current = store.job(key)
-        if result.status != "waiting" and current and current["state"] == "running":
+        if result.status != "waiting":
             # Only a job still marked running is closed here: Session.execute may already have queued (a pause that was
             # resumed during the run) or held (a pause or the kill switch) its continuation, and that decision stands.
-            store.finish_job(key, "cancelled" if store.session(key)["stopped"] else "done")
+            store.close_running_job(key)
         return True
     if isinstance(error, ValueError) and "Another Brahma worker" in str(error):
         store.enqueue(key, session.generation, job["digest"], time.time() + RETRY_SECONDS,
@@ -162,9 +161,7 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
         if status == "ready":
             # Cancelled while publishing a verified, committed result: the run is complete. Close its job unless a
             # pause or the kill switch already holds it (that decision stands).
-            current = store.job(session.key)
-            if current and current["state"] == "running":
-                store.finish_job(session.key)
+            store.close_running_job(session.key)
             return
         if status in ("waiting", "blocked", "incomplete"):
             return

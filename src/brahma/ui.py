@@ -543,7 +543,7 @@ class BrahmaApp(App):
         if self.checking_auth and self.job:
             self.job.cancel()
         elif self.session and self.job and not self.job.done():
-            self.session.close()
+            self.session.begin_closing()
         job = self.job
         if job and not job.done() and job is not asyncio.current_task():
             try:

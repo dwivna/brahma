@@ -501,7 +501,7 @@ class Session:
             abandoned.set()                 # the thread ends its running step at the next poll; nothing new starts
             raise
 
-    def close(self):
+    def begin_closing(self):
         """Brahma is closing (terminal UI quit, service stop): not durable, never cleared on this object. Running work
         checkpoints; publication stops at its next check and starts nothing new."""
         self.closing.set()
@@ -683,7 +683,8 @@ class Session:
                         return
                     await asyncio.sleep(.2)
             monitor = asyncio.create_task(monitor_stop())
-            cancelled_publishing = False    # a forced cancellation landed while the committed result was publishing
+            publishing = None           # the ready, committed result while it is being published
+            run_control = self.store.last_control(self.key)     # stop/pause records after this were made during the run
             capacity = Capacity(self.store, self.cancel)
             async def gate(provider):
                 self.approved_contract()
@@ -727,26 +728,26 @@ class Session:
                         try:
                             if not receipt["committed"]:
                                 raise ValueError("Not published: the verified work is not committed (auto_commit is off)")
-                            if self.closing.is_set() or seen_halt:
-                                # Closing, or a stop, pause or kill switch was seen during this run (even if lifted
-                                # since): lifting a halt never starts an external write.
-                                raise ValueError("Brahma is closing or a halt was seen during this run; the verified "
-                                                 "commit is ready for /publish")
+                            if self.closing.is_set():
+                                raise ValueError("Brahma is closing; the verified commit is ready for /publish")
+                            # A stop, pause or kill switch during this run, even if lifted since, never leads to an
+                            # external write. Durable records cover the moments the sampling monitor cannot run.
+                            job = self.store.job(self.key)
+                            seen = (seen_halt[0] if seen_halt
+                                    else "A stop or pause" if self.store.controls_after(self.key, run_control)
+                                    else "The kill switch" if job and job["state"] == "held" else None)
+                            if seen:
+                                raise ValueError(f"{seen} was seen during this run; the verified commit is ready "
+                                                 "for /publish")
+                            publishing = result
                             result.text += "\nDraft PR: " + await self.publish_ready_in_thread(receipt, result.text)
+                            publishing = None
                         except ValueError as error:
+                            publishing = None
                             text = str(error)
                             text = text if text.startswith("Not published") else "Not published: " + text
                             self.emit(Event(kind="publication", text=text))
                             result.text += "\n" + text
-                        except asyncio.CancelledError:
-                            # Forced cancellation while publishing (the thread did not stop within the grace period).
-                            # The verified, committed run is recorded as ready before the cancellation continues, so
-                            # it is not requeued (it could not resume from its own commit) and /publish still works.
-                            text = ("Not published: Brahma closed during publication. Check the remote branch and "
-                                    "any draft PR, then use /publish")
-                            self.emit(Event(kind="publication", text=text))
-                            cancelled_publishing = True
-                            raise
                 # A durable stop takes precedence over an automatic restart.
                 reason = self.halted()
                 if reason:
@@ -778,13 +779,24 @@ class Session:
                 self.emit(Event(kind="summary", text=f"{result.status}: {result.text}", usage=result.usage))
                 return result
             except BaseException:
-                # A forced cancellation during publication: the result is verified and committed, so the run stays
-                # ready (it is not requeued: it could not resume from its own commit; /publish still works). The
-                # scheduler closes its job. This write must never replace the cancellation that is propagating.
-                try:
-                    self.store.set(self.key, status="ready" if cancelled_publishing else "interrupted")
-                except Exception:
-                    pass
+                if publishing is not None:
+                    # Anything that ends the run while its verified, committed result is being published (a forced
+                    # cancellation, an unexpected error): the run is complete and stays ready, so it is not requeued (it
+                    # could not resume from its own commit) and /publish still works. These records are best effort:
+                    # they must never replace what is propagating.
+                    note = ("Not published: Brahma closed or failed during publication. Check the remote branch and "
+                            "any draft PR, then use /publish")
+                    for record in (lambda: self.store.set(self.key, status="ready"),
+                                   lambda: self.store.close_running_job(self.key),
+                                   lambda: self.emit(Event(kind="publication", text=note)),
+                                   lambda: self.emit(Event(kind="summary", text=f"ready: {publishing.text}\n{note}",
+                                                           usage=publishing.usage))):
+                        try:
+                            record()
+                        except Exception:
+                            pass
+                else:
+                    self.store.set(self.key, status="interrupted")
                 raise
             finally:
                 monitor.cancel()
