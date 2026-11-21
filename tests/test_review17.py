@@ -279,7 +279,7 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
     async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None, before=None, ownership=None,
-                   wait_for_publish=True):
+                   wait_for_publish=True, publish_on=True):
         import asyncio
         import threading
         from brahma.models import Result
@@ -290,7 +290,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
         def approved(self_, *args, **kwargs):          # the approved settings enable commit and publication
             contract, settings, catalog = original(self_, *args, **kwargs)
-            settings.auto_commit = settings.publish = True
+            settings.auto_commit, settings.publish = True, publish_on
             return contract, settings, catalog
 
         async def ready(*args, **kwargs):
@@ -475,6 +475,44 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertEqual(len(receipts), 1)           # /publish can use it
             self.assertEqual(seen, [])                   # nothing was published
 
+    async def test_a_halt_still_in_force_after_the_commit_leaves_the_run_complete_and_unpublished(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def pause(session):                          # paused while the commit lands; not resumed
+                other = Store(session.store.home)
+                other.pause(session.key)
+                other.close()
+            store, session, result, seen = await self._run(tmp, None, during_commit=pause)
+            self.assertEqual(seen, [])
+            self.assertEqual(result.status, "ready")     # complete: resuming could not start from its own commit
+            self.assertIn("Not published: Paused by user", result.text)
+            self.assertEqual(store.job(session.key)["state"], "done")
+
+    async def test_a_stop_recorded_during_the_run_is_labelled_a_stop_even_if_its_flag_was_cleared(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(Store, "controls_after", return_value={"stop"}):
+            store, session, result, seen = await self._run(tmp, None)
+            self.assertIn("Stopped by user", result.text)
+            self.assertNotEqual(store.job(session.key)["state"], "queued")   # a stop is never re-queued
+
+    async def test_closing_during_the_commit_with_publication_off_does_not_mention_publishing(self):
+        import asyncio
+        import threading
+        landed, release = threading.Event(), threading.Event()
+
+        def slow_commit(session):
+            landed.set()
+            release.wait(10)
+        with tempfile.TemporaryDirectory() as tmp:
+            async def cancel_during_commit(session, work):
+                await asyncio.to_thread(landed.wait, 10)
+                work.cancel()
+                await asyncio.sleep(0.1)
+                release.set()
+            store, session, outcome, seen = await self._run(tmp, cancel_during_commit, during_commit=slow_commit,
+                                                            wait_for_publish=False, publish_on=False)
+            self.assertEqual(store.session(session.key)["status"], "ready")
+            texts = " ".join(e["text"] for e in store.events(session.key) if e["kind"] in ("publication", "summary"))
+            self.assertNotIn("/publish", texts)
+
     async def test_a_finished_run_closes_a_job_a_kill_switch_release_held(self):
         with tempfile.TemporaryDirectory() as tmp:
             def held(session):                             # from another process: its own connection
@@ -505,10 +543,9 @@ class ForcedCancellationClosesTheJob(unittest.TestCase):
                 store.set(session.key, status=status)
                 store.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session.key))
                 store.db.commit()
-                if status == "ready":
-                    scheduler._requeue_interrupted(store, session, store.job(session.key))   # the cancelled path
-                else:
-                    store.close_finished_job(session.key)                                  # the normal path
+                scheduler._requeue_interrupted(store, session, store.job(session.key))       # the cancelled path
+                self.assertEqual(store.job(session.key)["state"], expected)
+                store.close_finished_job(session.key)                                      # the normal path
                 self.assertEqual(store.job(session.key)["state"], expected)
 
 

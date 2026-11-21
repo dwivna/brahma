@@ -51,8 +51,9 @@ security reviews that followed.
   halt monitor saw, the durable stop/pause records taken at the start of the run, and a job held by a kill switch
   release); the final checks, the commit and the receipt run off the event loop (a cancellation waits for a step in
   flight, so a commit never lands after the run unwinds, and a commit that lands while closing is recorded ready); a
-  halt seen during the run, even if lifted, prevents the local commit and holds or re-queues the work; a ready run's
-  job is always closed; any publication failure is reported, never raised, and
+  halt seen during the run, even if lifted, prevents the local commit and holds or re-queues the work; once the
+  verified result is recorded the run is complete, and a halt still in force only prevents its publication; a ready
+  run's job is always closed; a cancellation waits at most three minutes for a final step in flight; any publication failure is reported, never raised, and
   the run ends ready; a forced cancellation during publication keeps the committed run ready, closes its job and
   records its summary; a Stop or Pause during
   publication is named as such (unless Brahma is also closing); every error after the push says the commit was
