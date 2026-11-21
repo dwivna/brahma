@@ -789,15 +789,10 @@ class Session:
                             nonlocal receipt_stored
                             if made:
                                 result.text += "\nLocal commit: " + made
-                            try:
-                                self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
-                            finally:
-                                # Stored is what /publish can find, whatever failed after the write (a display callback).
-                                try:
-                                    receipt_stored = any(e["kind"] == "ready_receipt" and json.loads(e["text"]) == receipt
-                                                         for e in self.store.events(self.key))
-                                except Exception:
-                                    receipt_stored = False
+                            event = Event(kind="ready_receipt", text=CONTROL.sub("", json.dumps(receipt)))
+                            self.store.event(self.key, event)
+                            receipt_stored = True       # /publish can find it, whatever the display does next
+                            self.callback(event)
                         try:
                             made, receipt = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:
@@ -879,7 +874,7 @@ class Session:
                     ended = ("Brahma closed" if isinstance(error, asyncio.CancelledError)
                              else f"The run ended with {type(error).__name__}")
                     if not receipt["committed"]:
-                        note = f"{ended} after the verified result was recorded; it is not committed, nothing was pushed"
+                        note = f"{ended} after verification; the work is not committed and nothing was pushed"
                     elif not receipt_stored:
                         note = (f"{ended}; the verified result could not be recorded, so /publish cannot use it: push "
                                 f"the branch yourself or approve a new plan")

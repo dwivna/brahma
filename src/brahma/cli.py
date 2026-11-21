@@ -3,7 +3,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sqlite3
 import os
 from pathlib import Path
 import subprocess
@@ -568,7 +567,7 @@ def _main(argv):
             return emit({"session": session.key, "status": result.status, "summary": result.text},
                         json.dumps({"ok": code == 0, "session": session.key, "status": result.status, "summary": result.text,
                                     "exit_code": code}, indent=2), code, as_json)
-        except (ValueError, OSError, sqlite3.Error) as error:
+        except (ValueError, OSError) as error:
             return fail(str(error), exitcodes.USAGE, as_json)
         finally:
             store.close()

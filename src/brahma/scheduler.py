@@ -127,15 +127,16 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
     error = None if work.cancelled() else work.exception()
     result = None if work.cancelled() or error else work.result()
     try:
-        ready = store.session(key)["status"] == "ready"
+        complete = store.run_complete(key, job["digest"])
     except sqlite3.Error:
-        ready = False
-    if ready:
+        # Unknown, so change nothing: the job stays claimed, and the next daemon start checks it again.
+        return True
+    if complete:
         # The run is complete (its verified result recorded), however it ended: its job is closed, never re-queued or
-        # blocked (it could not resume from its own commit). One place decides this for every exit path.
+        # blocked (it could not resume from its own commit). The session has recorded how it ended.
+        if store.session(key)["status"] != "ready":
+            store.set(key, status="ready")
         store.close_finished_job(key)
-        if error is not None:
-            _note(store, session, key, "Scheduled task completed, then failed: " + str(error))
         return True
     if interrupted and error is None and (result is None or result.status == "cancelled"):
         _requeue_interrupted(store, session, job)
@@ -169,12 +170,14 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
     Store.enqueue is a no-op for a durably stopped/paused session, so a user stop is never undone.
     """
     try:
-        status = store.session(session.key)["status"]
-        if status == "ready":
+        if store.run_complete(session.key, job["digest"]):
             # Cancelled while publishing a verified, committed result: the run is complete, so its job is closed even
             # if held (the same rule as a run that ends normally).
+            if store.session(session.key)["status"] != "ready":
+                store.set(session.key, status="ready")
             store.close_finished_job(session.key)
             return
+        status = store.session(session.key)["status"]
         if status in ("waiting", "blocked", "incomplete"):
             return
         store.enqueue(session.key, session.generation, job["digest"], time.time(),

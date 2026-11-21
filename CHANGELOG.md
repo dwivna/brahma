@@ -59,7 +59,8 @@ security reviews that followed.
   is named as such (unless Brahma is also closing); every error after the push says the commit was pushed; an owned
   output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the
   run; the state database is opened by a properly escaped URI; the test suite never touches the real Brahma state
-  directory.
+  directory; a scheduled run whose verified receipt is recorded is closed as complete even if its ready status was not
+  written; restoring never acts below a folder that is a symlink out of the worktree.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
   serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and
   while the push or PR creation runs (which are ended at once); fingerprint-map path keys are redacted like any text;
@@ -158,8 +159,8 @@ security reviews that followed.
   however long its Git calls take (the process could not exit before the thread anyway); if the ready receipt cannot be
   stored (database write-locked), the run ends ready but `/publish` cannot use it: it says to push the branch by hand or
   approve a new plan; a kill switch, the terminal UI's forced quit and the service's stop grace do not end a final step
-  in flight (they take effect when it finishes); `brahma run` reports a database error after the run became ready as a
-  usage failure (exit 20), with the session's status left ready.
+  in flight (they take effect when it finishes); if the state database cannot be read when a scheduled run ends, its job
+  stays claimed until the next daemon start.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 

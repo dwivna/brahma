@@ -554,8 +554,10 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
             if regular:
                 kept.append(name)
                 continue
-        if not (target.parent.resolve() / target.name).resolve(strict=False).is_relative_to(root) and not target.is_symlink():
-            kept.append(name)  # never act outside the worktree
+        parent = target.parent.resolve()
+        if not parent.is_relative_to(root) or (not (parent / target.name).resolve(strict=False).is_relative_to(root)
+                                               and not target.is_symlink()):
+            kept.append(name)  # never act outside the worktree (a parent folder that is a symlink out of it included)
             continue
         tracked = name in tracked_files
         try:

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import contextlib
+import json
 import os
 import sqlite3
 import stat
@@ -74,6 +75,20 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
             self.assertEqual(sorted(restored), ["src/escape", "src/pipe"])
             self.assertFalse(os.path.lexists(repo / "src" / "escape"))
             self.assertFalse(os.path.lexists(repo / "src" / "pipe"))
+
+    def test_a_path_below_a_symlinked_folder_outside_the_worktree_is_never_deleted(self):
+        # Security review hardening: lstat and is_symlink follow a symlinked parent folder.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            outside = Path(tmp) / "outside"
+            outside.mkdir()
+            os.symlink(Path(tmp) / "elsewhere", outside / "x")          # an outside symlink
+            os.symlink(outside, repo / "link")
+            with patch.object(gittools, "violating_paths", return_value=["link/x"]):
+                restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertEqual(restored, [])
+            self.assertIn("link/x", kept)
+            self.assertTrue(os.path.lexists(outside / "x"))
 
     def test_an_unowned_new_file_is_still_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -518,13 +533,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
     async def test_a_failed_receipt_write_is_surfaced_and_the_committed_run_stays_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
-            original = Session.emit
-
-            def emit(self_, event, *args, **kwargs):
-                if getattr(event, "kind", "") == "ready_receipt":
-                    raise sqlite3.OperationalError("database is locked")
-                return original(self_, event, *args, **kwargs)
-            with patch.object(Session, "emit", emit):
+            with patch.object(Store, "event", failing_receipt_write(Store.event)):
                 store, session, outcome, seen = await self._run(tmp, None, publish_on=True)
             self.assertIsInstance(outcome, sqlite3.OperationalError)       # surfaced, not swallowed
             self.assertEqual(store.session(session.key)["status"], "ready")   # complete: never "interrupted"
@@ -533,16 +542,13 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertEqual(seen, [])
 
     async def test_a_receipt_stored_before_a_display_failure_still_counts_as_recorded(self):
-        with tempfile.TemporaryDirectory() as tmp:
-            original = Session.emit
-
-            def emit(self_, event, *args, **kwargs):
-                outcome = original(self_, event, *args, **kwargs)
-                if getattr(event, "kind", "") == "ready_receipt":
+        def display_fails(session):
+            def callback(event):
+                if event.kind == "ready_receipt":
                     raise BrokenPipeError("stderr closed")       # after the store write: /publish can find it
-                return outcome
-            with patch.object(Session, "emit", emit):
-                store, session, outcome, seen = await self._run(tmp, None, publish_on=True)
+            session.callback = callback
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, outcome, seen = await self._run(tmp, None, publish_on=True, before=display_fails)
             self.assertIsInstance(outcome, BrokenPipeError)
             notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
             self.assertTrue(notes)
@@ -551,13 +557,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
     async def test_a_failed_receipt_write_without_auto_commit_never_says_push_the_branch(self):
         with tempfile.TemporaryDirectory() as tmp:
-            original = Session.emit
-
-            def emit(self_, event, *args, **kwargs):
-                if getattr(event, "kind", "") == "ready_receipt":
-                    raise sqlite3.OperationalError("database is locked")
-                return original(self_, event, *args, **kwargs)
-            with patch.object(Session, "emit", emit), \
+            with patch.object(Store, "event", failing_receipt_write(Store.event)), \
                     patch.object(gittools, "status_paths", return_value=["src/left.txt"]):
                 store, session, outcome, seen = await self._run(tmp, None, publish_on=True, auto_commit=False,
                                                                 status_patch=False)
@@ -619,6 +619,15 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIn("Not published (UnicodeDecodeError", result.text)
 
 
+def failing_receipt_write(original):
+    """Store.event that fails (a locked database) for the ready receipt only."""
+    def event(self_, key, event, *args, **kwargs):
+        if getattr(event, "kind", "") == "ready_receipt":
+            raise sqlite3.OperationalError("database is locked")
+        return original(self_, key, event, *args, **kwargs)
+    return event
+
+
 class SchedulerCompletedThenFailed(unittest.IsolatedAsyncioTestCase):
     async def test_a_ready_run_that_fails_afterwards_is_not_marked_blocked(self):
         from brahma import scheduler
@@ -626,14 +635,33 @@ class SchedulerCompletedThenFailed(unittest.IsolatedAsyncioTestCase):
         for error in (sqlite3.OperationalError("database is locked"), ValueError("a later step refused")):
             with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
                 store, session, digest = approved_job(tmp)
-                self.addCleanup(store.close)
+                try:
+                    async def completes_then_fails(self_, *, scheduled=False):
+                        store.set(session.key, status="ready")
+                        raise error
+                    with patch.object(Session, "execute", completes_then_fails):
+                        await scheduler.tick(store)
+                    self.assertEqual(store.job(session.key)["state"], "done")
+                finally:
+                    store.close()
 
-                async def completes_then_fails(self_, *, scheduled=False):
-                    store.set(session.key, status="ready")
-                    raise error
-                with patch.object(Session, "execute", completes_then_fails):
+    async def test_a_recorded_receipt_closes_the_job_when_the_ready_status_was_not_written(self):
+        import asyncio
+        from brahma import scheduler
+        from brahma.models import Event
+        from tests.test_scheduler import approved_job
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, digest = approved_job(tmp)
+            try:
+                async def receipt_then_cancelled(self_, *, scheduled=False):
+                    store.event(session.key, Event(kind="ready_receipt", text=json.dumps({"digest": digest})))
+                    raise asyncio.CancelledError     # Brahma closing; its best-effort ready status was never written
+                with patch.object(Session, "execute", receipt_then_cancelled):
                     await scheduler.tick(store)
-                self.assertEqual(store.job(session.key)["state"], "done")
+                self.assertEqual(store.job(session.key)["state"], "done")     # never re-queued from its own commit
+                self.assertEqual(store.session(session.key)["status"], "ready")
+            finally:
+                store.close()
 
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):

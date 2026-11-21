@@ -292,6 +292,18 @@ class Store:
         return [dict(zip(("seq", "created", "provider", "role", "kind", "text", "usage"),
                          (*row[:6], json.loads(row[6])))) for row in rows]
 
+    def run_complete(self, key: str, digest: str) -> bool:
+        """A run of this approval is complete: the session is ready, or its newest verified receipt is for this approval
+        (the ready status is written best effort while Brahma closes, so it can be missing)."""
+        if self.session(key)["status"] == "ready":
+            return True
+        row = self.db.execute("SELECT text FROM events WHERE session=? AND kind='ready_receipt' ORDER BY seq DESC LIMIT 1",
+                              (key,)).fetchone()
+        try:
+            return bool(row) and json.loads(row[0]).get("digest") == digest
+        except (ValueError, TypeError, AttributeError):
+            return False
+
     def latest_seq(self, key: str, kind: str) -> int:
         """Sequence number of the newest event of `kind` (0 if none): where the current plan's records start."""
         row = self.db.execute("SELECT MAX(seq) FROM events WHERE session=? AND kind=?", (key, kind)).fetchone()
