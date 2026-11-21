@@ -49,17 +49,17 @@ security reviews that followed.
   no new one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic
   publication is refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted
   since (what the halt monitor saw, the durable stop/pause records taken at the start of the run, and a job held by a
-  kill switch release); the final checks, the commit and the receipt run off the event loop (a cancellation waits for a
-  step in flight, so a commit never lands after the run unwinds, and a commit that lands while closing is recorded
-  ready); a halt seen during the run, even if lifted, prevents the local commit and holds or re-queues the work; once
-  the verified result is recorded the run is complete, and a halt still in force only prevents its publication; a ready
-  run's job is always closed; notes written while Brahma closes say only what is true (published, not committed, or not
-  published); any publication failure is reported, never raised, and the run ends ready; a forced cancellation during
-  publication keeps the committed run ready, closes its job and records its summary; a Stop or Pause during publication
-  is named as such (unless Brahma is also closing); every error after the push says the commit was pushed; an owned
-  output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the
-  run; the state database is opened by a properly escaped URI; the test suite never touches the real Brahma state
-  directory.
+  kill switch release); the final checks, the commit and the receipt run off the event loop (a cancellation waits up to
+  three minutes for a step in flight, so a commit does not land after the run unwinds, and a commit that lands while
+  closing is recorded ready); a halt seen during the run, even if lifted, prevents the local commit and holds or
+  re-queues the work; once the verified result is recorded the run is complete, and a halt still in force only prevents
+  its publication; a ready run's job is always closed; notes written while Brahma closes say only what is true
+  (published, not committed, or not published); any publication failure is reported, never raised, and the run ends
+  ready; a forced cancellation during publication keeps the committed run ready, closes its job and records its summary;
+  a Stop or Pause during publication is named as such (unless Brahma is also closing); every error after the push says
+  the commit was pushed; an owned output missing for a moment is kept; an unusable state directory or lock refuses
+  publication instead of crashing the run; the state database is opened by a properly escaped URI; the test suite never
+  touches the real Brahma state directory.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
   serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and
   while the push or PR creation runs (which are ended at once); fingerprint-map path keys are redacted like any text;
@@ -154,7 +154,9 @@ security reviews that followed.
   released between two halt-monitor samples (0.2 s), or while the monitor cannot sample (worktree setup, the engine's
   own final checks), is not seen by a run that has no scheduled job (a scheduled job is held by the release; stop and
   pause are recorded durably); if the state database cannot be written while a run is being cancelled, its "interrupted"
-  status is not recorded.
+  status is not recorded; a final step still running three minutes after Brahma starts closing is left to finish
+  alone (the run is recorded interrupted, with an event saying to check the worktree before resuming); if the ready
+  receipt cannot be stored (database write-locked), the run is ready but `/publish` needs it verified again.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 

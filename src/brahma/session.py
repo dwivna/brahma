@@ -101,20 +101,24 @@ def verification_charges(events: list[dict], generation: str) -> dict[int, float
     return charges
 
 
+FINISH_WAIT = 180      # seconds a cancellation waits for a final step in flight
+
+
 async def _finish_in_thread(step):
-    """Run a blocking step in a thread. A cancellation waits for the step to finish before it continues, so a commit never
-    lands after the run has unwound and released its worktree lock (each Git call in a step has its own timeout, so the
-    wait is bounded by them). The finished step is carried as `finished`, so the caller can record its result."""
+    """Run a blocking step in a thread. A cancellation waits for the step to finish (up to FINISH_WAIT, so quitting can
+    never hang on a stalled step) before it continues, so a commit does not land after the run has unwound and released
+    its worktree lock. The step is carried as `finished` (None if it was still running), so the caller can record it."""
     task = asyncio.ensure_future(asyncio.to_thread(step))
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError as cancelled:
-        while not task.done():
+        deadline = time.monotonic() + FINISH_WAIT
+        while not task.done() and time.monotonic() < deadline:
             try:
-                await asyncio.wait({task})
+                await asyncio.wait({task}, timeout=deadline - time.monotonic())
             except asyncio.CancelledError:
                 pass
-        cancelled.finished = task
+        cancelled.finished = task if task.done() else None
         raise
 
 
@@ -714,7 +718,7 @@ class Session:
                     await asyncio.sleep(.2)
             monitor = asyncio.create_task(monitor_stop())
             receipt = None      # the verified result, set as soon as it exists: from then on the run is complete
-            published = False   # the draft PR was opened
+            outcome = None      # what publication did, once it was decided (the text recorded in the run)
 
             def halt_during_run() -> str | None:
                 """A stop, pause or kill switch now in force or seen during this run, even if lifted since: the current
@@ -786,17 +790,22 @@ class Session:
                             made, receipt = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:
                             step = cancelled.finished
-                            if not step.cancelled() and step.exception() is None:
-                                made, receipt = step.result()   # landed while Brahma was closing: complete, recorded below
+                            if step is None:
+                                _best_effort(lambda: self.emit(Event(kind="error", text=(
+                                    "Brahma closed while the final commit step was still running; check the worktree "
+                                    f"({worktree}) before resuming"))))
+                            elif not step.cancelled() and step.exception() is None:
+                                made, receipt = step.result()   # landed while Brahma was closing: complete
+                                if made:
+                                    result.text += "\nLocal commit: " + made
+                                _best_effort(lambda: self.emit(Event(kind="ready_receipt", text=json.dumps(receipt))))
                             elif not step.cancelled():
                                 _best_effort(lambda: self.emit(Event(kind="error", text="The final commit failed while "
                                                                      "Brahma was closing: " + str(step.exception()))))
                             raise
-                        finally:
-                            if receipt is not None:
-                                if made:
-                                    result.text += "\nLocal commit: " + made
-                                _best_effort(lambda: self.emit(Event(kind="ready_receipt", text=json.dumps(receipt))))
+                        if made:
+                            result.text += "\nLocal commit: " + made
+                        self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
                     if receipt is not None and self.settings.publish:
                         try:
                             if not receipt["committed"]:
@@ -809,16 +818,18 @@ class Session:
                             if seen:
                                 raise ValueError(f"a halt was seen during this run ({seen}); the verified commit is "
                                                  "ready for /publish")
-                            result.text += "\nDraft PR: " + await self.publish_ready_in_thread(receipt, result.text)
-                            published = True
+                            outcome = "Publishing: Brahma closed during publication. Check the remote branch and any " \
+                                      "draft PR, then use /publish"
+                            outcome = "Draft PR: " + await self.publish_ready_in_thread(receipt, result.text)
+                            result.text += "\n" + outcome
                         except Exception as error:
                             # Any failure of publication is reported, never raised: the run is verified and committed,
                             # so it ends ready and /publish can try again. Only a cancellation propagates.
                             text = str(error) if type(error) is ValueError else \
                                 f"Not published ({type(error).__name__}: {error}). Check the remote branch, then use /publish"
-                            text = text if text.startswith("Not published") else "Not published: " + text
-                            self.emit(Event(kind="publication", text=text))
-                            result.text += "\n" + text
+                            outcome = text if text.startswith("Not published") else "Not published: " + text
+                            self.emit(Event(kind="publication", text=outcome))
+                            result.text += "\n" + outcome
                 # A durable stop takes precedence over an automatic restart, until the verified result exists: from then
                 # on the run is complete (its commit may have moved the branch, so it could not be resumed), and a halt
                 # only prevented its publication.
@@ -852,7 +863,7 @@ class Session:
                     self.store.close_finished_job(self.key)     # complete: closed even if held (`resume` must not re-run it)
                 elif not self._job_held():
                     # Any other outcome keeps a hold decided during the run (a kill switch release): `resume` continues it.
-                    self.store.finish_job(self.key, "cancelled" if stopped else "done")
+                    self.store.finish_job(self.key)
                 self.emit(Event(kind="summary", text=f"{result.status}: {result.text}", usage=result.usage))
                 return result
             except BaseException as error:
@@ -860,17 +871,18 @@ class Session:
                 if receipt is not None:
                     # The verified result exists: the run is complete and stays ready, so it is not requeued (it could not
                     # resume from its own commit) and /publish still works. Say only what is true.
-                    if published:
-                        note = "Recorded after publication"
+                    ended = ("Brahma closed" if isinstance(error, asyncio.CancelledError)
+                             else f"The run ended with {type(error).__name__}")
+                    if outcome and outcome.startswith("Publishing:"):
+                        note = outcome.replace("Publishing: ", "Not published: ", 1)      # closed while publishing
+                    elif outcome:
+                        note = f"{ended} after publication was decided ({outcome})"
                     elif not receipt["committed"]:
-                        note = "Not published: the verified work is not committed (auto_commit is off)"
-                    elif self.settings.publish and isinstance(error, asyncio.CancelledError):
-                        note = ("Not published: Brahma closed before or during publication. Check the remote branch "
-                                "and any draft PR, then use /publish")
+                        note = f"{ended} after the verified result was recorded; it is not committed, nothing was pushed"
                     elif self.settings.publish:
-                        note = "Not published: " + type(error).__name__ + "; check the remote branch, then use /publish"
+                        note = f"Not published: {ended} before publication; nothing was pushed. Use /publish"
                     else:
-                        note = "Brahma closed after the verified result was recorded"
+                        note = f"{ended} after the verified result was recorded"
                     _best_effort(lambda: self.store.set(self.key, status="ready"))
                     _best_effort(lambda: self.store.close_finished_job(self.key))
                     _best_effort(lambda: self.emit(Event(kind="publication", text=note)))

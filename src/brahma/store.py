@@ -249,9 +249,13 @@ class Store:
         (a hold or a requeue already decided stands). As cancelled for a stopped session, otherwise done."""
         current = self.job(session)
         if current and (current["state"] == "running" or self.session(session)["status"] == "ready"):
-            self.finish_job(session, "cancelled" if self.session(session)["stopped"] else "done")
+            self.finish_job(session)
 
-    def finish_job(self, session: str, state: str = "done") -> None:
+    def finish_job(self, session: str, state: str | None = None) -> None:
+        """Close the session's job. Without a state: cancelled for a stopped session, otherwise done (the one rule)."""
+        if state is None:
+            row = self.db.execute("SELECT stopped FROM sessions WHERE id=?", (session,)).fetchone()
+            state = "cancelled" if row and row[0] else "done"
         self.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session))
         self.db.commit()
 

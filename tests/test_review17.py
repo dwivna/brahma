@@ -279,7 +279,7 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
     async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None, before=None, ownership=None,
-                   wait_for_publish=True, publish_on=True):
+                   wait_for_publish=True, publish_on=True, auto_commit=True, status_patch=True):
         import asyncio
         import threading
         from brahma.models import Result
@@ -290,7 +290,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
         def approved(self_, *args, **kwargs):          # the approved settings enable commit and publication
             contract, settings, catalog = original(self_, *args, **kwargs)
-            settings.auto_commit, settings.publish = True, publish_on
+            settings.auto_commit, settings.publish = auto_commit, publish_on
             return contract, settings, catalog
 
         async def ready(*args, **kwargs):
@@ -317,7 +317,8 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 patch.object(Session, "approved_contract", approved), \
                 patch.object(gittools, "commit_changes",
                              side_effect=lambda *a: (during_commit(session) if during_commit else None) or "c"), \
-                patch.object(gittools, "status_paths", return_value=[]), \
+                (patch.object(gittools, "status_paths", return_value=[]) if status_patch
+                 else __import__("contextlib").nullcontext()), \
                 patch.object(gittools, "snapshot_changes", return_value={}), \
                 patch.object(gittools, "publish", publish or publishing), \
                 patch.object(gittools, "ownership_changes", side_effect=ownership or (lambda *a, **k: (True, "ok"))), \
@@ -512,6 +513,55 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertEqual(store.session(session.key)["status"], "ready")
             texts = " ".join(e["text"] for e in store.events(session.key) if e["kind"] in ("publication", "summary"))
             self.assertNotIn("/publish", texts)
+
+    async def test_a_failed_receipt_write_is_surfaced_and_the_committed_run_stays_ready(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Session.emit
+
+            def emit(self_, event, *args, **kwargs):
+                if getattr(event, "kind", "") == "ready_receipt":
+                    raise OSError("database is locked")
+                return original(self_, event, *args, **kwargs)
+            with patch.object(Session, "emit", emit):
+                store, session, outcome, seen = await self._run(tmp, None, publish_on=False)
+            self.assertIsInstance(outcome, OSError)                  # surfaced, not swallowed
+            self.assertEqual(store.session(session.key)["status"], "ready")   # complete: never "interrupted"
+
+    async def test_closing_during_the_final_step_without_auto_commit_says_it_is_not_committed(self):
+        import asyncio
+        import threading
+        landed, release = threading.Event(), threading.Event()
+
+        def slow_receipt(*args, **kwargs):
+            landed.set()
+            release.wait(10)
+            return ["src/left.txt"]                      # auto_commit is off: the verified work is not committed
+        with tempfile.TemporaryDirectory() as tmp:
+            async def cancel_during_step(session, work):
+                await asyncio.to_thread(landed.wait, 10)
+                work.cancel()
+                await asyncio.sleep(0.1)
+                release.set()
+            with patch.object(gittools, "status_paths", side_effect=slow_receipt):
+                store, session, outcome, seen = await self._run(tmp, cancel_during_step, wait_for_publish=False,
+                                                                auto_commit=False, status_patch=False)
+            notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
+            self.assertTrue(notes and "not committed" in notes[-1])
+            self.assertEqual(store.session(session.key)["status"], "ready")
+
+    async def test_a_stopped_runs_job_is_closed_as_cancelled(self):
+        def engine_stopped(session):
+            async def ready(*args, **kwargs):
+                from brahma.models import Result
+                session.store.stop(session.key)         # a durable stop, still in force at the end
+                result = Result("brahma", "ready", "done")
+                result.tree = "verified-tree"
+                return result
+            return ready
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, result, seen = await self._run(tmp, None, engine=engine_stopped)
+            self.assertEqual(result.status, "cancelled")
+            self.assertEqual(store.job(session.key)["state"], "cancelled")
 
     async def test_a_finished_run_closes_a_job_a_kill_switch_release_held(self):
         with tempfile.TemporaryDirectory() as tmp:
