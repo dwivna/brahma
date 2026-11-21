@@ -538,7 +538,8 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
     for name in candidates:
         target = worktree / name
         if redacted_baseline and REDACTED in name and not os.path.lexists(target):
-            continue                        # a stored placeholder, not a file in the worktree
+            kept.append(name + " (a file whose name was stored redacted; it may have been deleted)")
+            continue
         if name in baseline or (redacted_baseline and redact(name) in baseline):
             kept.append(name)
             continue
@@ -548,8 +549,10 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
             # symlink or special file is still removed below.
             try:
                 regular = stat.S_ISREG(os.lstat(target).st_mode)
+            except FileNotFoundError:
+                regular = True              # missing for a moment (being rewritten): kept, never reset
             except OSError:
-                regular = True              # missing or unreadable for a moment: kept, never reset or reported restored
+                regular = False             # e.g. a parent replaced or made unreadable: restored below
             if regular:
                 kept.append(name)
                 continue

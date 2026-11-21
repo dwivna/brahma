@@ -45,9 +45,9 @@ security reviews that followed.
   Kill in the terminal UI take effect during a push; publication reads only durable controls, so a lifted kill switch
   or a resumed pause no longer refuses `/publish`; a publication waiting for another one of the same worktree stops on
   a stop (and gives up after five minutes); quitting the terminal UI or stopping the service ends a running
-  publication and leaves the run interrupted (requeued, not "ready"); a Stop or Pause during publication is named as
-  such; every error after the push says the commit was pushed; an owned output missing for a moment is kept; an
-  unusable state directory or lock refuses publication instead of crashing the run; the state database is
+  publication (once the closing task is cancelled); the run stays ready with its verified commit and says to use
+  `/publish`; a Stop or Pause during publication is named as such; every error after the push says the commit was
+  pushed; an owned output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the run; the state database is
   opened by a properly escaped URI; the test suite never touches the real Brahma state directory.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
   serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and

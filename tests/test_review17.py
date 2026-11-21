@@ -187,16 +187,17 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(seen), 1)
             self.assertIn("Cancelled", seen[0])
 
-    async def test_a_cancel_that_arrives_during_publication_stops_it_but_a_stale_one_does_not(self):
+    async def test_only_durable_controls_or_an_abandoned_await_stop_publication(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp)
-            session.cancel.set()                                # stale: left from before this publication
-            arguments, _ = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
+            session.cancel.set()           # the in-memory event can be stale (lifted kill switch, resumed pause)
+            arguments, abandoned = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
             self.assertIsNone(arguments[6]())
-            session.cancel.set()                                # a quit during publication
-            self.assertIn("Cancelled", arguments[6]())
+            self.assertTrue(session.cancel.is_set())            # not cleared: a quit during approval is not discarded
             session.store.stop(session.key)                     # a durable Stop is named as a stop
             self.assertEqual(arguments[6](), "Stopped by user")
+            abandoned.set()                                     # the awaiting task was cancelled
+            self.assertIn("Cancelled", arguments[6]())
 
     def test_a_stuck_publication_holding_the_lock_ends_the_wait_at_a_deadline(self):
         import fcntl
@@ -251,12 +252,13 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(restored, [])
             self.assertIn(name, kept)
 
-    def test_a_stored_placeholder_is_not_reported_as_a_file(self):
+    def test_a_stored_placeholder_is_reported_but_never_acted_on(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
             stored = {"notes/[REDACTED].txt": "33188:" + "0" * 64}     # a file that existed, stored redacted
             restored, kept = gittools.restore_violations(repo, ["src/**"], stored)
-            self.assertNotIn("notes/[REDACTED].txt", restored + kept)
+            self.assertNotIn("notes/[REDACTED].txt", restored)
+            self.assertTrue(any("stored redacted" in entry for entry in kept))   # a possible deletion stays reported
 
 
 class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
@@ -266,12 +268,11 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
         self.assertFalse((ROOT / "brahma-publish.lock").exists())
 
 
-if __name__ == "__main__":
-    unittest.main()
-
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
-    async def test_a_quit_during_automatic_publication_marks_the_run_interrupted_not_ready(self):
+    async def test_a_quit_during_automatic_publication_stops_it_and_keeps_the_run_ready(self):
+        import asyncio
+        import threading
         from brahma.models import Result
         from tests.test_halt import approved_job
         with tempfile.TemporaryDirectory() as tmp:
@@ -288,11 +289,17 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 result = Result("brahma", "ready", "done")
                 result.tree = "verified-tree"
                 return result
+            started, seen = threading.Event(), []
 
-            def publishing(*args):
-                session.cancel.set()                    # the terminal UI quits / the service stops mid-push
-                reason = args[6]()
-                raise ValueError("Publication stopped: " + reason)
+            def publishing(*args):                     # a long push that polls its stop check
+                started.set()
+                for _ in range(500):
+                    reason = args[6]()
+                    if reason:
+                        seen.append(reason)
+                        raise ValueError("Publication stopped: " + reason)
+                    time.sleep(0.02)
+                return "https://example.invalid/pr/1"
             identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
                                    "common_dir": "/c", "head": "h", "hidden": []}
             with patch("brahma.engine.execute", ready), patch("brahma.engine._tree", return_value="verified-tree"), \
@@ -303,6 +310,19 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                     patch.object(gittools, "publish", publishing), \
                     patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
                     patch.object(gittools, "git_identity", side_effect=identity):
-                result = await session.execute(scheduled=True)
-            self.assertEqual(result.status, "cancelled", result.text)        # the scheduler requeues it; it is not "ready"
-            self.assertIn("Brahma is closing", result.text)
+                work = asyncio.ensure_future(session.execute(scheduled=True))
+                await asyncio.to_thread(started.wait, 10)
+                work.cancel()                          # the terminal UI quits / the service stops mid-push
+                result = await work
+                for _ in range(100):
+                    if seen:
+                        break
+                    await asyncio.sleep(0.02)
+            self.assertEqual(result.status, "ready", result.text)     # verified and committed: /publish still works
+            self.assertIn("Brahma closed during publication", result.text)
+            self.assertEqual(store.session(session.key)["status"], "ready")
+            self.assertEqual(seen, ["Cancelled (Brahma is closing)"])  # the push itself was stopped
+
+
+if __name__ == "__main__":
+    unittest.main()
