@@ -46,8 +46,9 @@ security reviews that followed.
   or a resumed pause no longer refuses `/publish`; a publication waiting for another one of the same worktree stops on
   a stop (and gives up after five minutes); quitting the terminal UI or stopping the service (a dedicated
   closing signal, never stale) ends a running push or PR creation at its next quarter-second check and starts no new
-  one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; `/publish` refuses if
-  Brahma starts closing during the Touch ID prompt; a Stop or Pause during publication is named as such; every error after the push says the commit was
+  one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic publication is
+  refused if a stop, pause or kill switch was seen during the run, even if lifted since; a Stop or Pause during
+  publication is named as such (unless Brahma is also closing); every error after the push says the commit was
   pushed; an owned output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the run; the state database is
   opened by a properly escaped URI; the test suite never touches the real Brahma state directory.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is

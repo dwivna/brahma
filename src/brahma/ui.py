@@ -418,9 +418,8 @@ class BrahmaApp(App):
                     raise ValueError("Only a ready, verified plan can be published")
                 receipt = self.session.ready_receipt()
                 await asyncio.to_thread(presence.require, f"publish branch brahma/{self.session.key} as a draft PR")
-                receipt = self.session.ready_receipt()          # re-checked after the prompt
-                if self.session.closing.is_set():               # quit during the prompt
-                    raise ValueError("Not published: Brahma is closing")
+                receipt = self.session.ready_receipt()          # re-checked after the prompt (a quit during it is
+                # seen by the publication's own stop check before anything is pushed)
                 self.write(Event(kind="publication", text=await self.session.publish_ready_in_thread(
                     receipt, "Brahma's approved plan passed configured checks and independent review.")))
             elif value == "/approve":
@@ -544,8 +543,7 @@ class BrahmaApp(App):
         if self.checking_auth and self.job:
             self.job.cancel()
         elif self.session and self.job and not self.job.done():
-            self.session.closing.set()      # never cleared: this session object is going away
-            self.session.cancel.set()
+            self.session.close()
         job = self.job
         if job and not job.done() and job is not asyncio.current_task():
             try:

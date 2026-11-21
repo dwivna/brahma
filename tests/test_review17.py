@@ -101,9 +101,7 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
         ui = (ROOT / "src" / "brahma" / "ui.py").read_text()
         start = ui.index('elif value == "/publish":')
         block = ui[start:ui.index("elif value ==", start + 10)]
-        # A quit during the Touch ID prompt refuses; nothing clears the session's state on the way.
-        self.assertLess(block.index("presence.require"), block.index("if self.session.closing.is_set()"))
-        self.assertNotIn("cancel.clear()", block)
+        self.assertNotIn("cancel.clear()", block)       # /publish never clears session state on the way
 
     def test_automatic_publication_runs_off_the_event_loop(self):
         source = (ROOT / "src" / "brahma" / "session.py").read_text()
@@ -280,7 +278,7 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, tmp, interrupt):
+    async def _run(self, tmp, interrupt, engine=None):
         import asyncio
         import threading
         from brahma.models import Result
@@ -311,7 +309,8 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             return "https://example.invalid/pr/1"
         identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
                                "common_dir": "/c", "head": "h", "hidden": []}
-        with patch("brahma.engine.execute", ready), patch("brahma.engine._tree", return_value="verified-tree"), \
+        with patch("brahma.engine.execute", engine(session) if engine else ready), \
+                patch("brahma.engine._tree", return_value="verified-tree"), \
                 patch.object(Session, "approved_contract", approved), \
                 patch.object(gittools, "commit_changes", return_value="c"), \
                 patch.object(gittools, "status_paths", return_value=[]), \
@@ -320,8 +319,9 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 patch.object(gittools, "ownership_changes", return_value=(True, "ok")), \
                 patch.object(gittools, "git_identity", side_effect=identity):
             work = asyncio.ensure_future(session.execute(scheduled=True))
-            await asyncio.to_thread(started.wait, 10)
-            interrupt(session, work)
+            if interrupt:
+                await asyncio.to_thread(started.wait, 10)
+                interrupt(session, work)
             outcome = (await asyncio.gather(work, return_exceptions=True))[0]
             for _ in range(100):
                 if seen:
@@ -332,10 +332,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
     async def test_a_service_stop_or_quit_ends_the_push_within_its_grace_and_the_run_stays_ready(self):
         # scheduler.tick and the terminal UI's quit set session.cancel, then wait a grace period before cancelling.
         with tempfile.TemporaryDirectory() as tmp:
-            def closing(session, work):     # what scheduler.tick and the terminal UI's quit do first
-                session.closing.set()
-                session.cancel.set()
-            store, session, result, seen = await self._run(tmp, closing)
+            store, session, result, seen = await self._run(tmp, lambda session, work: session.close())
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])  # the push itself was stopped
             self.assertEqual(result.status, "ready", result.text)       # verified and committed: /publish still works
             self.assertIn("Not published", result.text)
@@ -349,9 +346,42 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIsInstance(outcome, asyncio.CancelledError)     # the caller's cancellation continues
             self.assertEqual(seen, ["Cancelled (Brahma is closing)"])
             self.assertEqual(store.session(session.key)["status"], "ready")   # not requeued; /publish works
-            self.assertNotEqual(store.job(session.key)["state"], "running")   # the job is closed
-            summaries = [e["text"] for e in store.events(session.key) if e["kind"] == "summary"]
-            self.assertTrue(summaries and "Brahma closed during publication" in summaries[-1])
+            notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
+            self.assertTrue(notes and "Brahma closed during publication" in notes[-1])
+
+    async def test_a_halt_seen_during_the_run_and_lifted_blocks_automatic_publication(self):
+        from brahma import halt
+
+        def engine_sees_a_kill(session):
+            async def ready(*args, **kwargs):
+                import asyncio
+                from brahma.models import Result
+                halt.engage(session.store.home)        # the kill switch fires near the end of the run ...
+                await asyncio.sleep(0.5)               # ... the run's halt monitor sees it ...
+                halt.release(session.store.home)       # ... and it is lifted before publication
+                result = Result("brahma", "ready", "done")
+                result.tree = "verified-tree"
+                return result
+            return ready
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, result, seen = await self._run(tmp, None, engine=engine_sees_a_kill)
+            self.assertEqual(seen, [])                 # nothing was published
+            self.assertIn("halt was seen during this run", result.text)
+
+
+class ForcedCancellationClosesTheJob(unittest.TestCase):
+    def test_a_ready_run_cancelled_while_publishing_closes_a_running_job_but_keeps_a_hold(self):
+        from brahma import scheduler
+        from tests.test_scheduler import approved_job
+        for state, expected in (("running", "done"), ("held", "held")):
+            with self.subTest(state=state), tempfile.TemporaryDirectory() as tmp:
+                store, session, digest = approved_job(tmp)
+                self.addCleanup(store.close)
+                store.set(session.key, status="ready")
+                store.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session.key))
+                store.db.commit()
+                scheduler._requeue_interrupted(store, session, store.job(session.key))
+                self.assertEqual(store.job(session.key)["state"], expected)
 
 
 if __name__ == "__main__":

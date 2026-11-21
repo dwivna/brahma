@@ -106,14 +106,12 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
         if not work.done():
             # Service stop: let child work stop cleanly and keep its checkpoint.
             interrupted = True
-            session.closing.set()
-            session.cancel.set()
+            session.close()
             await asyncio.wait({work}, timeout=grace)
         await settle()
     except asyncio.CancelledError:
         # Outer cancellation: ask child work to checkpoint, then force it, then re-raise.
-        session.closing.set()
-        session.cancel.set()
+        session.close()
         try:
             await asyncio.wait({work}, timeout=grace)
         finally:
@@ -160,7 +158,15 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
     Store.enqueue is a no-op for a durably stopped/paused session, so a user stop is never undone.
     """
     try:
-        if store.session(session.key)["status"] in ("waiting", "blocked", "incomplete", "ready"):
+        status = store.session(session.key)["status"]
+        if status == "ready":
+            # Cancelled while publishing a verified, committed result: the run is complete. Close its job unless a
+            # pause or the kill switch already holds it (that decision stands).
+            current = store.job(session.key)
+            if current and current["state"] == "running":
+                store.finish_job(session.key)
+            return
+        if status in ("waiting", "blocked", "incomplete"):
             return
         store.enqueue(session.key, session.generation, job["digest"], time.time(),
                       "Service stopped; approved work resumes when the service restarts")
