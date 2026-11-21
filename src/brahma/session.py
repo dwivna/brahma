@@ -618,12 +618,10 @@ class Session:
         if saved["stopped"] or saved["paused"]:
             raise ValueError("Scheduled approval is no longer valid" if scheduled else
                              "This session is stopped or paused; `brahma resume " + self.key + "`, or approve a new plan")
-        job = self.store.job(self.key)
-        if job and job["state"] == "held" and not scheduled:
+        if self._job_held() and not scheduled:
             raise ValueError("This session's work is held (pause or kill switch); `brahma resume " + self.key + "` queues it again")
-        # Taken before any blocking step: a stop, pause or kill switch recorded after this was made during the run.
-        from . import halt
-        run_control, run_kills = self.store.last_control(self.key), halt.epoch(self.store.home)
+        # Taken before any blocking step: a stop or pause recorded after this was made during the run.
+        run_control = self.store.last_control(self.key)
         self.cancel.clear()
         with self.lock():
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
@@ -714,12 +712,19 @@ class Session:
                 if result.status == "ready" and self.halted():
                     result = Result("brahma", "cancelled", self.halted() + "; checkpoint retained", result.usage)
                 if result.status == "ready":
-                    ok, message = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files],
-                                                             ignored_allow=self.settings.ignored_allowlist, identity=identity)
-                    try:
-                        same = result.tree is not None and engine._tree(worktree, self.settings) == result.tree
-                    except (OSError, ValueError, subprocess.SubprocessError):
-                        same = False
+                    # The final checks, the commit and the receipt run in a thread: they can take seconds on a large
+                    # worktree, and the halt monitor must keep sampling (a stop, pause or kill switch made meanwhile is
+                    # seen, and blocks publication even if lifted again).
+                    def final_checks():
+                        owned = gittools.ownership_changes(worktree, [p for t in self.plan.tasks for p in t.files],
+                                                           ignored_allow=self.settings.ignored_allowlist,
+                                                           identity=identity)
+                        try:
+                            unchanged = result.tree is not None and engine._tree(worktree, self.settings) == result.tree
+                        except (OSError, ValueError, subprocess.SubprocessError):
+                            unchanged = False
+                        return owned, unchanged
+                    (ok, message), same = await asyncio.to_thread(final_checks)
                     if not ok:
                         result = Result("brahma", "blocked", message)
                     elif not same:
@@ -727,16 +732,18 @@ class Session:
                         result = Result("brahma", "blocked", "Files changed after they were checked and reviewed; "
                                         "nothing was committed. Resume to check and review them again.", result.usage)
                     elif self.settings.auto_commit:
-                        commit = gittools.commit_changes(worktree, self.plan.summary, identity)
+                        commit = await asyncio.to_thread(gittools.commit_changes, worktree, self.plan.summary, identity)
                         result.text += "\nLocal commit: " + commit
                     receipt = None
                     if result.status == "ready":
                         # What was verified, bound to the exact commit: publication may push this and nothing else.
-                        receipt = {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
-                                   "committed": not gittools.status_paths(worktree),
-                                   # Ignored and special files as verified: publication refuses if any of them changed.
-                                   "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist),
-                                   "ignored_allowlist": list(self.settings.ignored_allowlist)}
+                        def verified():
+                            return {"digest": contract["digest"], "head": gittools.git(worktree, "rev-parse", "HEAD"),
+                                    "committed": not gittools.status_paths(worktree),
+                                    # Ignored and special files as verified: publication refuses if any changed.
+                                    "uncommitted": gittools.snapshot_changes(worktree, self.settings.ignored_allowlist),
+                                    "ignored_allowlist": list(self.settings.ignored_allowlist)}
+                        receipt = await asyncio.to_thread(verified)
                         self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
                     if receipt and self.settings.publish and not self.halted():
                         try:
@@ -745,10 +752,11 @@ class Session:
                             if self.closing.is_set():
                                 raise ValueError("Brahma is closing; the verified commit is ready for /publish")
                             # A stop, pause or kill switch during this run, even if lifted since, never leads to an
-                            # external write. Durable records cover the moments the sampling monitor cannot run.
+                            # external write: what the halt monitor saw (it samples throughout, the final checks run in
+                            # a thread), the durable stop/pause records, and a job held by a kill switch release.
                             if seen_halt:
                                 seen = seen_halt[0]
-                            elif halt.epoch(self.store.home) != run_kills or self._job_held():
+                            elif self._job_held():
                                 seen = "Kill switch engaged"
                             elif self.store.controls_after(self.key, run_control):
                                 seen = "Stopped or paused by user"
@@ -764,7 +772,7 @@ class Session:
                             # Any failure of publication is reported, never raised: the run is verified and committed,
                             # so it ends ready and /publish can try again. Only a cancellation propagates.
                             publishing = None
-                            text = str(error) if isinstance(error, ValueError) else \
+                            text = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) else \
                                 f"Not published ({type(error).__name__}: {error}). Check the remote branch, then use /publish"
                             text = text if text.startswith("Not published") else "Not published: " + text
                             self.emit(Event(kind="publication", text=text))
@@ -796,9 +804,7 @@ class Session:
                     self.store.enqueue(self.key, self.generation, contract["digest"], next_at,
                                        latest.get("reason", "Waiting for observed provider capacity"))
                 else:
-                    current = self.store.job(self.key)
-                    if not (current and current["state"] == "held"):    # a hold decided during the run stands
-                        self.store.finish_job(self.key)
+                    self.store.finish_job(self.key)     # a finished run's job is closed, held or not: nothing to resume
                 self.emit(Event(kind="summary", text=f"{result.status}: {result.text}", usage=result.usage))
                 return result
             except BaseException:

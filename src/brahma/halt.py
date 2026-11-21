@@ -25,25 +25,6 @@ def engage(home: Path) -> None:
     home = Path(home)
     home.mkdir(parents=True, exist_ok=True, mode=0o700)
     flag(home).write_text("Brahma kill switch engaged. Remove with `brahma kill --release`.\n")
-    _count(home)
-
-
-def _count(home: Path) -> None:
-    # A durable count of engagements that release never resets: work can tell that the switch was engaged while it ran,
-    # even when it was lifted again before the work looked (a run's final checks block its halt monitor). Best effort:
-    # failing to count must never stop the switch itself (or the reaping that follows) from working.
-    try:
-        (Path(home) / (NAME + ".count")).write_text(str(epoch(home) + 1) + "\n")
-    except OSError:
-        pass
-
-
-def epoch(home: Path) -> int:
-    """How many times the kill switch has been engaged (0 when never, or unreadable)."""
-    try:
-        return int((Path(home) / (NAME + ".count")).read_text().strip() or 0)
-    except (OSError, ValueError):
-        return 0
 
 
 def kill_everything(home: Path) -> tuple[list[int], list[int]]:
@@ -58,7 +39,6 @@ def kill_everything(home: Path) -> tuple[list[int], list[int]]:
 def release(home: Path) -> bool:
     try:
         flag(home).unlink()
+        return True
     except FileNotFoundError:
         return False
-    _count(home)        # also counts a switch engaged without engage() (the flag file created by hand)
-    return True

@@ -47,9 +47,9 @@ security reviews that followed.
   a stop (and gives up after five minutes); quitting the terminal UI or stopping the service (a dedicated
   closing signal, never stale) ends a running push or PR creation at its next quarter-second check and starts no new
   one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic publication is
-  refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted since (read from
-  durable records taken at the very start of the run, including a new count of kill-switch engagements and releases (best effort: it never stops the switch), so a halt
-  made while the final checks block the event loop counts); any publication failure is reported, never raised, and
+  refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted since (the final
+  checks, the commit and the receipt now run off the event loop, so the halt monitor keeps sampling during them, and
+  the durable stop/pause records taken at the start of the run are read too); any publication failure is reported, never raised, and
   the run ends ready; a forced cancellation during publication keeps the committed run ready, closes its job and
   records its summary; a Stop or Pause during
   publication is named as such (unless Brahma is also closing); every error after the push says the commit was
@@ -145,7 +145,9 @@ security reviews that followed.
   state database afresh, so a write-locked database delays a stop by up to 30 seconds; if Brahma is force-closed while
   `gh pr create` is in flight, the draft PR may exist although the run says "Not published" (it says to check); the
   checks before the push (hashing ignored files) are not interruptible; an owned path whose type cannot be read (its
-  parent replaced or made unreadable) is left as it is rather than restored, with readiness blocked.
+  parent replaced or made unreadable) is left as it is rather than restored, with readiness blocked; a kill switch both
+  engaged and lifted within one 0.2-second sample is not seen by the run (stop and pause are recorded durably); if the
+  state database cannot be written while a run is being cancelled, its "interrupted" status is not recorded.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 

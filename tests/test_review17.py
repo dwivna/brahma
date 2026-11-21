@@ -363,20 +363,24 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertIn("Not published (TimeoutExpired", result.text)
             self.assertEqual(store.session(session.key)["status"], "ready")
 
-    async def test_a_halt_made_and_lifted_while_the_loop_is_blocked_still_blocks_automatic_publication(self):
-        # The final checks and the commit block the event loop, so the sampling monitor cannot see a halt that is made
-        # and lifted during them; the durable records (control events, a held job) do.
+    async def test_a_halt_made_and_lifted_during_the_commit_still_blocks_automatic_publication(self):
+        # The final checks and the commit run in a thread, so the halt monitor keeps sampling during them; the durable
+        # stop/pause records cover a pause even between samples.
         from brahma import halt
 
-        def pause_and_resume(session):
-            session.store.pause(session.key)
-            session.store.resume(session.key)
+        def pause_and_resume(session):          # from another process: its own connection
+            other = Store(session.store.home)
+            other.pause(session.key)
+            other.resume(session.key)
+            other.close()
 
-        def kill_release_and_resume(session):      # no hold is left behind: only the kill switch's own record shows it
+        def kill_release_and_resume(session):      # no hold is left behind: only the halt monitor can see it
             halt.engage(session.store.home)
-            session.store.hold_all("kill switch released")
+            time.sleep(0.6)                        # the commit runs in a thread, so the monitor keeps sampling
             halt.release(session.store.home)
-            session.store.resume(session.key)
+            other = Store(session.store.home)
+            other.resume(session.key)
+            other.close()
         for name, during_commit, expected in (("pause", pause_and_resume, "(Stopped or paused by user)"),
                                               ("kill", kill_release_and_resume, "(Kill switch engaged)")):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
@@ -398,33 +402,38 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 result.tree = "verified-tree"
                 return result
             return ready
-        with tempfile.TemporaryDirectory() as tmp, patch.object(halt, "epoch", return_value=0), \
+        with tempfile.TemporaryDirectory() as tmp, \
                 patch.object(Store, "controls_after", return_value=set()):  # only the monitor can report it here
             store, session, result, seen = await self._run(tmp, None, engine=engine_sees_a_pause)
             self.assertEqual(seen, [])
             self.assertIn("a halt was seen during this run (Paused by user)", result.text)
 
 
-class KillSwitchCount(unittest.TestCase):
-    def test_a_hand_made_flag_is_counted_when_released_and_a_failed_count_never_stops_the_switch(self):
-        from brahma import halt
+    async def test_the_final_checks_and_the_commit_run_off_the_event_loop(self):
+        import threading
+        threads = []
         with tempfile.TemporaryDirectory() as tmp:
-            home = Path(tmp)
-            halt.flag(home).write_text("x")             # engaged by creating the file, not by engage()
-            before = halt.epoch(home)
-            self.assertTrue(halt.release(home))
-            self.assertGreater(halt.epoch(home), before)
-            real = Path.write_text
+            def record(session):
+                threads.append(threading.current_thread() is threading.main_thread())
+            store, session, result, seen = await self._run(tmp, None, during_commit=record)
+            self.assertEqual(threads, [False])
 
-            def count_fails(path, *args, **kwargs):     # the count cannot be written (read-only, full disk)
-                if path.name == halt.NAME + ".count":
-                    raise OSError("read-only")
-                return real(path, *args, **kwargs)
-            with patch.object(Path, "write_text", count_fails), \
-                    patch("brahma.procs.reap", return_value=([], [])) as reap:
-                halt.kill_everything(home)              # the switch still engages and every worker is still reaped
-            self.assertTrue(halt.engaged(home))
-            reap.assert_called_once()
+    async def test_a_finished_run_closes_a_job_a_kill_switch_release_held(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def held(session):
+                other = Store(session.store.home)
+                other.hold_all("kill switch released")
+                other.close()
+            store, session, result, seen = await self._run(tmp, None, during_commit=held)
+            self.assertIn("(Kill switch engaged)", result.text)
+            self.assertEqual(store.job(session.key)["state"], "done")   # `resume` cannot re-queue a finished plan
+
+    async def test_a_decode_error_while_publishing_is_reported_as_unexpected(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def undecodable(*args):
+                raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+            store, session, result, seen = await self._run(tmp, None, publish=undecodable)
+            self.assertIn("Not published (UnicodeDecodeError", result.text)
 
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):
