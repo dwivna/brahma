@@ -484,7 +484,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             store, session, result, seen = await self._run(tmp, None, during_commit=pause)
             self.assertEqual(seen, [])
             self.assertEqual(result.status, "ready")     # complete: resuming could not start from its own commit
-            self.assertIn("Not published: Paused by user", result.text)
+            self.assertIn("Not published: a halt was seen during this run (Paused by user)", result.text)
             self.assertEqual(store.job(session.key)["state"], "done")
 
     async def test_a_stop_recorded_during_the_run_is_labelled_a_stop_even_if_its_flag_was_cleared(self):
@@ -535,18 +535,20 @@ class ForcedCancellationClosesTheJob(unittest.TestCase):
     def test_a_ready_runs_job_is_always_closed_and_another_outcome_keeps_its_hold(self):
         from brahma import scheduler
         from tests.test_scheduler import approved_job
-        for status, state, expected in (("ready", "running", "done"), ("ready", "held", "done"),
-                                        ("blocked", "held", "held")):
-            with self.subTest(status=status, state=state), tempfile.TemporaryDirectory() as tmp:
-                store, session, digest = approved_job(tmp)
-                self.addCleanup(store.close)
-                store.set(session.key, status=status)
-                store.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session.key))
-                store.db.commit()
-                scheduler._requeue_interrupted(store, session, store.job(session.key))       # the cancelled path
-                self.assertEqual(store.job(session.key)["state"], expected)
-                store.close_finished_job(session.key)                                      # the normal path
-                self.assertEqual(store.job(session.key)["state"], expected)
+        for path in ("cancelled", "normal"):
+            for status, state, expected in (("ready", "running", "done"), ("ready", "held", "done"),
+                                            ("blocked", "held", "held")):
+                with self.subTest(path=path, status=status, state=state), tempfile.TemporaryDirectory() as tmp:
+                    store, session, digest = approved_job(tmp)
+                    self.addCleanup(store.close)
+                    store.set(session.key, status=status)
+                    store.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session.key))
+                    store.db.commit()
+                    if path == "cancelled":
+                        scheduler._requeue_interrupted(store, session, store.job(session.key))
+                    else:
+                        store.close_finished_job(session.key)
+                    self.assertEqual(store.job(session.key)["state"], expected)
 
 
 if __name__ == "__main__":

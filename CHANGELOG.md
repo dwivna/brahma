@@ -38,27 +38,28 @@ security reviews that followed.
   Codex builder banner no longer claims writes are confined.
 - `brahma approve` failed at the digest prompt with "File or stream is not seekable": the terminal was opened as a
   read-write text stream, which requires seeking. It is now read as unbuffered bytes; a test drives a real pseudo-terminal.
-- Review of the round-16 fixes (decision Round 16, while Codex was out of usage): draft PR creation no longer fails
-  when `gh` takes longer than a quarter second (its body was re-sent to stdin, which Python refuses); a baseline saved
-  with a redacted path name never deletes a file whose name it may stand for on resume; an owned output Brahma cannot verify (unreadable, special,
-  still being written) blocks readiness but is never deleted; automatic publication runs off the event loop, so Stop and
-  Kill in the terminal UI take effect during a push; publication reads only durable controls, so a lifted kill switch
-  or a resumed pause no longer refuses `/publish`; a publication waiting for another one of the same worktree stops on
-  a stop (and gives up after five minutes); quitting the terminal UI or stopping the service (a dedicated
-  closing signal, never stale) ends a running push or PR creation at its next quarter-second check and starts no new
-  one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic publication is
-  refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted since (what the
-  halt monitor saw, the durable stop/pause records taken at the start of the run, and a job held by a kill switch
-  release); the final checks, the commit and the receipt run off the event loop (a cancellation waits for a step in
-  flight, so a commit never lands after the run unwinds, and a commit that lands while closing is recorded ready); a
-  halt seen during the run, even if lifted, prevents the local commit and holds or re-queues the work; once the
-  verified result is recorded the run is complete, and a halt still in force only prevents its publication; a ready
-  run's job is always closed; a cancellation waits at most three minutes for a final step in flight; any publication failure is reported, never raised, and
-  the run ends ready; a forced cancellation during publication keeps the committed run ready, closes its job and
-  records its summary; a Stop or Pause during
-  publication is named as such (unless Brahma is also closing); every error after the push says the commit was
-  pushed; an owned output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the run; the state database is
-  opened by a properly escaped URI; the test suite never touches the real Brahma state directory.
+- Review of the round-16 fixes (decision Round 16, while Codex was out of usage): draft PR creation no longer fails when
+  `gh` takes longer than a quarter second (its body was re-sent to stdin, which Python refuses); a baseline saved with a
+  redacted path name never deletes a file whose name it may stand for on resume; an owned output Brahma cannot verify
+  (unreadable, special, still being written) blocks readiness but is never deleted; automatic publication runs off the
+  event loop, so Stop and Kill in the terminal UI take effect during a push; publication reads only durable controls, so
+  a lifted kill switch or a resumed pause no longer refuses `/publish`; a publication waiting for another one of the
+  same worktree stops on a stop (and gives up after five minutes); quitting the terminal UI or stopping the service (a
+  dedicated closing signal, never stale) ends a running push or PR creation at its next quarter-second check and starts
+  no new one; the run stays ready with its verified commit, its job closed, and says to use `/publish`; automatic
+  publication is refused, naming the cause, if a stop, pause or kill switch was seen during the run, even if lifted
+  since (what the halt monitor saw, the durable stop/pause records taken at the start of the run, and a job held by a
+  kill switch release); the final checks, the commit and the receipt run off the event loop (a cancellation waits for a
+  step in flight, so a commit never lands after the run unwinds, and a commit that lands while closing is recorded
+  ready); a halt seen during the run, even if lifted, prevents the local commit and holds or re-queues the work; once
+  the verified result is recorded the run is complete, and a halt still in force only prevents its publication; a ready
+  run's job is always closed; notes written while Brahma closes say only what is true (published, not committed, or not
+  published); any publication failure is reported, never raised, and the run ends ready; a forced cancellation during
+  publication keeps the committed run ready, closes its job and records its summary; a Stop or Pause during publication
+  is named as such (unless Brahma is also closing); every error after the push says the commit was pushed; an owned
+  output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the
+  run; the state database is opened by a properly escaped URI; the test suite never touches the real Brahma state
+  directory.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
   serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and
   while the push or PR creation runs (which are ended at once); fingerprint-map path keys are redacted like any text;
@@ -144,16 +145,16 @@ security reviews that followed.
 - Open findings from that review (MEDIUM/LOW): the sensitive-file scan walks every ignored cache (`node_modules`,
   `.venv`, ...) on each ownership check, which is slow in a very large cache; repositories using SHA-256 object format
   cannot be published (commit ids must be 40-hex; SHA-256 repositories are unsupported in general, see README); a file
-  whose *name* looks like a credential is stored redacted, so readiness and publication fail closed while it exists;
-  a changed file is hashed twice per ownership check; during publication every quarter-second stop check opens the
-  state database afresh, so a write-locked database delays a stop by up to 30 seconds; if Brahma is force-closed while
-  `gh pr create` is in flight, the draft PR may exist although the run says "Not published" (it says to check); the
-  checks before the push (hashing ignored files) are not interruptible; an owned path whose type cannot be read (its
-  parent replaced or made unreadable) is left as it is rather than restored, with readiness blocked; a kill switch engaged
-  and released between two halt-monitor samples (0.2 s), or while the monitor cannot sample (worktree setup, the
-  engine's own final checks), is not seen by a run that has no scheduled job (a scheduled job is held by the release;
-  stop and pause are recorded durably); if the
-  state database cannot be written while a run is being cancelled, its "interrupted" status is not recorded.
+  whose *name* looks like a credential is stored redacted, so readiness and publication fail closed while it exists; a
+  changed file is hashed twice per ownership check; during publication every quarter-second stop check opens the state
+  database afresh, so a write-locked database delays a stop by up to 30 seconds; if Brahma is force-closed while `gh pr
+  create` is in flight, the draft PR may exist although the run says "Not published" (it says to check); the checks
+  before the push (hashing ignored files) are not interruptible; an owned path whose type cannot be read (its parent
+  replaced or made unreadable) is left as it is rather than restored, with readiness blocked; a kill switch engaged and
+  released between two halt-monitor samples (0.2 s), or while the monitor cannot sample (worktree setup, the engine's
+  own final checks), is not seen by a run that has no scheduled job (a scheduled job is held by the release; stop and
+  pause are recorded durably); if the state database cannot be written while a run is being cancelled, its "interrupted"
+  status is not recorded.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 
