@@ -541,10 +541,16 @@ def restore_violations(worktree: Path, files: list[str], baseline: dict, ignored
             kept.append(name)
             continue
         if any(ownership.owns(pattern, name) for pattern in files) and not _sensitive(name):
-            # An owned path is a violation only because it cannot be verified (unreadable, special, still being
-            # written). It is the task's own output: readiness stays blocked, but it is never deleted.
-            kept.append(name)
-            continue
+            # An owned regular file is a violation only because it cannot be verified (unreadable, still being
+            # written). It is the task's own output: readiness stays blocked, but it is never deleted. An owned
+            # symlink or special file is still removed below.
+            try:
+                regular = stat.S_ISREG(os.lstat(target).st_mode)
+            except OSError:
+                regular = False
+            if regular:
+                kept.append(name)
+                continue
         if not (target.parent.resolve() / target.name).resolve(strict=False).is_relative_to(root) and not target.is_symlink():
             kept.append(name)  # never act outside the worktree
             continue

@@ -59,6 +59,17 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
             finally:
                 path.chmod(stat.S_IRUSR | stat.S_IWUSR)
 
+    def test_an_owned_escaping_symlink_or_special_file_is_still_removed(self):
+        # Automated security review of ac43d7e: only an owned *regular* file is kept.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            os.symlink(Path(tmp), repo / "src" / "escape")
+            os.mkfifo(repo / "src" / "pipe")
+            restored, _ = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertEqual(sorted(restored), ["src/escape", "src/pipe"])
+            self.assertFalse(os.path.lexists(repo / "src" / "escape"))
+            self.assertFalse(os.path.lexists(repo / "src" / "pipe"))
+
     def test_an_unowned_new_file_is_still_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r")
