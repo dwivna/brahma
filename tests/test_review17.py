@@ -532,6 +532,39 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertTrue(notes and "/publish cannot use it" in notes[-1])  # never a false "use /publish"
             self.assertEqual(seen, [])
 
+    async def test_a_receipt_stored_before_a_display_failure_still_counts_as_recorded(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Session.emit
+
+            def emit(self_, event, *args, **kwargs):
+                outcome = original(self_, event, *args, **kwargs)
+                if getattr(event, "kind", "") == "ready_receipt":
+                    raise BrokenPipeError("stderr closed")       # after the store write: /publish can find it
+                return outcome
+            with patch.object(Session, "emit", emit):
+                store, session, outcome, seen = await self._run(tmp, None, publish_on=True)
+            self.assertIsInstance(outcome, BrokenPipeError)
+            notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
+            self.assertTrue(notes)
+            self.assertNotIn("cannot use it", notes[-1])
+            self.assertIn("/publish", notes[-1])
+
+    async def test_a_failed_receipt_write_without_auto_commit_never_says_push_the_branch(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original = Session.emit
+
+            def emit(self_, event, *args, **kwargs):
+                if getattr(event, "kind", "") == "ready_receipt":
+                    raise sqlite3.OperationalError("database is locked")
+                return original(self_, event, *args, **kwargs)
+            with patch.object(Session, "emit", emit), \
+                    patch.object(gittools, "status_paths", return_value=["src/left.txt"]):
+                store, session, outcome, seen = await self._run(tmp, None, publish_on=True, auto_commit=False,
+                                                                status_patch=False)
+            notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
+            self.assertTrue(notes and "not committed" in notes[-1])
+            self.assertNotIn("push the branch", notes[-1])
+
     async def test_closing_during_the_final_step_without_auto_commit_says_it_is_not_committed(self):
         import asyncio
         import threading
@@ -589,18 +622,18 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 class SchedulerCompletedThenFailed(unittest.IsolatedAsyncioTestCase):
     async def test_a_ready_run_that_fails_afterwards_is_not_marked_blocked(self):
         from brahma import scheduler
-        from brahma.models import Result  # noqa: F401
         from tests.test_scheduler import approved_job
-        with tempfile.TemporaryDirectory() as tmp:
-            store, session, digest = approved_job(tmp)
-            self.addCleanup(store.close)
+        for error in (sqlite3.OperationalError("database is locked"), ValueError("a later step refused")):
+            with self.subTest(error=type(error).__name__), tempfile.TemporaryDirectory() as tmp:
+                store, session, digest = approved_job(tmp)
+                self.addCleanup(store.close)
 
-            async def completes_then_fails(self_, *, scheduled=False):
-                store.set(session.key, status="ready")
-                raise sqlite3.OperationalError("database is locked")
-            with patch.object(Session, "execute", completes_then_fails):
-                await scheduler.tick(store)
-            self.assertEqual(store.job(session.key)["state"], "done")
+                async def completes_then_fails(self_, *, scheduled=False):
+                    store.set(session.key, status="ready")
+                    raise error
+                with patch.object(Session, "execute", completes_then_fails):
+                    await scheduler.tick(store)
+                self.assertEqual(store.job(session.key)["state"], "done")
 
 
 class ForcedCancellationClosesTheJob(unittest.TestCase):

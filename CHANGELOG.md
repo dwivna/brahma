@@ -157,7 +157,9 @@ security reviews that followed.
   status is not recorded; quitting or stopping the service waits for a final step (checks, commit, receipt) in flight,
   however long its Git calls take (the process could not exit before the thread anyway); if the ready receipt cannot be
   stored (database write-locked), the run ends ready but `/publish` cannot use it: it says to push the branch by hand or
-  approve a new plan.
+  approve a new plan; a kill switch, the terminal UI's forced quit and the service's stop grace do not end a final step
+  in flight (they take effect when it finishes); `brahma run` reports a database error after the run became ready as a
+  usage failure (exit 20), with the session's status left ready.
 - Not implemented: signed-policy approval (Round 12 design only), read-side secret enforcement, and confinement of the
   provider CLIs.
 

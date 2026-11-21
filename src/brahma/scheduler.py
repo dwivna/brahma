@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import plistlib
 import signal
+import sqlite3
 import subprocess
 import sys
 import time
@@ -125,6 +126,17 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
 
     error = None if work.cancelled() else work.exception()
     result = None if work.cancelled() or error else work.result()
+    try:
+        ready = store.session(key)["status"] == "ready"
+    except sqlite3.Error:
+        ready = False
+    if ready:
+        # The run is complete (its verified result recorded), however it ended: its job is closed, never re-queued or
+        # blocked (it could not resume from its own commit). One place decides this for every exit path.
+        store.close_finished_job(key)
+        if error is not None:
+            _note(store, session, key, "Scheduled task completed, then failed: " + str(error))
+        return True
     if interrupted and error is None and (result is None or result.status == "cancelled"):
         _requeue_interrupted(store, session, job)
         return True
@@ -145,10 +157,6 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
     elif isinstance(error, ValueError):
         store.finish_job(key, "blocked")
         _note(store, session, key, "Scheduled task blocked: " + str(error))
-    elif store.session(key)["status"] == "ready":
-        # The run completed (its verified result recorded) and failed afterwards: it is not a blocked task.
-        store.close_finished_job(key)
-        _note(store, session, key, "Scheduled task completed, then failed: " + str(error))
     else:
         store.finish_job(key, "blocked")
         _note(store, session, key, "Scheduled task failed; checkpoint preserved: " + str(error))

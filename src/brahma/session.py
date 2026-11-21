@@ -787,10 +787,17 @@ class Session:
                                           "ignored_allowlist": list(self.settings.ignored_allowlist)}
                         def record_receipt(made):
                             nonlocal receipt_stored
-                            if made and "\nLocal commit: " + made not in result.text:
+                            if made:
                                 result.text += "\nLocal commit: " + made
-                            self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
-                            receipt_stored = True       # /publish can find it
+                            try:
+                                self.emit(Event(kind="ready_receipt", text=json.dumps(receipt)))
+                            finally:
+                                # Stored is what /publish can find, whatever failed after the write (a display callback).
+                                try:
+                                    receipt_stored = any(e["kind"] == "ready_receipt" and json.loads(e["text"]) == receipt
+                                                         for e in self.store.events(self.key))
+                                except Exception:
+                                    receipt_stored = False
                         try:
                             made, receipt = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:
@@ -871,16 +878,16 @@ class Session:
                     # resume from its own commit) and /publish still works. Say only what is true.
                     ended = ("Brahma closed" if isinstance(error, asyncio.CancelledError)
                              else f"The run ended with {type(error).__name__}")
-                    if not receipt_stored:
+                    if not receipt["committed"]:
+                        note = f"{ended} after the verified result was recorded; it is not committed, nothing was pushed"
+                    elif not receipt_stored:
                         note = (f"{ended}; the verified result could not be recorded, so /publish cannot use it: push "
                                 f"the branch yourself or approve a new plan")
                     elif publishing:
-                        note = (f"Not published: {ended} during publication. Check the remote branch and any draft PR, "
-                                "then use /publish")
+                        note = (f"Publication interrupted: {ended} during publication; the commit may already be pushed. "
+                                "Check the remote branch and any draft PR, then use /publish")
                     elif outcome:
                         note = f"{ended} after publication was decided ({outcome})"
-                    elif not receipt["committed"]:
-                        note = f"{ended} after the verified result was recorded; it is not committed, nothing was pushed"
                     elif self.settings.publish:
                         note = f"Not published: {ended} before publication; nothing was pushed. Use /publish"
                     else:
