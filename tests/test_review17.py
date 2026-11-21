@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import contextlib
 import json
+import shutil
+import subprocess
 import os
 import sqlite3
 import stat
@@ -110,6 +112,30 @@ class Finding5OwnedUnverifiableOutputIsKept(unittest.TestCase):
                 restored, kept = gittools.restore_violations(repo, ["src/**"], {})
             self.assertIn("a/x", kept)
             self.assertEqual(restored, ["stray.txt"])
+
+    def test_an_unowned_tracked_folder_deleted_by_a_worker_is_restored(self):
+        # Review of 1e3c437: a missing parent folder is not a redirect; Git recreates it.
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            (repo / "docs").mkdir()
+            (repo / "docs" / "a.txt").write_text("kept\n")
+            subprocess.run(["git", "-C", str(repo), "add", "docs/a.txt"], check=True, capture_output=True)
+            subprocess.run(["git", "-C", str(repo), "-c", "user.name=t", "-c", "user.email=t@example.invalid",
+                            "commit", "-qm", "docs"], check=True, capture_output=True)
+            shutil.rmtree(repo / "docs")
+            restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertIn("docs/a.txt", restored)
+            self.assertEqual((repo / "docs" / "a.txt").read_text(), "kept\n")
+
+    def test_a_name_with_parent_parts_is_never_acted_on(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = make_repo(Path(tmp) / "r")
+            (repo / "a").mkdir()
+            os.symlink(Path(tmp) / "elsewhere", Path(tmp) / "link")
+            with patch.object(gittools, "violating_paths", return_value=["a/../../link"]):
+                restored, kept = gittools.restore_violations(repo, ["src/**"], {})
+            self.assertEqual(restored, [])
+            self.assertTrue(os.path.lexists(Path(tmp) / "link"))
 
     def test_a_symlink_loop_that_violates_is_itself_removed(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -561,12 +587,13 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             texts = " ".join(e["text"] for e in store.events(session.key) if e["kind"] in ("publication", "summary"))
             self.assertNotIn("/publish", texts)
 
-    async def test_a_failed_receipt_write_is_surfaced_and_the_committed_run_stays_ready(self):
+    async def test_a_failed_receipt_write_is_surfaced_and_the_committed_run_is_blocked_not_ready(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch.object(Store, "_insert_event", failing_receipt_write(Store._insert_event)):
                 store, session, outcome, seen = await self._run(tmp, None, publish_on=True)
             self.assertIsInstance(outcome, sqlite3.OperationalError)       # surfaced, not swallowed
-            self.assertEqual(store.session(session.key)["status"], "ready")   # complete: never "interrupted"
+            self.assertEqual(store.session(session.key)["status"], "blocked")  # never ready without its receipt
+            self.assertEqual(store.job(session.key)["state"], "blocked")        # never re-queued onto its own commit
             notes = [e["text"] for e in store.events(session.key) if e["kind"] == "publication"]
             self.assertTrue(notes and "/publish cannot use it" in notes[-1])  # never a false "use /publish"
             self.assertEqual(seen, [])

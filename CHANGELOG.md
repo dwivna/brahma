@@ -60,8 +60,8 @@ security reviews that followed.
   output missing for a moment is kept; an unusable state directory or lock refuses publication instead of crashing the
   run; the state database is opened by a properly escaped URI; the test suite never touches the real Brahma state
   directory; the verified receipt and the ready status are written in one transaction, so a run is complete exactly when
-  it is ready; restoring never acts on a path whose folder is a symlink (out of the worktree or within it) or cannot be
-  resolved.
+  it is ready; restoring never acts on a path whose folder is a symlink (out of the worktree or within it), a file, or
+  unreadable, nor on a name with `..` parts; a deleted tracked folder is still restored.
 - Independent review round 16: publication pushes the verified commit itself (`<sha>:refs/heads/brahma/...`), is
   serialized per worktree, and checks the kill switch, stop, pause and cancellation before every external write and
   while the push or PR creation runs (which are ended at once); fingerprint-map path keys are redacted like any text;
@@ -158,7 +158,7 @@ security reviews that followed.
   pause are recorded durably); if the state database cannot be written while a run is being cancelled, its "interrupted"
   status is not recorded; quitting or stopping the service waits for a final step (checks, commit, receipt) in flight,
   however long its Git calls take (the process could not exit before the thread anyway); if the ready receipt cannot be
-  stored (database write-locked), the run ends ready but `/publish` cannot use it: it says to push the branch by hand or
+  stored (database write-locked), the run ends blocked with its commit in place, and says to push the branch by hand or
   approve a new plan; a kill switch, the terminal UI's forced quit and the service's stop grace do not end a final step
   in flight (they take effect when it finishes); if the state database cannot be read when a scheduled run ends, its job
   stays claimed until the next daemon start; a database error after the run became ready makes `brahma run` exit 13

@@ -792,7 +792,7 @@ class Session:
                             event = Event(kind="ready_receipt", text=json.dumps(receipt))
                             self.store.record_ready(self.key, event)     # the receipt and the ready status, together
                             receipt_stored = True       # /publish can find it, whatever the display does next
-                            self.callback(Event(kind=event.kind, text=CONTROL.sub("", event.text)))   # cleaned to show
+                            self.callback(Event(kind=event.kind, text=displayable(event.text)))   # cleaned to show
                         try:
                             made, receipt = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:
@@ -887,10 +887,14 @@ class Session:
                         note = f"Not published: {ended} before publication; nothing was pushed. Use /publish"
                     else:
                         note = f"{ended} after the verified result was recorded"
-                    _best_effort(lambda: self.store.set(self.key, status="ready"))
-                    _best_effort(lambda: self.store.close_finished_job(self.key))
+                    # Ready only with its receipt (record_ready wrote both); a run whose receipt could not be stored is
+                    # blocked: never "ready" without what /publish needs, never re-queued onto its own commit.
+                    final = "ready" if receipt_stored else "blocked"
+                    _best_effort(lambda: self.store.set(self.key, status=final))
+                    _best_effort(lambda: self.store.close_finished_job(self.key) if receipt_stored
+                                 else self.store.finish_job(self.key, "blocked"))
                     _best_effort(lambda: self.emit(Event(kind="publication", text=note)))
-                    _best_effort(lambda: self.emit(Event(kind="summary", text=f"ready: {result.text}\n{note}",
+                    _best_effort(lambda: self.emit(Event(kind="summary", text=f"{final}: {result.text}\n{note}",
                                                          usage=result.usage)))
                 else:
                     _best_effort(lambda: self.store.set(self.key, status="interrupted"))
