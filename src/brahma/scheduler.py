@@ -135,9 +135,9 @@ async def tick(store: Store, now: float | None = None, stop: asyncio.Event | Non
             store.hold(key, session.generation, job["digest"], "Held by a pause or the kill switch; resume to continue")
             return True
         if result.status != "waiting":
-            # Only a job still marked running is closed here: Session.execute may already have queued (a pause that was
-            # resumed during the run) or held (a pause or the kill switch) its continuation, and that decision stands.
-            store.close_running_job(key)
+            # A ready session's job is closed; otherwise only a job still marked running: Session.execute may already
+            # have queued (a pause resumed during the run) or held (a pause or the kill switch) its continuation.
+            store.close_finished_job(key)
         return True
     if isinstance(error, ValueError) and "Another Brahma worker" in str(error):
         store.enqueue(key, session.generation, job["digest"], time.time() + RETRY_SECONDS,
@@ -161,7 +161,7 @@ def _requeue_interrupted(store: Store, session, job: dict) -> None:
         if status == "ready":
             # Cancelled while publishing a verified, committed result: the run is complete, so its job is closed even
             # if held (the same rule as a run that ends normally).
-            store.close_running_job(session.key)
+            store.close_finished_job(session.key)
             return
         if status in ("waiting", "blocked", "incomplete"):
             return

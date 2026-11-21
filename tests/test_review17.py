@@ -278,7 +278,8 @@ class Finding10TestsNeverUseTheRealStateDirectory(unittest.TestCase):
 
 
 class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCase):
-    async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None, before=None, ownership=None):
+    async def _run(self, tmp, interrupt, engine=None, publish=None, during_commit=None, before=None, ownership=None,
+                   wait_for_publish=True):
         import asyncio
         import threading
         from brahma.models import Result
@@ -323,8 +324,11 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 patch.object(gittools, "git_identity", side_effect=identity):
             work = asyncio.ensure_future(session.execute(scheduled=True))
             if interrupt:
-                await asyncio.to_thread(started.wait, 10)
-                interrupt(session, work)
+                if wait_for_publish:
+                    await asyncio.to_thread(started.wait, 10)
+                outcome = interrupt(session, work)
+                if asyncio.iscoroutine(outcome):
+                    await outcome
             outcome = (await asyncio.gather(work, return_exceptions=True))[0]
             for _ in range(100):
                 if seen:
@@ -378,16 +382,18 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
 
         def kill_and_release(session):             # `brahma kill` then `brahma kill --release` (which holds the job)
             halt.engage(session.store.home)
-            session.store.hold_all("kill switch released")
+            other = Store(session.store.home)
+            other.hold_all("kill switch released")
+            other.close()
             halt.release(session.store.home)
-        for name, during_commit, expected in (("pause", pause_and_resume, "(Stopped or paused by user)"),
+        for name, during_commit, expected in (("pause", pause_and_resume, "(Paused by user)"),
                                               ("kill", kill_and_release, "(Kill switch engaged)")):
             with self.subTest(name), tempfile.TemporaryDirectory() as tmp:
                 store, session, result, seen = await self._run(tmp, None, during_commit=during_commit)
                 self.assertEqual(seen, [])             # the publication never started
                 self.assertIn(expected, result.text)
 
-    async def test_a_halt_the_monitor_saw_and_that_was_lifted_blocks_automatic_publication(self):
+    async def test_a_halt_the_monitor_saw_and_that_was_lifted_prevents_the_commit(self):
         from brahma import halt
 
         def engine_sees_a_pause(session):
@@ -405,7 +411,11 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 patch.object(Store, "controls_after", return_value=set()):  # only the monitor can report it here
             store, session, result, seen = await self._run(tmp, None, engine=engine_sees_a_pause)
             self.assertEqual(seen, [])
-            self.assertIn("a halt was seen during this run (Paused by user)", result.text)
+            # Seen before the commit: nothing is committed, and the resumed work is queued to continue.
+            self.assertEqual(result.status, "cancelled")
+            self.assertIn("Paused by user", result.text)
+            self.assertNotIn("Local commit", result.text)
+            self.assertEqual(store.job(session.key)["state"], "queued")
 
 
     async def test_a_halt_during_the_final_checks_prevents_the_commit(self):
@@ -424,9 +434,50 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
             self.assertEqual(committed, [])
             self.assertEqual(result.status, "cancelled")
 
+    async def test_a_pause_lifted_during_the_final_checks_prevents_the_commit_and_requeues(self):
+        committed = []
+
+        def pause_and_resume(*args, **kwargs):        # from another process, while the final checks run
+            other = Store(self._home)
+            other.pause(self._key)
+            other.resume(self._key)
+            other.close()
+            return True, "ok"
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, result, seen = await self._run(
+                tmp, None, during_commit=lambda session: committed.append(True),
+                before=lambda session: setattr(self, "_home", session.store.home) or setattr(self, "_key", session.key),
+                ownership=pause_and_resume)
+            self.assertEqual(committed, [])
+            self.assertEqual(result.status, "cancelled")
+            self.assertEqual(store.job(session.key)["state"], "queued")     # the resumed work continues
+
+    async def test_a_cancellation_during_the_commit_waits_for_it_and_records_the_ready_result(self):
+        import asyncio
+        import threading
+        landed, release = threading.Event(), threading.Event()
+
+        def slow_commit(session):
+            landed.set()
+            release.wait(10)                             # the commit is still landing when Brahma closes
+        with tempfile.TemporaryDirectory() as tmp:
+            async def cancel_during_commit(session, work):
+                await asyncio.to_thread(landed.wait, 10)
+                work.cancel()
+                await asyncio.sleep(0.2)
+                self.assertFalse(work.done())            # the run has not unwound while the commit is in flight
+                release.set()
+            store, session, outcome, seen = await self._run(tmp, cancel_during_commit, during_commit=slow_commit,
+                                                            wait_for_publish=False)
+            self.assertIsInstance(outcome, asyncio.CancelledError)
+            self.assertEqual(store.session(session.key)["status"], "ready")
+            receipts = [e for e in store.events(session.key) if e["kind"] == "ready_receipt"]
+            self.assertEqual(len(receipts), 1)           # /publish can use it
+            self.assertEqual(seen, [])                   # nothing was published
+
     async def test_a_finished_run_closes_a_job_a_kill_switch_release_held(self):
         with tempfile.TemporaryDirectory() as tmp:
-            def held(session):
+            def held(session):                             # from another process: its own connection
                 other = Store(session.store.home)
                 other.hold_all("kill switch released")
                 other.close()
@@ -454,8 +505,10 @@ class ForcedCancellationClosesTheJob(unittest.TestCase):
                 store.set(session.key, status=status)
                 store.db.execute("UPDATE jobs SET state=? WHERE session=?", (state, session.key))
                 store.db.commit()
-                scheduler._requeue_interrupted(store, session, store.job(session.key))
-                store.close_running_job(session.key)
+                if status == "ready":
+                    scheduler._requeue_interrupted(store, session, store.job(session.key))   # the cancelled path
+                else:
+                    store.close_finished_job(session.key)                                  # the normal path
                 self.assertEqual(store.job(session.key)["state"], expected)
 
 
