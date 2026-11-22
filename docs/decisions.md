@@ -417,3 +417,18 @@ repairs. Codex was out of usage and was not asked.
 3. Q3 (measuring the owner's minutes): "Automatic + your estimate". Brahma logs the owner's touch points automatically
    (approve, decide, notes, resume, time the UI is focused on a session) and asks one optional question at merge for
    minutes spent outside Brahma; observed and estimated minutes stay separate.
+
+## Round 23 — 22 November 2026 (the 1.2.0 benchmark)
+
+1. Q1 (repository): "Purpose-built fixture". A small Python repository kept inside Brahma, created as its own Git
+   repository from a fixed template before each run, with seeded tasks; no private data.
+2. Q2 (suite): "6 mixed tasks": 2 bug fixes, 1 test addition, 1 refactor, 1 docs change, 1 small feature. Actual usage
+   per run is unknown until measured.
+3. Q3 (accepted): "Hidden tests + your review". Each task has acceptance tests the workers never see (kept in Brahma's
+   `bench/`, outside the fixture repository given to workers), run after the change, plus the owner's brief review
+   deciding merge; that review time counts in the metric.
+4. Q4 (interactive arm): "brahma bench timer". The owner runs `brahma bench start TASK` / `stop` while driving an
+   interactive session; Brahma records the minutes and outcome the same way as for its own arm.
+
+The 1.2.0 contract is drafted after 1.1.0 merges, because it builds on 1.1.0's chat and report modules.
+Codex's questions for Round 21, item 4 are in `docs/plans/round-21-codex-questions.md`.
