@@ -432,3 +432,33 @@ repairs. Codex was out of usage and was not asked.
 
 The 1.2.0 contract is drafted after 1.1.0 merges, because it builds on 1.1.0's chat and report modules.
 Codex's questions for Round 21, item 4 are in `docs/plans/round-21-codex-questions.md`.
+
+## Rounds 24–25 — 24 November 2026 (two independent sessions of one provider when the other is unavailable)
+
+Asked by Abhinav: "When claude / Codex not available then start two different independent session from claude if codex
+is not available or codex if claude is not avialable in brahma". Until now the reviewer is always the other provider
+and a task waits when it has no capacity (README: "The other provider reviews the actual changes"); Round 16 allowed a
+fresh Claude review in Codex's place for 1.0.0 only. A task's provider and model are part of the approved contract, so
+the fallback must be approved too.
+
+**Round 24**
+1. Q1 (authority): "brahma.toml default". A repository setting turns the fallback on; every contract shows it on the
+   approval screen, so the owner approves it with the contract. Without the setting, tasks wait as before.
+2. Q2 (roles): "Reviewer and pinned builder". If one provider is unavailable, the other builds a task pinned to the
+   unavailable one, and a separate session of the same provider reviews it.
+3. Q3 (independence): "Fresh session, other model". A new session with no shared history, briefed only with the
+   contract, the diff and Brahma's own check output, using a different model of that provider.
+4. Q4 (switching back): "Next task returns". The task in progress finishes with its fallback pair; the next task uses
+   cross-vendor review again.
+
+**Round 25**
+1. Q1 (trust): "Mark it, publish as usual". The report, chat and readiness receipt state that an independent session
+   of the same provider reviewed it, and which provider was unavailable; publication follows the contract.
+2. Q2 (unavailable): "Quota, sign-in or install". Exhausted quota (waiting or blocked), signed out, or not installed. A
+   transient "overloaded" reply keeps the existing retries first.
+3. Q3 (model): "The other tier". The second session uses the provider's other configured tier (critical reviews
+   routine and the reverse); if both tiers name the same model, it is used and the report says so.
+4. Q4 (release): "1.2.0, before benchmark". **This amends Round 22, item 1:** 1.2.0 same-provider fallback; 1.3.0
+   benchmark and effort log (Round 23); 1.4.0 the Claude builder runs approved checks; 1.5.0 calibrated review; then
+   the security skills. The benchmark records same-provider and cross-vendor reviews separately.
+   The README's "the other provider reviews" promise is updated with the fallback.
