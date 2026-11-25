@@ -267,16 +267,20 @@ class CheckEvidence(unittest.IsolatedAsyncioTestCase):
 
 class PublishDestination(unittest.TestCase):
     def test_publish_pushes_an_explicit_brahma_refspec_never_a_default_branch(self):
+        from tests.test_review16 import publication_result
         with tempfile.TemporaryDirectory() as tmp:
             repo = make_repo(Path(tmp) / "r", "")
             subprocess.run(["git", "-C", str(repo), "checkout", "-q", "-b", "brahma/abc123def456"], check=True)
+            subprocess.run(["git", "-C", str(repo), "remote", "add", "origin", "https://example.invalid/owner/repo.git"],
+                           check=True)
             head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], capture_output=True, text=True).stdout.strip()
             steps = []
-            done = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1", "stderr": ""})()
             with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
-                    patch("brahma.gittools._run_publication_step", lambda argv, *a, **k: steps.append(argv) or done):
+                    patch("brahma.gittools._run_publication_step",
+                          lambda argv, *a, **k: steps.append(argv) or publication_result(argv, head)):
                 gittools.publish(repo, "summary", "body", head, gittools.snapshot_changes(repo))
-            push = tuple(steps[0][steps[0].index("push"):])
+            command = next(argv for argv in steps if "push" in argv)
+            push = tuple(command[command.index("push"):])
             # The verified commit itself, to the explicit brahma/* branch (round 16): never a default branch.
             self.assertEqual(push, ("push", "origin", f"{head}:refs/heads/brahma/abc123def456"))
             self.assertIsNone(gittools.refuse(push))

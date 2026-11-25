@@ -10,7 +10,10 @@ from pathlib import Path
 import signal
 import sqlite3
 import subprocess
+import tempfile
 import time
+import uuid
+from urllib.parse import quote
 
 from . import gitsafe, ownership, toolchain
 from .models import Event
@@ -428,12 +431,19 @@ def hidden_index_entries(worktree: Path) -> list[str]:
     return sorted(hidden)
 
 
+def _push_urls(worktree: Path) -> str:
+    resolved = run_git(worktree, "remote", "get-url", "--push", "--all", "origin")
+    return resolved.stdout.removesuffix("\n") if resolved.returncode == 0 else ""
+
+
+def _target_fingerprint(target: str) -> str:
+    return hashlib.sha256(target.encode("utf-8", errors="surrogateescape")).hexdigest() if target else ""
+
+
 def push_target(worktree: Path) -> str:
     """A fingerprint of where `git push origin` would send, resolved the way the push resolves it (push URLs, URL rewrites,
     legacy remotes files); empty when there is no origin. Hashed, so a token in the URL is never stored."""
-    resolved = run_git(worktree, "remote", "get-url", "--push", "--all", "origin")
-    target = resolved.stdout.strip() if resolved.returncode == 0 else ""
-    return hashlib.sha256(target.encode("utf-8", errors="surrogateescape")).hexdigest() if target else ""
+    return _target_fingerprint(_push_urls(worktree))
 
 
 def git_identity(worktree: Path) -> dict:
@@ -779,9 +789,15 @@ def _staged_differs(worktree: Path, paths: list[str]) -> list[str]:
     return [name for name in regular if index[name] != raw[name]]
 
 
-def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -> str:
+class CommitStopped(ValueError):
+    """A session control prevented the verified ref from advancing."""
+
+
+def commit_changes(worktree: Path, summary: str, identity: dict | None = None, *, stopped=None) -> str:
     """Commit on the session's own branch only. With `identity`, the branch, HEAD and gitdir must still be the verified ones."""
-    if not git(worktree, "branch", "--show-current").startswith("brahma/"):
+    identity = identity or git_identity(worktree)
+    branch, parent = identity["branch"], identity["head"]
+    if not branch.startswith("brahma/"):
         raise ValueError("Refusing to commit: the worktree is not on a Brahma branch")
     ok, message = ownership_changes(worktree, ["**"], identity=identity)
     if not ok:
@@ -789,21 +805,49 @@ def commit_changes(worktree: Path, summary: str, identity: dict | None = None) -
     # Owned git-ignored files are reviewed above but never staged (`git add` refuses them).
     paths = status_paths(worktree)
     if not paths:
-        return git(worktree, "rev-parse", "HEAD")
+        return parent
     git(worktree, "add", "--", *paths)       # attributes come from the empty tree: no filter or conversion applies
     staged_differs = _staged_differs(worktree, paths)
     if staged_differs:
         git(worktree, "restore", "--staged", "--", *paths)          # unstage; the files themselves are untouched
         raise ValueError("Not committed: the staged content differs from the checked files (" + ", ".join(staged_differs[:5])
                          + "); Git converted them (attributes such as eol or ident) or kept a stale index entry")
-    git(worktree, "commit", "--no-gpg-sign", "-m", "Brahma: " + summary[:120])
-    return git(worktree, "rev-parse", "HEAD")
+    tree = git(worktree, "write-tree")
+    created = git(worktree, "commit-tree", tree, "-p", parent, "-m", "Brahma: " + summary[:120])
+    problems = identity_problems(worktree, identity)
+    if problems:
+        raise ValueError("Not committed: Git metadata changed during finalization: " + ", ".join(problems))
+    from . import halt
+    from .config import state_home
+    prefix = guarded(worktree)
+    reason = stopped() if stopped is not None else None
+    if reason:
+        raise CommitStopped(reason)
+    if halt.engaged(state_home()):
+        raise CommitStopped("Kill switch engaged")
+    # The general Git guard refuses update-ref. Finalization can advance only this session's branch, only from the
+    # verified parent, and only to the commit we just created from that parent. A concurrent ref change wins.
+    result = subprocess.run([*prefix, "--git-dir", identity["common_dir"], "update-ref", "--no-deref",
+                             "-m", "Brahma commit", f"refs/heads/{branch}", created, parent],
+                            capture_output=True, text=True, timeout=60, env=git_env())
+    if result.returncode:
+        raise ValueError("Not committed: could not advance the verified session branch")
+    return created
+
+
+def _check_publication_halt(stopped) -> None:
+    try:
+        reason = stopped()
+    except Exception as error:          # inability to read a stop control counts as a stop
+        reason = "the stop check failed (" + type(error).__name__ + ")"
+    if reason:
+        raise ValueError("Publication stopped: " + reason) from None
 
 
 def _run_publication_step(argv: list[str], worktree: Path, stopped, *, input_text: str = "", env=None,
-                          timeout: float = 120) -> subprocess.CompletedProcess:
-    """One external write of a publication (push or PR creation), stopped at once if `stopped()` reports a stop,
-    pause or kill switch while it runs. Runs in its own process group so the whole step is ended."""
+                          timeout: float = 120, remote_write: bool = False) -> subprocess.CompletedProcess:
+    """Check stop before launch and while the step runs. Each step runs in its own process group."""
+    _check_publication_halt(stopped)
     process = subprocess.Popen(argv, cwd=worktree, stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                stderr=subprocess.PIPE, text=True, env=env, start_new_session=True)
     deadline = time.monotonic() + timeout
@@ -818,12 +862,14 @@ def _run_publication_step(argv: list[str], worktree: Path, stopped, *, input_tex
             except subprocess.TimeoutExpired:
                 pending = None
                 try:
-                    reason = stopped()
-                except Exception as error:          # a stop check that cannot answer is treated as a stop
-                    reason = "the stop check failed (" + type(error).__name__ + ")"
-                if reason or time.monotonic() > deadline:
-                    raise ValueError("Publication stopped: " + (reason or "it took too long")
-                                     + "; check the remote branch before publishing again") from None
+                    _check_publication_halt(stopped)
+                except ValueError as error:
+                    if remote_write:
+                        raise ValueError(f"{error}; the remote branch or draft PR may have changed") from None
+                    raise
+                if time.monotonic() > deadline:
+                    details = "; the remote branch or draft PR may have changed" if remote_write else ""
+                    raise ValueError("Publication stopped: it took too long" + details) from None
     finally:
         if not finished:                            # any way out but a normal finish ends the whole step
             try:
@@ -840,7 +886,8 @@ def publish_lock_path(worktree: Path) -> Path:
 
 
 def publish(worktree: Path, summary: str, body: str, expected_head: str, expected_uncommitted: dict | None = None,
-            ignored_allow=None, stopped=None, expected_origin: str | None = None, lock_wait: float = 300) -> str:
+            ignored_allow=None, stopped=None, expected_origin: str | None = None,
+            expected_identity: dict | None = None, lock_wait: float = 300) -> str:
     """Push exactly the commit that was verified ready, and open a draft PR. Anything added after readiness (a commit, an
     uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed.
 
@@ -870,7 +917,7 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
                         raise ValueError("Not published: " + reason) from None
                     time.sleep(0.25)
             return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped,
-                            expected_origin)
+                            expected_origin, expected_identity)
         finally:
             os.close(descriptor)
     except (OSError, sqlite3.Error) as error:
@@ -878,8 +925,42 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
         raise ValueError(f"Not published: {type(error).__name__}: {error}") from None
 
 
+_HOST = r"[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?"
+_GITHUB_TARGET = re.compile(rf"https://({_HOST})(?::443)?/([A-Za-z0-9-]+)/([A-Za-z0-9_.-]+)")
+
+
+def _github_repository(target: str) -> str:
+    matched = _GITHUB_TARGET.fullmatch(target)
+    if matched:
+        host, owner, name = matched.groups()
+        name = name.removesuffix(".git")
+        if name and name not in (".", ".."):
+            return f"{host.lower()}/{owner}/{name}"
+    raise ValueError("Not published: automated publication requires one GitHub HTTPS origin without embedded credentials")
+
+
+def _push_repository(path: Path, objects: str, target: str) -> None:
+    """Keep worktree configuration out of publication. Git looks up the verified commit in its original object store."""
+    if not Path(objects).is_absolute() or "\n" in objects or "\r" in objects:
+        raise ValueError("Not published: Git object storage could not be identified")
+    git(path, "init", "--bare", "--template=", "--object-format=sha1")
+    (path / "objects" / "info" / "alternates").write_bytes(os.fsencode(objects) + b"\n")
+    # Git applies URL rewrites once. Give it a private alias so the already-resolved URL is not rewritten a second time
+    # and native Git can still use the owner's usual HTTPS credential helper.
+    alias = "brahma-publication-" + uuid.uuid4().hex + ":"
+    git(path, "config", f"url.{target}.insteadOf", alias)
+    git(path, "config", "remote.origin.url", alias)
+    if _push_urls(path) != target or git(path, "remote", "get-url", "--all", "origin") != target:
+        raise ValueError("Not published: the isolated Git remote does not match the verified origin")
+
+
+def _https_pins(target: str) -> list[str]:
+    # URL-specific configuration takes precedence over generic pins, even if the generic pin came from -c.
+    return ["-c", f"http.{target}.sslVerify=true", "-c", f"http.{target}.followRedirects=false"]
+
+
 def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped,
-             expected_origin=None) -> str:
+             expected_origin, expected_identity) -> str:
     from . import halt, safety
     from .config import state_home
 
@@ -907,33 +988,73 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
         raise ValueError("Not published: ignored or special files changed after the work was verified ready")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
         raise ValueError("Not published: the verified commit is not a full commit id")
-    if expected_origin is not None and push_target(worktree) != expected_origin:
+    target = _push_urls(worktree)
+    if expected_origin is not None and _target_fingerprint(target) != expected_origin:
         # Recorded when the session first ran, before any of its workers ran (Session refuses a receipt without one).
         raise ValueError("Not published: the origin remote's URL changed since the run started; check it, then publish "
                          "the branch yourself")
     risks = gitsafe.publication_risks(worktree)
     if risks:
-        raise ValueError("Not published: the repository's own Git configuration sets " + ", ".join(risks[:5])
+        raise ValueError("Not published: the repository's own Git configuration sets " + safety.redact(", ".join(risks[:5]))
                          + ", which could redirect the push or run a command while publishing; check it, then publish "
                          "the branch yourself")
-    push = ("push", "origin", f"{expected_head}:refs/heads/{branch}")    # the verified commit, to its own brahma/* branch
+    if expected_identity is not None:
+        git_dir = git(worktree, "rev-parse", "--absolute-git-dir")
+        common_dir = git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir")
+        if {"git_dir": git_dir, "common_dir": common_dir, "branch": branch} != expected_identity:
+            raise ValueError("Not published: the Git worktree no longer matches its readiness receipt")
+    repo = _github_repository(target)
+    host, name = repo.split("/", 1)
+    api = [gh, "api", "--hostname", host]
+    endpoint = "repos/" + name
+    objects = git(worktree, "rev-parse", "--path-format=absolute", "--git-path", "objects")
+    ref = f"refs/heads/{branch}"
+    push = ("push", "origin", f"{expected_head}:{ref}")
     reason = refuse(push) or halted()
     if reason:
         raise ValueError("Not published: " + reason)
-    pushed = _run_publication_step([*guarded(worktree), *push], worktree, halted, env=git_env())
-    if pushed.returncode:
-        raise ValueError(pushed.stderr.strip() or "Push failed; nothing was published")
-    try:                                    # from here on, every failure says that the commit is already on the remote
-        reason = halted()
-        if reason:
-            raise ValueError(f"Not published as a PR: {reason}")
-        result = _run_publication_step([gh, "pr", "create", "--draft", "--head", branch, "--title", summary[:120],
-                                        "--body-file", "-"], worktree, halted, input_text=body, timeout=60,
-                                       env=gitsafe.pinned_env())   # gh's own Git calls get the same pins as the push
-        if result.returncode:
-            raise ValueError("Draft PR creation failed. Check gh auth and repository access")
-    except Exception as error:
-        text = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) \
-            else f"Not published as a PR ({type(error).__name__}: {error})"
-        raise ValueError(f"{text}. The verified commit was pushed to {branch}") from None
-    return result.stdout.strip()
+    with tempfile.TemporaryDirectory(prefix="brahma-publish-") as tmp:
+        isolated = Path(tmp)
+        _push_repository(isolated, objects, target)
+        gh_env = gitsafe.pinned_env()
+        endpoint_url = _run_publication_step([*api, endpoint, "--jq", ".clone_url, .default_branch"], isolated, halted,
+                                             env=gh_env, timeout=60)
+        urls = endpoint_url.stdout.strip().splitlines()
+        if endpoint_url.returncode or len(urls) != 2 or _github_repository(urls[0]).casefold() != repo.casefold():
+            raise ValueError("Not published: GitHub did not confirm the repository for the verified origin")
+        if urls[1] == branch:
+            raise ValueError("Not published: the session branch is the GitHub repository's default branch")
+        prefix = [*guarded(isolated), "-c", "push.followTags=false", "-c", "push.recurseSubmodules=no",
+                  "-c", "push.pushOption="]
+        if target.startswith("https://"):
+            prefix += _https_pins(target)
+        pushed = _run_publication_step([*prefix, *push], isolated, halted, env=git_env(), remote_write=True)
+        if pushed.returncode:
+            raise ValueError("Push failed. Check authentication and the remote branch")
+        try:                         # subsequent failures report that the exact commit was pushed
+            ref_endpoint = endpoint + "/git/ref/" + quote(ref.removeprefix("refs/"), safe="/")
+            verified = _run_publication_step([*api, ref_endpoint, "--jq", ".object.sha"], isolated, halted,
+                                             env=gh_env, timeout=60)
+            if verified.returncode or verified.stdout.strip() != expected_head:
+                raise ValueError("Not published as a PR: GitHub could not verify the remote branch at the receipt commit")
+            result = _run_publication_step([gh, "pr", "create", "--repo", repo, "--draft", "--head", branch,
+                                            "--title", summary[:120], "--body-file", "-"], isolated, halted,
+                                           input_text=body, timeout=60, env=gh_env, remote_write=True)
+            if result.returncode:
+                raise ValueError("Draft PR creation failed. Check gh auth and repository access")
+        except Exception as error:
+            text = str(error) if isinstance(error, ValueError) and not isinstance(error, UnicodeError) \
+                else f"Not published as a PR ({type(error).__name__}: {error})"
+            raise ValueError(f"{text}. The verified commit was pushed to {branch}; inspect its draft PRs before retrying") from None
+        url = result.stdout.strip()
+        match = re.fullmatch(rf"https://{re.escape(repo)}/pull/([1-9][0-9]*)", url, re.IGNORECASE)
+        if not match:
+            raise ValueError(f"Draft PR may already exist for {branch}; inspect GitHub before retrying")
+        try:
+            draft = _run_publication_step([gh, "pr", "view", match[1], "--repo", repo, "--json", "headRefOid",
+                                          "--jq", ".headRefOid"], isolated, halted, timeout=60, env=gh_env)
+            if draft.returncode or draft.stdout.strip() != expected_head:
+                raise ValueError("GitHub did not confirm the draft at the receipt commit")
+        except Exception as error:
+            raise ValueError(f"Draft PR created at {safety.redact(url)}; inspect it before use ({error})") from None
+        return url

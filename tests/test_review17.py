@@ -185,7 +185,9 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
             session.cancel.set()          # left by an earlier run, a lifted kill switch or a resumed pause
             seen = []
             with patch.object(gittools, "publish", lambda *args: seen.append(args) or "u"):
-                await session.publish_ready_in_thread({"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o"}, "b")
+                receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o",
+                           "git_identity": {"branch": "brahma/" + session.key}}
+                await session.publish_ready_in_thread(receipt, "b")
             self.assertIsNone(seen[0][6]())
             store.pause(session.key)
             self.assertEqual(seen[0][6](), "Paused by user")      # a pause is named as a pause, read durably
@@ -196,7 +198,7 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
 
     def test_automatic_publication_runs_off_the_event_loop(self):
         source = (ROOT / "src" / "brahma" / "session.py").read_text()
-        self.assertIn("await self.publish_ready_in_thread(receipt, result.text)", source)
+        self.assertIn("await self.publish_ready_in_thread(receipt, result.text, after=run_control)", source)
 
 
 class Finding6StateErrorsRefuseInsteadOfCrashing(unittest.TestCase):
@@ -253,6 +255,10 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
         store.set(session.key, worktree=str(repo))
         return session
 
+    def _receipt(self, session):
+        return {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o",
+                "git_identity": {"branch": "brahma/" + session.key}}
+
     async def test_quitting_while_publishing_stops_the_publication_thread(self):
         import asyncio
         with tempfile.TemporaryDirectory() as tmp:
@@ -269,8 +275,7 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
                 seen.append("ran to the end")
                 return "u"
             with patch.object(gittools, "publish", publishing):
-                job = asyncio.ensure_future(session.publish_ready_in_thread(
-                    {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o"}, "b"))
+                job = asyncio.ensure_future(session.publish_ready_in_thread(self._receipt(session), "b"))
                 await asyncio.sleep(0.1)
                 job.cancel()                # the terminal UI quit, or the service stopped: nothing durable written
                 with self.assertRaises(asyncio.CancelledError):
@@ -285,10 +290,14 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
     async def test_closing_and_durable_controls_stop_publication_and_durable_ones_are_named(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp)
-            receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o"}
-            arguments, abandoned = session._publish_arguments(receipt, "b")
+            arguments, abandoned = session._publish_arguments(self._receipt(session), "b")
             session.cancel.set()                                # stale (a lifted kill switch, a resumed pause): ignored
             self.assertIsNone(arguments[6]())
+            session.store.pause(session.key)
+            session.store.resume(session.key)
+            self.assertEqual(arguments[6](), "Paused by user")  # a write already in progress cannot resume itself
+            arguments, abandoned = session._publish_arguments(self._receipt(session), "b")
+            self.assertIsNone(arguments[6]())                  # a separate attempt can start after Resume
             session.store.stop(session.key)                     # a durable Stop is named
             self.assertEqual(arguments[6](), "Stopped by user")
             session.closing.set()                               # a quit or service stop: seen first, with no I/O
@@ -317,8 +326,9 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
             repo, head, snapshot = verified_branch(tmp)
 
             def step(argv, worktree, stopped, **kwargs):
-                if "push" in argv:
-                    return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+                if "push" in argv or argv[1:2] == ["api"]:
+                    from tests.test_review16 import publication_result
+                    return publication_result(argv, head)
                 raise FileNotFoundError("gh")
             with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(Path(tmp) / "state")}), \
                     patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
@@ -331,8 +341,9 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
             repo, head, snapshot = verified_branch(tmp)
             for failure in (ValueError("Publication stopped: Stopped by user"), UnicodeEncodeError("utf-8", "", 0, 1, "x")):
                 def step(argv, worktree, stopped, **kwargs):
-                    if "push" in argv:
-                        return type("R", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+                    if "push" in argv or argv[1:2] == ["api"]:
+                        from tests.test_review16 import publication_result
+                        return publication_result(argv, head)
                     raise failure
                 with self.subTest(failure=type(failure).__name__), \
                         patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(Path(tmp) / "state")}), \
@@ -402,13 +413,17 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                     raise ValueError("Publication stopped: " + reason)
                 time.sleep(0.02)
             return "https://example.invalid/pr/1"
+        def commit(worktree, *args, **kwargs):
+            if during_commit:
+                during_commit(session)
+            return git(worktree, "rev-parse", "HEAD")
+
         identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
-                               "common_dir": "/c", "head": "h", "origin": "o", "hidden": []}
+                               "common_dir": "/c", "head": git(wt, "rev-parse", "HEAD"), "origin": "o", "hidden": []}
         with patch("brahma.engine.execute", engine(session) if engine else ready), \
                 patch("brahma.engine._tree", return_value="verified-tree"), \
                 patch.object(Session, "approved_contract", approved), \
-                patch.object(gittools, "commit_changes",
-                             side_effect=lambda *a: (during_commit(session) if during_commit else None) or "c"), \
+                patch.object(gittools, "commit_changes", side_effect=commit), \
                 (patch.object(gittools, "status_paths", return_value=[]) if status_patch
                  else contextlib.nullcontext()), \
                 patch.object(gittools, "snapshot_changes", return_value={}), \

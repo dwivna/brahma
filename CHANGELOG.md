@@ -16,17 +16,20 @@ run by an independent Claude Sonnet 5.5 agent standing in for Codex; it is not a
   `push.gpgSign`, `ssh.*`, `http.*` (including extra headers, curl options, cookies and client certificates), a credential
   helper, or an `include`. The branch stays local and the message names the settings. The check covers local and
   worktree configuration.
-  Every Git call Brahma makes also pins `push.gpgSign=false` and `protocol.ext.allow=never`.
+  Git signing, pushed tags, recursive submodule pushes, push options and command remotes are disabled.
 - **Publication checks the origin push target recorded when the session first runs.** Brahma keeps a SHA-256 fingerprint
   of the push URLs Git resolves, including rewrites. It checks the fingerprint when resuming, verifying Git identity
-  and publishing. Publication through Brahma requires a receipt with a recorded push target. This excludes 1.0.0
-  receipts and results from repositories without an origin.
-- **Git calls made by `gh pr create` get the same pinned settings as the push** (no hooks, no fsmonitor, no pager, ...),
-  through Brahma's Git environment. Before, only the push had them. `gh`'s own configuration (`~/.config/gh`) is not
-  covered.
+  and publishing. Previously started sessions without a pre-worker destination record can complete locally. Publication
+  through Brahma requires a receipt that binds the destination, worktree, session branch and commit.
+- **Git push and draft PR creation use the same verified destination.** Publication requires one GitHub HTTPS
+  origin without embedded credentials. Brahma checks the repository's advertised clone endpoint, then pushes only the
+  receipt commit to the session branch from temporary Git metadata. GitHub confirms the remote ref and the draft PR's
+  head commit. Git verifies TLS and refuses redirects for that exact destination. Stop controls are checked before
+  launching every step. SSH repositories can publish their branches manually.
 - **A commit whose readiness receipt cannot be made is reported, not lost.** If the commit lands and a later step of
-  making the receipt fails, Brahma reports the commit id and branch, blocks the run and closes its job. Before, the run
-  was recorded as interrupted, a resume failed with "Worktree base changed", and nothing said the commit existed.
+  making the receipt fails, Brahma reports the commit id and branch, blocks the run and closes its job even when the
+  job was held by a pause. Finalization advances the session branch only from its verified parent. A branch tip whose
+  provenance cannot be established is reported as unverified.
 
 ## 1.0.0
 

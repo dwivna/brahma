@@ -234,20 +234,28 @@ class Store:
         return cursor.rowcount
 
     @staticmethod
-    def halt_reason(home: Path, session: str) -> str | None:
-        """Kill switch, stop or pause for `session`, read with a private read-only connection: safe from any thread
-        (a Store's own connection belongs to the thread that opened it)."""
+    def halt_reason(home: Path, session: str, *, after: int | None = None) -> str | None:
+        """Read stop controls on a private read-only connection. With `after`, include controls recorded since that
+        event sequence, even if the active pause was later cleared."""
         from . import halt
         if halt.engaged(home):
             return "Kill switch engaged"
         database = sqlite3.connect((Path(home) / "state.sqlite3").resolve().as_uri() + "?mode=ro", uri=True, timeout=30)
         try:
             row = database.execute("SELECT stopped, paused FROM sessions WHERE id=?", (session,)).fetchone()
+            actions = set()
+            if after is not None and row:
+                actions = {item[0] for item in database.execute(
+                    "SELECT DISTINCT text FROM events WHERE session=? AND kind='control' AND seq>?", (session, after))}
         finally:
             database.close()
         if row is None:
             return "Session not found"
-        return "Stopped by user" if row[0] else "Paused by user" if row[1] else None
+        if row[0] or "stop" in actions:
+            return "Stopped by user"
+        if row[1] or "pause" in actions:
+            return "Paused by user"
+        return None
 
     @property
     def killed(self) -> bool:

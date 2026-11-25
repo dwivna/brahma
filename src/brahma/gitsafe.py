@@ -38,7 +38,8 @@ _GIT = ("git", "--literal-pathspecs", "--no-replace-objects", f"--attr-source={E
 # repository, index or object store. Brahma's own Git calls and the implicit `git diff --check` never inherit them.
 _GIT_ENV_OVERRIDES = ("GIT_CONFIG", "GIT_CONFIG_COUNT", "GIT_CONFIG_PARAMETERS", "GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE",
                       "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_COMMON_DIR", "GIT_NAMESPACE",
-                      "GIT_EXTERNAL_DIFF", "GIT_EXEC_PATH", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM")
+                      "GIT_EXTERNAL_DIFF", "GIT_EXEC_PATH", "GIT_CEILING_DIRECTORIES", "GIT_DISCOVERY_ACROSS_FILESYSTEM",
+                      "GIT_SSL_NO_VERIFY")
 
 
 def git_env(base: dict[str, str] | None = None) -> dict[str, str]:

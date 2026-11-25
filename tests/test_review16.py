@@ -21,7 +21,21 @@ from tests.test_review12 import git
 def verified_branch(tmp: str):
     repo = make_repo(Path(tmp) / "r")
     git(repo, "checkout", "-q", "-b", "brahma/s")
+    git(repo, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
     return repo, git(repo, "rev-parse", "HEAD"), gittools.snapshot_changes(repo)
+
+
+def publication_result(argv, head, url="https://example.invalid/owner/repo/pull/1"):
+    output = url
+    if argv[1:2] == ["api"]:
+        host, repo = argv[3], argv[4].removeprefix("repos/")
+        if argv[-1] == ".object.sha":
+            output = head
+        else:
+            output = f"https://{host}/{repo}.git\nmaster\n"
+    if argv[1:3] == ["pr", "view"]:
+        output = head
+    return type("R", (), {"returncode": 0, "stdout": output, "stderr": ""})()
 
 
 class Finding1PushTheVerifiedCommit(unittest.TestCase):
@@ -36,11 +50,11 @@ class Finding1PushTheVerifiedCommit(unittest.TestCase):
                     (repo / "src" / "later.py").write_text("x\n")
                     git(repo, "add", "-A")
                     git(repo, "commit", "-qm", "later")
-                return type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1", "stderr": ""})()
+                return publication_result(argv, head)
             with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
                     patch.object(gittools, "_run_publication_step", step):
                 gittools.publish(repo, "s", "b", head, snapshot)
-            push = steps[0]
+            push = next(argv for argv in steps if "push" in argv)
             self.assertEqual(push[-3:], ["push", "origin", f"{head}:refs/heads/brahma/s"])
 
     def test_the_guard_allows_an_exact_commit_only_to_a_brahma_branch(self):
@@ -91,7 +105,7 @@ class Finding2StopReachesPublication(unittest.TestCase):
             with patch.dict(os.environ, {"BRAHMA_STATE_DIR": str(state)}), \
                     patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
                     patch.object(gittools, "_run_publication_step",
-                                 return_value=type("R", (), {"returncode": 0, "stdout": "u", "stderr": ""})()):
+                                 side_effect=lambda argv, *a, **k: publication_result(argv, head)):
                 gittools.publish(repo, "s", "b", head, snapshot)
             self.assertEqual(len(list((state / "publish-locks").glob("*.lock"))), 1)
 

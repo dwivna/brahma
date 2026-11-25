@@ -495,13 +495,15 @@ class Session:
             raise ValueError("The readiness receipt does not record the verified ignored files; run and verify it again")
         return receipts[-1]
 
-    def _publish_arguments(self, receipt: dict, body: str) -> tuple[tuple, threading.Event]:
+    def _publish_arguments(self, receipt: dict, body: str, *, after: int | None = None) -> tuple[tuple, threading.Event]:
         """The arguments of gittools.publish, and the event that abandons it. Read on the caller's thread: the store's
         SQLite connection belongs to the thread that opened it."""
         worktree = Path(self.store.session(self.key)["worktree"])
         home, key = self.store.home, self.key
         closing = self.closing
         abandoned = threading.Event()       # set when the awaiting task is cancelled
+        if after is None:
+            after = self.store.last_control(key)
 
         def stopped() -> str | None:
             # Called from the publication thread: no use of this session's own database connection. Closing (a quit or
@@ -509,21 +511,24 @@ class Session:
             # even when the state database is busy; then a durable stop, pause or kill switch.
             if abandoned.is_set() or closing.is_set():
                 return "Cancelled (Brahma is closing)"
-            return Store.halt_reason(home, key)
+            return Store.halt_reason(home, key, after=after)
         if not receipt.get("origin"):
-            raise ValueError("Not published: the readiness receipt records no origin push target (no origin remote, or a "
-                             "receipt from before 1.0.1); check the branch, then publish it yourself")
+            raise ValueError("Not published: the readiness receipt records no origin push target from before work began; "
+                             "check the branch and publish it yourself, or start a new session")
+        identity = receipt.get("git_identity")
+        if not isinstance(identity, dict) or identity.get("branch") != "brahma/" + key:
+            raise ValueError("Not published: the readiness receipt does not identify this session's Git worktree")
         return ((worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
-                 stopped, receipt["origin"]), abandoned)
+                 stopped, receipt["origin"], identity), abandoned)
 
     def publish_ready(self, receipt: dict, body: str) -> str:
         """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
         arguments, _ = self._publish_arguments(receipt, body)
         return gittools.publish(*arguments)
 
-    async def publish_ready_in_thread(self, receipt: dict, body: str) -> str:
+    async def publish_ready_in_thread(self, receipt: dict, body: str, *, after: int | None = None) -> str:
         """publish_ready for an event loop: the state is read here, only the Git/GitHub work runs in a thread."""
-        arguments, abandoned = self._publish_arguments(receipt, body)
+        arguments, abandoned = self._publish_arguments(receipt, body, after=after)
         try:
             return await asyncio.to_thread(gittools.publish, *arguments)
         except asyncio.CancelledError:
@@ -658,15 +663,19 @@ class Session:
                 raise ValueError("Worktree Git identity does not match this session; it was not run")
             # Where publication may push: recorded once, when the session first runs, and never re-recorded on a resume
             # (a worker of an earlier run could have repointed origin since).
-            recorded = [e["text"] for e in self.store.events(self.key) if e["kind"] == "origin_baseline"]
+            history = self.store.events(self.key)
+            recorded = [e["text"] for e in history if e["kind"] == "origin_baseline"]
             if recorded:
-                baseline = json.loads(recorded[0]).get("sha256", "")
+                baseline = json.loads(recorded[0])
             else:
-                baseline = identity.get("origin", "")
-                self.emit(Event(kind="origin_baseline", text=json.dumps({"sha256": baseline})))
-            if identity.get("origin", "") != baseline:
+                baseline = {"sha256": identity["origin"]}
+                if saved["worktree"] or any(event["kind"] == "approved" for event in history):
+                    # A legacy session can finish locally, but its earlier workers ran without a recorded destination.
+                    baseline["legacy"] = True
+                self.emit(Event(kind="origin_baseline", text=json.dumps(baseline)))
+            if identity["origin"] != baseline["sha256"]:
                 raise ValueError("The origin remote's push URL changed since this session first ran; check it, then "
-                                 "approve a new plan")
+                                 "start a new session and approve its plan")
             self.settings._git_identity = identity
             self.store.set(self.key, worktree=str(worktree), status="running")
             self.emit(Event(kind="approved", text="Approved contract " + contract["digest"] + " in branch brahma/" + self.key))
@@ -789,33 +798,43 @@ class Session:
                         # A stop, pause or kill switch during the run (even if lifted since): nothing is committed.
                         result = Result("brahma", "cancelled", halt_reason + "; checkpoint retained", result.usage)
                     if result.status == "ready":
+                        def commit_halt():
+                            if self.closing.is_set():
+                                return "Brahma is closing"
+                            return Store.halt_reason(self.store.home, self.key, after=run_control) or (seen_halt[0] if seen_halt else None)
+
                         def commit_and_verify():
+                            made = None
                             try:
-                                made = (gittools.commit_changes(worktree, self.plan.summary, identity)
-                                        if self.settings.auto_commit else None)
-                                # What was verified, bound to the exact commit: publication may push this and nothing
-                                # else.
+                                if self.settings.auto_commit:
+                                    made = gittools.commit_changes(worktree, self.plan.summary, identity, stopped=commit_halt)
+                                head = made or identity["head"]
+                                clean = not gittools.status_paths(worktree)
+                                uncommitted = gittools.snapshot_changes(worktree, self.settings.ignored_allowlist)
+                                problems = gittools.identity_problems(worktree, dict(identity, head=head))
+                                if problems:
+                                    raise ValueError("Git metadata changed during finalization: " + ", ".join(problems))
                                 return made, {"digest": contract["digest"],
-                                              "head": gittools.git(worktree, "rev-parse", "HEAD"),
-                                              "committed": not gittools.status_paths(worktree),
-                                              # Ignored and special files as verified: publication refuses if any
-                                              # changed.
-                                              "uncommitted": gittools.snapshot_changes(worktree,
-                                                                                       self.settings.ignored_allowlist),
+                                              "head": head, "committed": clean, "uncommitted": uncommitted,
                                               "ignored_allowlist": list(self.settings.ignored_allowlist),
-                                              # The push target as recorded before any worker ran.
-                                              "origin": identity.get("origin")}, None
+                                              "origin": "" if baseline.get("legacy") else baseline["sha256"],
+                                              "git_identity": {key: identity[key] for key in
+                                                               ("git_dir", "common_dir", "branch")}}, None
+                            except gittools.CommitStopped:
+                                raise
                             except Exception as error:
                                 if not self.settings.auto_commit:
                                     raise                   # nothing was committed: the run can resume as before
                                 # The commit may have landed before a later step failed: never leave it unreported.
+                                if made and made != identity["head"]:
+                                    return None, None, (error, made, True)
                                 try:
-                                    head = gittools.git(worktree, "rev-parse", "HEAD")
+                                    head = gittools.git(worktree, "rev-parse", "refs/heads/" + identity["branch"])
                                 except Exception:
                                     head = None
                                 if head is not None and head == identity.get("head"):
                                     raise                   # the branch did not move: nothing was committed
-                                return None, None, (error, head)
+                                return None, None, (error, head, False)
                         def record_receipt(made):
                             nonlocal receipt_stored
                             if made:
@@ -825,13 +844,16 @@ class Session:
                             receipt_stored = True       # /publish can find it, whatever the display does next
                             self.callback(Event(kind=event.kind, text=displayable(event.text)))   # cleaned to show
                         def stranded_text(failed):
-                            error, head = failed
-                            where = (f"committed as {head} on brahma/{self.key}" if head
-                                     else f"may have been committed on brahma/{self.key} (its head could not be read)")
-                            return (f"The verified work {where}, but its readiness receipt could not be made "
-                                    f"({type(error).__name__}: {error}). Nothing was published, and the run cannot "
-                                    "resume from its own commit: check the branch, then publish it by hand or approve "
-                                    "a new plan.")
+                            error, head, committed = failed
+                            branch = "brahma/" + self.key
+                            if committed:
+                                where = f"The verified work was committed as {head} on {branch}"
+                            elif head:
+                                where = f"The branch {branch} now points to the unverified commit {head}"
+                            else:
+                                where = f"The current commit on {branch} could not be identified"
+                            return (f"{where}. The readiness receipt could not be made ({type(error).__name__}: {error}). "
+                                    "Nothing was published. Inspect the branch before starting a new plan.")
                         try:
                             made, receipt, failed = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:
@@ -847,13 +869,19 @@ class Session:
                                 _best_effort(lambda: self.emit(Event(kind="error", text="The final commit failed while "
                                                                      "Brahma was closing: " + str(step.exception()))))
                             raise
+                        except gittools.CommitStopped as stopped_commit:
+                            reason = str(stopped_commit)
+                            if reason not in seen_halt:
+                                seen_halt.append(reason)
+                            failed = None
+                            result = Result("brahma", "cancelled", reason + "; checkpoint retained", result.usage)
                         if failed:
                             # Blocked, never re-queued: a resumed run would refuse its own commit as a moved base.
                             stranded = True
                             text = stranded_text(failed)
                             self.emit(Event(kind="error", text=text))
                             result = Result("brahma", "blocked", text, result.usage)
-                        else:
+                        elif receipt is not None:
                             record_receipt(made)
                     if receipt is not None and self.settings.publish:
                         try:
@@ -868,7 +896,7 @@ class Session:
                                 raise ValueError(f"a halt was seen during this run ({seen}); the verified commit is "
                                                  "ready for /publish")
                             publishing = True
-                            outcome = "Draft PR: " + await self.publish_ready_in_thread(receipt, result.text)
+                            outcome = "Draft PR: " + await self.publish_ready_in_thread(receipt, result.text, after=run_control)
                             publishing = False
                             result.text += "\n" + outcome
                         except Exception as error:
@@ -877,7 +905,7 @@ class Session:
                             # so it ends ready and /publish can try again. Only a cancellation propagates.
                             text = str(error) if type(error) is ValueError else \
                                 f"Not published ({type(error).__name__}: {error}). Check the remote branch, then use /publish"
-                            outcome = text if text.startswith("Not published") else "Not published: " + text
+                            outcome = text if text.startswith(("Not published", "Draft PR ")) else "Not published: " + text
                             self.emit(Event(kind="publication", text=outcome))
                             result.text += "\n" + outcome
                 # A durable stop takes precedence over an automatic restart, until the verified result exists: from then
@@ -909,6 +937,8 @@ class Session:
                         next_at = None  # Never spin on an expired/unknown reset.
                     self.store.enqueue(self.key, self.generation, contract["digest"], next_at,
                                        latest.get("reason", "Waiting for observed provider capacity"))
+                elif stranded:
+                    self.store.finish_job(self.key, "cancelled" if stopped else "blocked")
                 elif result.status == "ready":
                     self.store.close_finished_job(self.key)     # complete: closed even if held (`resume` must not re-run it)
                 elif not self._job_held():
