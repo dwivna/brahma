@@ -13,12 +13,14 @@ run by an independent Claude Sonnet 5.5 agent standing in for Codex; it is not a
 - **Publication refuses a repository whose own Git configuration could redirect the push or run a command.** Before
   pushing, Brahma reads the repository's local and worktree configuration and refuses if it sets `remote.*.pushurl`,
   `remote.*.vcs`, `url.*.insteadOf`, `core.sshCommand`, `core.askpass`, `core.gitProxy`, `protocol.*`, `gpg.*`,
-  `push.gpgSign`, `ssh.*`, a credential helper, an `include`, or an HTTP proxy, TLS, extra-header or curl-option
-  setting. The branch stays local and the message names the settings. Global and system configuration are not checked.
+  `push.gpgSign`, `ssh.*`, `http.*` (including extra headers, curl options, cookies and client certificates), a credential
+  helper, or an `include`. The branch stays local and the message names the settings. The check covers local and
+  worktree configuration.
   Every Git call Brahma makes also pins `push.gpgSign=false` and `protocol.ext.allow=never`.
-- **The push goes only to the origin recorded before any worker ran.** The origin URL is part of the Git identity taken
-  when a run starts: a run that ends with origin repointed is not ready, and publication refuses if origin no longer
-  matches the receipt. Receipts from 1.0.0 carry no origin and are published without this check.
+- **Publication checks the origin push target recorded when the session first runs.** Brahma keeps a SHA-256 fingerprint
+  of the push URLs Git resolves, including rewrites. It checks the fingerprint when resuming, verifying Git identity
+  and publishing. Publication through Brahma requires a receipt with a recorded push target. This excludes 1.0.0
+  receipts and results from repositories without an origin.
 - **Git calls made by `gh pr create` get the same pinned settings as the push** (no hooks, no fsmonitor, no pager, ...),
   through Brahma's Git environment. Before, only the push had them. `gh`'s own configuration (`~/.config/gh`) is not
   covered.

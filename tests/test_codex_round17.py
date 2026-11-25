@@ -1,15 +1,21 @@
 """Independent review round 17 of v1.0.0 (stand-in for Codex, decision Round 26): one regression per MEDIUM finding."""
 from __future__ import annotations
 
+import asyncio
+import json
 import subprocess
 import tempfile
 import unittest
+from contextlib import closing
 from pathlib import Path
 from unittest.mock import patch
 
 from brahma import gitsafe, gittools
+from brahma.models import Result
+from brahma.session import Session
 from tests.test_review12 import git
 from tests.test_review16 import verified_branch
+from tests.test_scheduler import approved_job
 from tests import test_review17
 
 OK = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1", "stderr": ""})
@@ -38,6 +44,9 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
                                ("http.https://github.com/.curloptResolve", "github.com:443:127.0.0.1"),
                                # Review of 1.0.1: headers sent to whatever host answers, and SSH overrides.
                                ("http.extraHeader", "Authorization: planted"),
+                               ("http.https://github.com/.cookieFile", "/tmp/planted.cookies"),
+                               ("http.sslCert", "/tmp/planted.cert"),
+                               ("http.proxyAuthMethod", "basic"),
                                ("ssh.variant", "simple")):
                 with self.subTest(key=key):
                     git(repo, "config", key, value)
@@ -60,7 +69,8 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
             repo, head, snapshot = verified_branch(tmp)
             git(repo, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
             identity = gittools.git_identity(repo)
-            self.assertEqual(identity["origin"], "https://example.invalid/owner/repo.git")
+            self.assertTrue(identity["origin"])
+            self.assertEqual(identity["origin"], gittools.push_target(repo))
             git(repo, "remote", "set-url", "origin", "https://example.invalid/elsewhere/repo.git")
             self.assertIn("the origin remote's URL changed", gittools.identity_problems(repo, identity))  # not ready
             with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
@@ -69,14 +79,58 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
                     gittools.publish(repo, "s", "b", head, snapshot, expected_origin=identity["origin"])
             step.assert_not_called()
 
+    def test_changing_a_legacy_origin_changes_the_resolved_push_target(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _ = verified_branch(tmp)
+            origin = repo / ".git" / "remotes" / "origin"
+            origin.parent.mkdir()
+            self.assertEqual(gittools.push_target(repo), "")
+            origin.write_text("URL: https://example.invalid/owner/repo.git\n")
+            original = gittools.push_target(repo)
+            origin.write_text("URL: https://example.invalid/elsewhere/repo.git\n")
+            changed = gittools.push_target(repo)
+            self.assertTrue(original and changed)
+            self.assertNotEqual(original, changed)
+
+    def test_a_resume_refuses_a_changed_origin_before_starting_a_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+            with closing(store):
+                git(session.repo, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
+                original = gittools.push_target(session.repo)
+
+                async def incomplete(*args, **kwargs):
+                    return Result("brahma", "incomplete", "checkpoint")
+
+                with patch("brahma.engine.execute", incomplete):
+                    self.assertEqual(asyncio.run(session.execute(scheduled=True)).status, "incomplete")
+                self.assertTrue(original)
+                git(session.repo, "remote", "set-url", "origin", "https://example.invalid/elsewhere/repo.git")
+                resumed = Session(store, session.repo, key=session.key)
+                with patch("brahma.engine.execute", side_effect=AssertionError("started work after origin changed")):
+                    with self.assertRaisesRegex(ValueError, "push URL changed since this session first ran"):
+                        asyncio.run(resumed.execute(scheduled=True))
+                baselines = [json.loads(e["text"]) for e in store.events(session.key) if e["kind"] == "origin_baseline"]
+                self.assertEqual(baselines, [{"sha256": original}])
+
+    def test_legacy_or_originless_receipts_cannot_be_published(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+            with closing(store):
+                store.set(session.key, worktree=str(session.repo))
+                receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": []}
+                for candidate in (receipt, dict(receipt, origin="")):
+                    with self.subTest(receipt=candidate):
+                        with self.assertRaisesRegex(ValueError, "readiness receipt records no origin push target"):
+                            session._publish_arguments(candidate, "body")
+
     def test_the_receipt_carries_the_origin_publication_checks(self):
-        from brahma.session import Session
-        receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "https://example.invalid/r.git"}
+        receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "a" * 64}
         session = Session.__new__(Session)
         session.plan, session.key, session.closing = type("P", (), {"summary": "s"})(), "k", __import__("threading").Event()
         session.store = type("S", (), {"home": Path("/nonexistent"), "session": lambda self, key: {"worktree": "/w"}})()
         arguments, _ = session._publish_arguments(receipt, "b")
-        self.assertEqual(arguments[7], "https://example.invalid/r.git")
+        self.assertEqual(arguments[7], receipt["origin"])
 
     def test_pr_creation_runs_with_the_same_pins_as_the_push(self):
         with tempfile.TemporaryDirectory() as tmp:

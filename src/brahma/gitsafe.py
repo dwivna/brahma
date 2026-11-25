@@ -68,8 +68,7 @@ def pinned_env(base: dict[str, str] | None = None) -> dict[str, str]:
 # breaking ordinary setups (keys as `git config --list` prints them: section and name lowercased).
 _PUBLICATION_RISKS = re.compile(r"(?s)^(core\.(sshcommand|askpass|gitproxy)|credential\..*|protocol\..*|gpg\..*|push\.gpgsign|"
                                 r"remote\..*\.(pushurl|receivepack|uploadpack|proxy|vcs)|url\..*\.(insteadof|pushinsteadof)|"
-                                r"include\..*|includeif\..*|"
-                                r"ssh\..*|http\.(.*\.)?(proxy|sslverify|sslcainfo|sslcapath|sslbackend|extraheader|curlopt.*))$")
+                                r"include\..*|includeif\..*|ssh\..*|http\..*)$")
 
 
 def publication_risks(repo: Path) -> list[str]:

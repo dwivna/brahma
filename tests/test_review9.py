@@ -157,6 +157,8 @@ class SessionFlow(unittest.TestCase):
 
     def test_automatic_publication_pushes_the_verified_commit(self):
         # Round 9: auto-publication asked for a receipt before the session was marked ready, so it never published.
+        subprocess.run(["git", "-C", str(self.session.repo), "remote", "add", "origin",
+                        "https://example.invalid/owner/repo.git"], check=True)
         (self.session.repo / "brahma.toml").write_text('[brahma]\npublish=true\nchecks=[["true"]]\n')
         self.session.set_plan(Plan("Goal", [Task("T", "do", ["a.txt"], ["ok"])], checks=[["true"]]))
         approve(self.session)
@@ -167,14 +169,15 @@ class SessionFlow(unittest.TestCase):
             ready.tree = engine._tree(worktree, settings)          # what the checks and review covered
             return ready
 
-        def publish(worktree, summary, body, expected_head, *receipt):
-            published.append(expected_head)
+        def publish(worktree, summary, body, expected_head, uncommitted, ignored_allowlist, stopped, expected_origin):
+            published.append((expected_head, expected_origin))
             return "https://example.invalid/pr/1"
         with patch("brahma.engine.execute", engine_run), patch("brahma.gittools.publish", publish):
             result = asyncio.run(self.session.execute())
         self.assertEqual(result.status, "ready", result.text)
         receipt = self.session.ready_receipt()
-        self.assertEqual(published, [receipt["head"]])
+        self.assertEqual(receipt["origin"], gittools.push_target(self.session.repo))
+        self.assertEqual(published, [(receipt["head"], receipt["origin"])])
         self.assertIn("Draft PR", result.text)
 
     def test_a_file_changed_after_verification_is_never_committed_or_published(self):

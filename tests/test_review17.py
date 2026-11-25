@@ -270,7 +270,7 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
                 return "u"
             with patch.object(gittools, "publish", publishing):
                 job = asyncio.ensure_future(session.publish_ready_in_thread(
-                    {"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b"))
+                    {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o"}, "b"))
                 await asyncio.sleep(0.1)
                 job.cancel()                # the terminal UI quit, or the service stopped: nothing durable written
                 with self.assertRaises(asyncio.CancelledError):
@@ -285,7 +285,8 @@ class SecondReviewPublication(unittest.IsolatedAsyncioTestCase):
     async def test_closing_and_durable_controls_stop_publication_and_durable_ones_are_named(self):
         with tempfile.TemporaryDirectory() as tmp:
             session = self._session(tmp)
-            arguments, abandoned = session._publish_arguments({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
+            receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o"}
+            arguments, abandoned = session._publish_arguments(receipt, "b")
             session.cancel.set()                                # stale (a lifted kill switch, a resumed pause): ignored
             self.assertIsNone(arguments[6]())
             session.store.stop(session.key)                     # a durable Stop is named

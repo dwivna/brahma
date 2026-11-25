@@ -101,9 +101,11 @@ class Finding3PublishFromTheInterface(unittest.TestCase):
             session = Session(store, repo)
             session.plan = Plan("Goal", [Task("T", "do", ["src/**"], ["ok"])])
             git(repo, "checkout", "-q", "-b", "brahma/" + session.key)
+            git(repo, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
             store.set(session.key, worktree=str(repo))
             receipt = {"head": git(repo, "rev-parse", "HEAD"), "uncommitted": gittools.snapshot_changes(repo),
-                       "ignored_allowlist": list(gittools.DEFAULT_IGNORED_ALLOWLIST)}
+                       "ignored_allowlist": list(gittools.DEFAULT_IGNORED_ALLOWLIST),
+                       "origin": gittools.push_target(repo)}
             steps = []
             done = type("R", (), {"returncode": 0, "stdout": "https://example.invalid/pr/1", "stderr": ""})()
             with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
