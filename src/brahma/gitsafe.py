@@ -7,6 +7,7 @@ gittools (which can write) so read-only modules can depend on it.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 from pathlib import Path
 
@@ -46,6 +47,38 @@ def git_env(base: dict[str, str] | None = None) -> dict[str, str]:
     env["GIT_ATTR_NOSYSTEM"] = "1"           # no system-wide attributes file: attributes come only from the empty tree
     env["GIT_NO_REPLACE_OBJECTS"] = "1"      # also for any Git a check runs: replacement objects never apply
     return env
+
+
+def pinned_env(base: dict[str, str] | None = None) -> dict[str, str]:
+    """git_env plus the protected settings of the Git prefix as environment configuration, for a program that runs Git
+    itself (gh): its Git calls get the same pins (no hooks, no fsmonitor, ...) as Brahma's own, and no pager."""
+    env = git_env(base)
+    pairs = [_GIT[i + 1] for i, part in enumerate(_GIT[:-1]) if part == "-c"] + ["core.pager=cat"]
+    env["GIT_CONFIG_COUNT"] = str(len(pairs))
+    for number, pair in enumerate(pairs):
+        key, _, value = pair.partition("=")
+        env[f"GIT_CONFIG_KEY_{number}"], env[f"GIT_CONFIG_VALUE_{number}"] = key, value
+    return env
+
+
+# Repository-local settings that can redirect a push or run a command during publication and cannot be pinned without
+# breaking ordinary setups (keys as `git config --list` prints them: section and name lowercased).
+_PUBLICATION_RISKS = re.compile(r"(?s)^(core\.(sshcommand|askpass)|credential\..*|remote\..*\.(pushurl|receivepack|uploadpack|"
+                                r"proxy)|url\..*\.(insteadof|pushinsteadof)|include\..*|includeif\..*|http\.(.*\.)?proxy)$")
+
+
+def publication_risks(repo: Path) -> list[str]:
+    """Settings in the repository's own configuration (local or worktree scope, which a process able to write the
+    repository's Git directory could plant) that could redirect a push or run a command while publishing."""
+    listing = subprocess.run([*_GIT, "-C", str(repo), "config", "--show-scope", "--list", "-z"], capture_output=True,
+                             check=True, timeout=30, env=git_env()).stdout.decode("utf-8", errors="surrogateescape")
+    fields = listing.split("\0")
+    found = []
+    for scope, entry in zip(fields[0::2], fields[1::2]):
+        key = entry.split("\n", 1)[0]
+        if scope in ("local", "worktree") and _PUBLICATION_RISKS.match(key) and key not in found:
+            found.append(key)
+    return found
 
 
 def attribute_override(repo: Path) -> str | None:

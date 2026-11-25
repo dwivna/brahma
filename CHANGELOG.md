@@ -4,6 +4,23 @@ Brahma uses SemVer from 1.0.0 (decision Round 14; 0.x before): MAJOR for any bre
 exit codes, state schema or contract format; MINOR for new capabilities and backward-compatible additions; PATCH for
 fixes. Each merged PR bumps the version; a tag is a separate release decided by Abhinav. See `docs/decisions.md`.
 
+## 1.0.1
+
+Fixes the two MEDIUM findings of independent review round 17 of 1.0.0 (docs/decisions.md, Round 26). That review was
+run by an independent Claude Sonnet 5.5 agent standing in for Codex; it is not a Codex review. It found no HIGH.
+
+**Fixed**
+- **Publication refuses a repository whose own Git configuration could redirect the push or run a command.** Before
+  pushing, Brahma reads the repository's local and worktree configuration and refuses if it sets `remote.*.pushurl`,
+  `url.*.insteadOf`, `core.sshCommand`, `core.askpass`, a credential helper, an `include`, or a proxy. The branch stays
+  local and the message names the settings. Global and system configuration are not checked, since a worker cannot
+  plant them inside the repository.
+- **Draft PR creation runs under the same Git rules as the push.** `gh pr create` now gets Brahma's Git environment,
+  with the protected settings pinned (no hooks, no fsmonitor, no pager, ...). Before, only the push had them.
+- **A commit whose readiness receipt cannot be made is reported, not lost.** If the commit lands and a later step of
+  making the receipt fails, Brahma reports the commit id and branch, blocks the run and closes its job. Before, the run
+  was recorded as interrupted, a resume failed with "Worktree base changed", and nothing said the commit existed.
+
 ## 1.0.0
 
 First release (docs/decisions.md, Round 14). Includes the fixes from independent review round 8 and the automated

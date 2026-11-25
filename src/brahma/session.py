@@ -716,6 +716,7 @@ class Session:
             monitor = asyncio.create_task(monitor_stop())
             receipt = None      # the verified result, set as soon as it exists: from then on the run is complete
             receipt_stored = False  # the ready receipt is in the store, so /publish can use it
+            stranded = False        # the commit landed but its receipt could not be made: blocked, never re-queued
             publishing = False      # publication is under way (pushing or opening the draft PR)
             outcome = None          # what publication did, once it was decided (the text recorded in the run)
 
@@ -775,16 +776,30 @@ class Session:
                         result = Result("brahma", "cancelled", halt_reason + "; checkpoint retained", result.usage)
                     if result.status == "ready":
                         def commit_and_verify():
-                            made = (gittools.commit_changes(worktree, self.plan.summary, identity)
-                                    if self.settings.auto_commit else None)
-                            # What was verified, bound to the exact commit: publication may push this and nothing else.
-                            return made, {"digest": contract["digest"],
-                                          "head": gittools.git(worktree, "rev-parse", "HEAD"),
-                                          "committed": not gittools.status_paths(worktree),
-                                          # Ignored and special files as verified: publication refuses if any changed.
-                                          "uncommitted": gittools.snapshot_changes(worktree,
-                                                                                   self.settings.ignored_allowlist),
-                                          "ignored_allowlist": list(self.settings.ignored_allowlist)}
+                            try:
+                                made = (gittools.commit_changes(worktree, self.plan.summary, identity)
+                                        if self.settings.auto_commit else None)
+                                # What was verified, bound to the exact commit: publication may push this and nothing
+                                # else.
+                                return made, {"digest": contract["digest"],
+                                              "head": gittools.git(worktree, "rev-parse", "HEAD"),
+                                              "committed": not gittools.status_paths(worktree),
+                                              # Ignored and special files as verified: publication refuses if any
+                                              # changed.
+                                              "uncommitted": gittools.snapshot_changes(worktree,
+                                                                                       self.settings.ignored_allowlist),
+                                              "ignored_allowlist": list(self.settings.ignored_allowlist)}, None
+                            except Exception as error:
+                                if not self.settings.auto_commit:
+                                    raise                   # nothing was committed: the run can resume as before
+                                # The commit may have landed before a later step failed: never leave it unreported.
+                                try:
+                                    head = gittools.git(worktree, "rev-parse", "HEAD")
+                                except Exception:
+                                    head = None
+                                if head is not None and head == identity.get("head"):
+                                    raise                   # the branch did not move: nothing was committed
+                                return None, None, (error, head)
                         def record_receipt(made):
                             nonlocal receipt_stored
                             if made:
@@ -793,18 +808,37 @@ class Session:
                             self.store.record_ready(self.key, event)     # the receipt and the ready status, together
                             receipt_stored = True       # /publish can find it, whatever the display does next
                             self.callback(Event(kind=event.kind, text=displayable(event.text)))   # cleaned to show
+                        def stranded_text(failed):
+                            error, head = failed
+                            where = (f"committed as {head} on brahma/{self.key}" if head
+                                     else f"may have been committed on brahma/{self.key} (its head could not be read)")
+                            return (f"The verified work {where}, but its readiness receipt could not be made "
+                                    f"({type(error).__name__}: {error}). Nothing was published, and the run cannot "
+                                    "resume from its own commit: check the branch, then publish it by hand or approve "
+                                    "a new plan.")
                         try:
-                            made, receipt = await _finish_in_thread(commit_and_verify)
+                            made, receipt, failed = await _finish_in_thread(commit_and_verify)
                         except asyncio.CancelledError as cancelled:
                             step = cancelled.finished
                             if not step.cancelled() and step.exception() is None:
-                                made, receipt = step.result()   # landed while Brahma was closing: complete
-                                _best_effort(lambda: record_receipt(made))
+                                made, receipt, failed = step.result()   # landed while Brahma was closing
+                                if failed:
+                                    stranded = True
+                                    _best_effort(lambda: self.emit(Event(kind="error", text=stranded_text(failed))))
+                                else:
+                                    _best_effort(lambda: record_receipt(made))
                             elif not step.cancelled():
                                 _best_effort(lambda: self.emit(Event(kind="error", text="The final commit failed while "
                                                                      "Brahma was closing: " + str(step.exception()))))
                             raise
-                        record_receipt(made)
+                        if failed:
+                            # Blocked, never re-queued: a resumed run would refuse its own commit as a moved base.
+                            stranded = True
+                            text = stranded_text(failed)
+                            self.emit(Event(kind="error", text=text))
+                            result = Result("brahma", "blocked", text, result.usage)
+                        else:
+                            record_receipt(made)
                     if receipt is not None and self.settings.publish:
                         try:
                             if not receipt["committed"]:
@@ -833,7 +867,7 @@ class Session:
                 # A durable stop takes precedence over an automatic restart, until the verified result exists: from then
                 # on the run is complete (its commit may have moved the branch, so it could not be resumed), and a halt
                 # only prevented its publication.
-                reason = self.halted() if receipt is None else None
+                reason = self.halted() if receipt is None and not stranded else None
                 if reason:
                     result = Result("brahma", "cancelled", reason + "; checkpoint retained", result.usage)
                 self.store.set(self.key, status=result.status)
@@ -896,6 +930,10 @@ class Session:
                     _best_effort(lambda: self.emit(Event(kind="publication", text=note)))
                     _best_effort(lambda: self.emit(Event(kind="summary", text=f"{final}: {result.text}\n{note}",
                                                          usage=result.usage)))
+                elif stranded:
+                    # Its commit is on the branch: a resumed run would refuse it as a moved base, so never re-queue it.
+                    _best_effort(lambda: self.store.set(self.key, status="blocked"))
+                    _best_effort(lambda: self.store.finish_job(self.key, "blocked"))
                 else:
                     _best_effort(lambda: self.store.set(self.key, status="interrupted"))
                 raise

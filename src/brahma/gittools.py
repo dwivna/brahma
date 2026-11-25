@@ -894,6 +894,11 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
         raise ValueError("Not published: ignored or special files changed after the work was verified ready")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
         raise ValueError("Not published: the verified commit is not a full commit id")
+    risks = gitsafe.publication_risks(worktree)
+    if risks:
+        raise ValueError("Not published: the repository's own Git configuration sets " + ", ".join(risks[:5])
+                         + ", which could redirect the push or run a command while publishing; check it, then publish "
+                         "the branch yourself")
     push = ("push", "origin", f"{expected_head}:refs/heads/{branch}")    # the verified commit, to its own brahma/* branch
     reason = refuse(push) or halted()
     if reason:
@@ -906,7 +911,8 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
         if reason:
             raise ValueError(f"Not published as a PR: {reason}")
         result = _run_publication_step([gh, "pr", "create", "--draft", "--head", branch, "--title", summary[:120],
-                                        "--body-file", "-"], worktree, halted, input_text=body, timeout=60)
+                                        "--body-file", "-"], worktree, halted, input_text=body, timeout=60,
+                                       env=gitsafe.pinned_env())   # gh's own Git calls get the same pins as the push
         if result.returncode:
             raise ValueError("Draft PR creation failed. Check gh auth and repository access")
     except Exception as error:
