@@ -462,3 +462,35 @@ the fallback must be approved too.
    benchmark and effort log (Round 23); 1.4.0 the Claude builder runs approved checks; 1.5.0 calibrated review; then
    the security skills. The benchmark records same-provider and cross-vendor reviews separately.
    The README's "the other provider reviews" promise is updated with the fallback.
+
+## Round 26 — 25 November 2026 (stand-in Codex results; 1.0.1 patch; next small fixes)
+
+Abhinav: "continue next work, you take codex work as independent agent using sonet 5.5". With Codex's window just
+reset, its two pending jobs were run by independent Claude Sonnet 5.5 agents with no authoring context, read-only.
+They are recorded as a stand-in for Codex, not as Codex's own view (as in Round 16).
+
+**Review round 17 of v1.0.0 (`0901567..v1.0.0`, src/), stand-in:** no HIGH findings. The full suite at the tag: 692
+tests OK. Two MEDIUM findings, both confirmed against the code: (1) `gh pr create` runs outside `guarded()` and
+`git_env()`, and local Git configuration (`core.fsmonitor`, `core.hooksPath`, `core.pager`, `remote.*.pushurl`,
+`url.*.insteadOf`) is never checked before publishing; (2) if the commit lands but a later step of `commit_and_verify`
+raises, the receipt is never made, the run is recorded interrupted, resuming fails with "Worktree base changed", and
+nothing reports the commit. Four LOW findings, three already in Known limits.
+
+**Round 21, item 4, stand-in answers and corrected facts.** The 21 November facts were wrong in part: `brahma sessions`
+lists only the 20 most recent sessions. The state held 35 sessions (11 planning only, 13 awaiting approval, 5
+incomplete, 4 blocked, 1 interrupted, 1 ready: `0a54c763226a`), 1 memory item and 10 outcomes (Codex 6 of 8 ready,
+Claude 0 of 2). Of the 23 "changes requested" states (counted per attempt), 9 were failing checks (one repository's
+`mvn clean install` failed the same way in four sessions, probably before any change; not confirmed), 4 were a
+reviewer's invalid JSON, and 10 were reviewer findings. The stand-in's view: useful for unattended, well-specified,
+test-covered changes; the wrong tool for exploratory work, repositories whose checks already fail, changes under
+about ten minutes, and design questions; owner effort is unknown and probably net-negative so far.
+
+1. Q1 (the two MEDIUM findings): "1.0.1 patch now". Fixed on master as 1.0.1, with tests and a fresh review, before the
+   1.1.0 contract is approved.
+2. Q2 (baseline gate): "Yes, as 1.1.1". Brahma runs the approved checks on the untouched base before building; if they
+   fail, the task is blocked as "baseline red" and no repair is charged.
+3. Q3 (invalid reviewer JSON): "Retry once". One retry in the same reviewer session asking for valid JSON only; a
+   second failure is recorded as "reviewer output invalid", not as changes requested, and uses no repair. Planned with
+   the baseline gate in 1.1.1.
+4. Q4 (order): "Keep measure-first": 1.2.0 fallback, 1.3.0 benchmark, 1.4.0 the Claude builder runs approved checks,
+   1.5.0 calibrated review, then the security skills.
