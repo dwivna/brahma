@@ -494,3 +494,15 @@ about ten minutes, and design questions; owner effort is unknown and probably ne
    the baseline gate in 1.1.1.
 4. Q4 (order): "Keep measure-first": 1.2.0 fallback, 1.3.0 benchmark, 1.4.0 the Claude builder runs approved checks,
    1.5.0 calibrated review, then the security skills.
+
+### Codex’s own Round 21 answers
+
+This is based on the Brahma implementation, the corrected Round 26 counts, and this session’s maintenance work outside Brahma. I have no matched interactive and Brahma runs from which to estimate the owner’s time, cost, or defect rate.
+
+1. **What I gain.** A locked contract tells a builder which outcome, files and checks are authorized. For a reviewer, the actual diff and the coordinator’s check results provide a reproducible starting point. Persisted checkpoints are most valuable for work that can run unattended or has to wait for provider capacity.
+2. **What it costs.** Contract preparation, separate provider turns and handoffs add elapsed time and context. Narrow briefs can omit why a choice was made. Codex can use its build shell within the assigned scope, while Claude’s current builder toolset omits shell-based checks. A reviewer depends on the supplied evidence and needs enough context to distinguish a regression from an existing defect.
+3. **Owner effort.** The direction is unmeasured. Round 26 recorded 1 fully ready session out of 35 across all session states. That denominator includes sessions that never had approval, so it cannot measure the completion rate of approved runs. The evidence supports measuring planning and triage overhead before claiming savings.
+4. **Why so many change requests.** The 23 recorded change-request attempts include 9 failing checks, 4 invalid reviewer responses and 10 findings. Four sessions saw the same build failure. Its presence on the untouched base remains unverified. These categories call for separate metrics and support the baseline gate and invalid-output retry decided in Round 26.
+5. **Benchmark.** Keep owner minutes per accepted change as the primary measure. Use the same fixture and hidden acceptance checks for both arms. Publish acceptance rates and owner minutes spent on abandoned attempts alongside wall time, quota where reported, and escaped defects. Separate the cohorts using same-provider review and cross-provider review.
+6. **Best fit.** Brahma suits bounded repository work with a stable build and clear acceptance checks. Direct interaction is more suitable when requirements are still changing, the baseline cannot be checked, or the entire edit would take less effort than the contract and review.
+7. **Sequence.** Keep the decided order. Ship the visibility improvements, distinguish baseline failures and invalid reviewer responses in 1.1.1, and separate review modes when measuring the benchmark. Compare approved-check access and review calibration against that baseline.
