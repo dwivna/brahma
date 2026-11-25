@@ -192,7 +192,7 @@ class HaltBeforeGitWrites(unittest.IsolatedAsyncioTestCase):
                 with patch("brahma.engine.execute", ready_then_halt), \
                         patch.object(gittools, "commit_changes", side_effect=AssertionError("committed while halted")), \
                         patch.object(gittools, "publish", side_effect=AssertionError("published while halted")), \
-                        patch.object(gittools, "ownership_changes", return_value=(True, "ok")), patch.object(gittools, "git_identity", side_effect=lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x", "common_dir": "/c", "head": "h", "hidden": []}):
+                        patch.object(gittools, "ownership_changes", return_value=(True, "ok")), patch.object(gittools, "git_identity", side_effect=lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x", "common_dir": "/c", "head": "h", "origin": "o", "hidden": []}):
                     result = await session.execute(scheduled=True)
                 self.assertEqual(result.status, "cancelled")
                 store.close()

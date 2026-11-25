@@ -510,8 +510,11 @@ class Session:
             if abandoned.is_set() or closing.is_set():
                 return "Cancelled (Brahma is closing)"
             return Store.halt_reason(home, key)
+        if not receipt.get("origin"):
+            raise ValueError("Not published: the readiness receipt records no origin push target (no origin remote, or a "
+                             "receipt from before 1.0.1); check the branch, then publish it yourself")
         return ((worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
-                 stopped, receipt.get("origin")), abandoned)
+                 stopped, receipt["origin"]), abandoned)
 
     def publish_ready(self, receipt: dict, body: str) -> str:
         """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
@@ -653,6 +656,17 @@ class Session:
             if (identity["hidden"] or identity["branch"] != "brahma/" + self.key
                     or not Path(identity["git_dir"]).resolve().is_relative_to(Path(identity["common_dir"]).resolve() / "worktrees")):
                 raise ValueError("Worktree Git identity does not match this session; it was not run")
+            # Where publication may push: recorded once, when the session first runs, and never re-recorded on a resume
+            # (a worker of an earlier run could have repointed origin since).
+            recorded = [e["text"] for e in self.store.events(self.key) if e["kind"] == "origin_baseline"]
+            if recorded:
+                baseline = json.loads(recorded[0]).get("sha256", "")
+            else:
+                baseline = identity.get("origin", "")
+                self.emit(Event(kind="origin_baseline", text=json.dumps({"sha256": baseline})))
+            if identity.get("origin", "") != baseline:
+                raise ValueError("The origin remote's push URL changed since this session first ran; check it, then "
+                                 "approve a new plan")
             self.settings._git_identity = identity
             self.store.set(self.key, worktree=str(worktree), status="running")
             self.emit(Event(kind="approved", text="Approved contract " + contract["digest"] + " in branch brahma/" + self.key))

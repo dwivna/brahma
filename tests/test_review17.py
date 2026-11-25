@@ -185,7 +185,7 @@ class Finding3And4PublicationControls(unittest.IsolatedAsyncioTestCase):
             session.cancel.set()          # left by an earlier run, a lifted kill switch or a resumed pause
             seen = []
             with patch.object(gittools, "publish", lambda *args: seen.append(args) or "u"):
-                await session.publish_ready_in_thread({"head": "h", "uncommitted": {}, "ignored_allowlist": []}, "b")
+                await session.publish_ready_in_thread({"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "o"}, "b")
             self.assertIsNone(seen[0][6]())
             store.pause(session.key)
             self.assertEqual(seen[0][6](), "Paused by user")      # a pause is named as a pause, read durably
@@ -402,7 +402,7 @@ class ThirdReviewInterruptedAutomaticPublication(unittest.IsolatedAsyncioTestCas
                 time.sleep(0.02)
             return "https://example.invalid/pr/1"
         identity = lambda wt: {"branch": "brahma/" + Path(wt).name, "git_dir": "/c/worktrees/x",  # noqa: E731
-                               "common_dir": "/c", "head": "h", "hidden": []}
+                               "common_dir": "/c", "head": "h", "origin": "o", "hidden": []}
         with patch("brahma.engine.execute", engine(session) if engine else ready), \
                 patch("brahma.engine._tree", return_value="verified-tree"), \
                 patch.object(Session, "approved_contract", approved), \

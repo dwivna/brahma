@@ -28,7 +28,10 @@ _GIT = ("git", "--literal-pathspecs", "--no-replace-objects", f"--attr-source={E
         "-c", "core.checkStat=default", "-c", "core.ignoreStat=false", "-c", "diff.ignoreSubmodules=none",
         # No signing helper (gpg, ssh-keygen, x509) and no automatic background gc/maintenance: Brahma's commits run
         # no program the approval did not cover.
-        "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "gc.auto=0", "-c", "maintenance.auto=false")
+        "-c", "commit.gpgSign=false", "-c", "tag.gpgSign=false", "-c", "push.gpgSign=false", "-c", "gc.auto=0",
+        "-c", "maintenance.auto=false",
+        # No remote that is a command (ext::), whatever any configuration scope allows.
+        "-c", "protocol.ext.allow=never")
 
 
 # Environment variables that would inject Git configuration (which can name a program to run) or point Git at another
@@ -66,14 +69,17 @@ def pinned_env(base: dict[str, str] | None = None) -> dict[str, str]:
 _PUBLICATION_RISKS = re.compile(r"(?s)^(core\.(sshcommand|askpass|gitproxy)|credential\..*|protocol\..*|gpg\..*|push\.gpgsign|"
                                 r"remote\..*\.(pushurl|receivepack|uploadpack|proxy|vcs)|url\..*\.(insteadof|pushinsteadof)|"
                                 r"include\..*|includeif\..*|"
-                                r"http\.(.*\.)?(proxy|sslverify|sslcainfo|sslcapath|sslbackend|curloptresolve))$")
+                                r"ssh\..*|http\.(.*\.)?(proxy|sslverify|sslcainfo|sslcapath|sslbackend|extraheader|curlopt.*))$")
 
 
 def publication_risks(repo: Path) -> list[str]:
     """Settings in the repository's own configuration (local or worktree scope, which a process able to write the
     repository's Git directory could plant) that could redirect a push or run a command while publishing."""
-    listing = subprocess.run([*_GIT, "-C", str(repo), "config", "--show-scope", "--list", "-z"], capture_output=True,
-                             check=True, timeout=30, env=git_env()).stdout.decode("utf-8", errors="surrogateescape")
+    try:
+        listing = subprocess.run([*_GIT, "-C", str(repo), "config", "--show-scope", "--list", "-z"], capture_output=True,
+                                 check=True, timeout=30, env=git_env()).stdout.decode("utf-8", errors="surrogateescape")
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ValueError(f"Not published: the repository's Git configuration could not be read ({error})") from None
     fields = listing.split("\0")
     found = []
     for scope, entry in zip(fields[0::2], fields[1::2]):

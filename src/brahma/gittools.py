@@ -428,6 +428,14 @@ def hidden_index_entries(worktree: Path) -> list[str]:
     return sorted(hidden)
 
 
+def push_target(worktree: Path) -> str:
+    """A fingerprint of where `git push origin` would send, resolved the way the push resolves it (push URLs, URL rewrites,
+    legacy remotes files); empty when there is no origin. Hashed, so a token in the URL is never stored."""
+    resolved = run_git(worktree, "remote", "get-url", "--push", "--all", "origin")
+    target = resolved.stdout.strip() if resolved.returncode == 0 else ""
+    return hashlib.sha256(target.encode("utf-8", errors="surrogateescape")).hexdigest() if target else ""
+
+
 def git_identity(worktree: Path) -> dict:
     """The Git metadata ownership is measured against. Taken once when a run starts and compared on every verification."""
     return {"git_dir": git(worktree, "rev-parse", "--absolute-git-dir"),
@@ -435,7 +443,7 @@ def git_identity(worktree: Path) -> dict:
             "branch": git(worktree, "branch", "--show-current"),
             "head": git(worktree, "rev-parse", "HEAD"),
             # Where a publication would push: a run that ends with origin repointed is not ready (publish compares too).
-            "origin": run_git(worktree, "config", "--get-all", "remote.origin.url").stdout.strip(),
+            "origin": push_target(worktree),
             "hidden": hidden_index_entries(worktree)}
 
 
@@ -899,9 +907,8 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
         raise ValueError("Not published: ignored or special files changed after the work was verified ready")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
         raise ValueError("Not published: the verified commit is not a full commit id")
-    origin = run_git(worktree, "config", "--get-all", "remote.origin.url").stdout.strip()
-    if expected_origin is not None and origin != expected_origin:
-        # Recorded when the run started, before any worker ran (receipts from before 1.0.1 carry none).
+    if expected_origin is not None and push_target(worktree) != expected_origin:
+        # Recorded when the session first ran, before any of its workers ran (Session refuses a receipt without one).
         raise ValueError("Not published: the origin remote's URL changed since the run started; check it, then publish "
                          "the branch yourself")
     risks = gitsafe.publication_risks(worktree)

@@ -35,7 +35,10 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
                                ("gpg.program", "sh -c 'touch planted'"),
                                ("push.gpgSign", "true"),
                                ("http.sslVerify", "false"),
-                               ("http.https://github.com/.curloptResolve", "github.com:443:127.0.0.1")):
+                               ("http.https://github.com/.curloptResolve", "github.com:443:127.0.0.1"),
+                               # Review of 1.0.1: headers sent to whatever host answers, and SSH overrides.
+                               ("http.extraHeader", "Authorization: planted"),
+                               ("ssh.variant", "simple")):
                 with self.subTest(key=key):
                     git(repo, "config", key, value)
                     section, name = key.rsplit(".", 1)          # Git lowercases the name, keeps the subsection
@@ -89,6 +92,20 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
             pins = {env[f"GIT_CONFIG_KEY_{n}"]: env[f"GIT_CONFIG_VALUE_{n}"] for n in range(int(env["GIT_CONFIG_COUNT"]))}
             for key, value in (("core.fsmonitor", "false"), ("core.hooksPath", "/dev/null"), ("core.pager", "cat")):
                 self.assertEqual(pins[key], value)
+
+    def test_push_signing_and_command_remotes_are_pinned_off_for_every_git_call(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, _, _ = verified_branch(tmp)
+            git(repo, "config", "push.gpgSign", "true")
+            git(repo, "config", "protocol.ext.allow", "always")
+            got = [subprocess.run([*gitsafe.guarded(repo), "config", "--get", key], capture_output=True, text=True,
+                                  env=gitsafe.git_env()).stdout.strip() for key in ("push.gpgSign", "protocol.ext.allow")]
+            self.assertEqual(got, ["false", "never"])
+
+    def test_an_unreadable_configuration_refuses_with_a_clear_reason(self):
+        with patch("subprocess.run", side_effect=subprocess.TimeoutExpired("git", 30)):
+            with self.assertRaisesRegex(ValueError, "Not published: the repository's Git configuration could not be read"):
+                gitsafe.publication_risks(Path("/nonexistent"))
 
     def test_gh_style_git_calls_see_the_pins_over_the_repository_config(self):
         with tempfile.TemporaryDirectory() as tmp:
