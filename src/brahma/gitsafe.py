@@ -63,8 +63,10 @@ def pinned_env(base: dict[str, str] | None = None) -> dict[str, str]:
 
 # Repository-local settings that can redirect a push or run a command during publication and cannot be pinned without
 # breaking ordinary setups (keys as `git config --list` prints them: section and name lowercased).
-_PUBLICATION_RISKS = re.compile(r"(?s)^(core\.(sshcommand|askpass)|credential\..*|remote\..*\.(pushurl|receivepack|uploadpack|"
-                                r"proxy)|url\..*\.(insteadof|pushinsteadof)|include\..*|includeif\..*|http\.(.*\.)?proxy)$")
+_PUBLICATION_RISKS = re.compile(r"(?s)^(core\.(sshcommand|askpass|gitproxy)|credential\..*|protocol\..*|gpg\..*|push\.gpgsign|"
+                                r"remote\..*\.(pushurl|receivepack|uploadpack|proxy|vcs)|url\..*\.(insteadof|pushinsteadof)|"
+                                r"include\..*|includeif\..*|"
+                                r"http\.(.*\.)?(proxy|sslverify|sslcainfo|sslcapath|sslbackend|curloptresolve))$")
 
 
 def publication_risks(repo: Path) -> list[str]:

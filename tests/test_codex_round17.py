@@ -26,7 +26,16 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
                                ("url.https://example.invalid/.insteadOf", "https://github.com/"),
                                ("core.sshCommand", "sh -c 'touch planted'"),
                                ("credential.https://github.com.helper", "!sh -c 'touch planted'"),
-                               ("include.path", "/tmp/planted.config")):
+                               ("include.path", "/tmp/planted.config"),
+                               # Automated security review of e14778d: also a proxy command, protocols, a remote
+                               # helper, signing programs, TLS and name resolution.
+                               ("core.gitProxy", "sh -c 'touch planted'"),
+                               ("protocol.ext.allow", "always"),
+                               ("remote.origin.vcs", "planted"),
+                               ("gpg.program", "sh -c 'touch planted'"),
+                               ("push.gpgSign", "true"),
+                               ("http.sslVerify", "false"),
+                               ("http.https://github.com/.curloptResolve", "github.com:443:127.0.0.1")):
                 with self.subTest(key=key):
                     git(repo, "config", key, value)
                     section, name = key.rsplit(".", 1)          # Git lowercases the name, keeps the subsection
@@ -42,6 +51,29 @@ class Finding1PublicationUnderBrahmasGitRules(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "remote.origin.pushurl"):
                     gittools.publish(repo, "s", "b", head, snapshot)
             step.assert_not_called()
+
+    def test_origin_repointed_after_the_run_started_is_never_pushed_to(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo, head, snapshot = verified_branch(tmp)
+            git(repo, "remote", "add", "origin", "https://example.invalid/owner/repo.git")
+            identity = gittools.git_identity(repo)
+            self.assertEqual(identity["origin"], "https://example.invalid/owner/repo.git")
+            git(repo, "remote", "set-url", "origin", "https://example.invalid/elsewhere/repo.git")
+            self.assertIn("the origin remote's URL changed", gittools.identity_problems(repo, identity))  # not ready
+            with patch("brahma.providers.find_executable", return_value="/usr/bin/gh"), \
+                    patch.object(gittools, "_run_publication_step") as step:
+                with self.assertRaisesRegex(ValueError, "origin remote's URL changed"):
+                    gittools.publish(repo, "s", "b", head, snapshot, expected_origin=identity["origin"])
+            step.assert_not_called()
+
+    def test_the_receipt_carries_the_origin_publication_checks(self):
+        from brahma.session import Session
+        receipt = {"head": "h", "uncommitted": {}, "ignored_allowlist": [], "origin": "https://example.invalid/r.git"}
+        session = Session.__new__(Session)
+        session.plan, session.key, session.closing = type("P", (), {"summary": "s"})(), "k", __import__("threading").Event()
+        session.store = type("S", (), {"home": Path("/nonexistent"), "session": lambda self, key: {"worktree": "/w"}})()
+        arguments, _ = session._publish_arguments(receipt, "b")
+        self.assertEqual(arguments[7], "https://example.invalid/r.git")
 
     def test_pr_creation_runs_with_the_same_pins_as_the_push(self):
         with tempfile.TemporaryDirectory() as tmp:

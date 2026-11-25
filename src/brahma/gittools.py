@@ -434,6 +434,8 @@ def git_identity(worktree: Path) -> dict:
             "common_dir": git(worktree, "rev-parse", "--path-format=absolute", "--git-common-dir"),
             "branch": git(worktree, "branch", "--show-current"),
             "head": git(worktree, "rev-parse", "HEAD"),
+            # Where a publication would push: a run that ends with origin repointed is not ready (publish compares too).
+            "origin": run_git(worktree, "config", "--get-all", "remote.origin.url").stdout.strip(),
             "hidden": hidden_index_entries(worktree)}
 
 
@@ -447,7 +449,8 @@ def identity_problems(worktree: Path, identity: dict | None) -> list[str]:
         return ["Git metadata could not be read: " + str(error)]
     problems = []
     for key, label in (("git_dir", "the worktree's Git directory (.git was repointed)"), ("common_dir", "the repository it belongs to"),
-                       ("branch", "the checked-out branch"), ("head", "HEAD (an unexpected commit)")):
+                       ("branch", "the checked-out branch"), ("head", "HEAD (an unexpected commit)"),
+                       ("origin", "the origin remote's URL")):
         if now[key] != identity.get(key):
             problems.append(f"{label} changed")
     if now["hidden"]:      # Brahma clears every flag when a run starts, so any flag present now was set during the run
@@ -829,7 +832,7 @@ def publish_lock_path(worktree: Path) -> Path:
 
 
 def publish(worktree: Path, summary: str, body: str, expected_head: str, expected_uncommitted: dict | None = None,
-            ignored_allow=None, stopped=None, lock_wait: float = 300) -> str:
+            ignored_allow=None, stopped=None, expected_origin: str | None = None, lock_wait: float = 300) -> str:
     """Push exactly the commit that was verified ready, and open a draft PR. Anything added after readiness (a commit, an
     uncommitted or ignored edit) means this is no longer the verified result, so nothing is pushed.
 
@@ -858,7 +861,8 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
                     if reason:
                         raise ValueError("Not published: " + reason) from None
                     time.sleep(0.25)
-            return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped)
+            return _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped,
+                            expected_origin)
         finally:
             os.close(descriptor)
     except (OSError, sqlite3.Error) as error:
@@ -866,7 +870,8 @@ def publish(worktree: Path, summary: str, body: str, expected_head: str, expecte
         raise ValueError(f"Not published: {type(error).__name__}: {error}") from None
 
 
-def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped) -> str:
+def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignored_allow, stopped,
+             expected_origin=None) -> str:
     from . import halt, safety
     from .config import state_home
 
@@ -894,6 +899,11 @@ def _publish(worktree, summary, body, expected_head, expected_uncommitted, ignor
         raise ValueError("Not published: ignored or special files changed after the work was verified ready")
     if not re.fullmatch(r"[0-9a-f]{40}", expected_head):
         raise ValueError("Not published: the verified commit is not a full commit id")
+    origin = run_git(worktree, "config", "--get-all", "remote.origin.url").stdout.strip()
+    if expected_origin is not None and origin != expected_origin:
+        # Recorded when the run started, before any worker ran (receipts from before 1.0.1 carry none).
+        raise ValueError("Not published: the origin remote's URL changed since the run started; check it, then publish "
+                         "the branch yourself")
     risks = gitsafe.publication_risks(worktree)
     if risks:
         raise ValueError("Not published: the repository's own Git configuration sets " + ", ".join(risks[:5])

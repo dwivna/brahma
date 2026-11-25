@@ -511,7 +511,7 @@ class Session:
                 return "Cancelled (Brahma is closing)"
             return Store.halt_reason(home, key)
         return ((worktree, self.plan.summary, body, receipt["head"], receipt["uncommitted"], receipt["ignored_allowlist"],
-                 stopped), abandoned)
+                 stopped, receipt.get("origin")), abandoned)
 
     def publish_ready(self, receipt: dict, body: str) -> str:
         """Publish exactly what the readiness receipt verified: its commit, and its ignored and special files."""
@@ -788,7 +788,9 @@ class Session:
                                               # changed.
                                               "uncommitted": gittools.snapshot_changes(worktree,
                                                                                        self.settings.ignored_allowlist),
-                                              "ignored_allowlist": list(self.settings.ignored_allowlist)}, None
+                                              "ignored_allowlist": list(self.settings.ignored_allowlist),
+                                              # The push target as recorded before any worker ran.
+                                              "origin": identity.get("origin")}, None
                             except Exception as error:
                                 if not self.settings.auto_commit:
                                     raise                   # nothing was committed: the run can resume as before

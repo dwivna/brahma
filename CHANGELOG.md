@@ -12,9 +12,12 @@ run by an independent Claude Sonnet 5.5 agent standing in for Codex; it is not a
 **Fixed**
 - **Publication refuses a repository whose own Git configuration could redirect the push or run a command.** Before
   pushing, Brahma reads the repository's local and worktree configuration and refuses if it sets `remote.*.pushurl`,
-  `url.*.insteadOf`, `core.sshCommand`, `core.askpass`, a credential helper, an `include`, or a proxy. The branch stays
-  local and the message names the settings. Global and system configuration are not checked, since a worker cannot
-  plant them inside the repository.
+  `remote.*.vcs`, `url.*.insteadOf`, `core.sshCommand`, `core.askpass`, `core.gitProxy`, `protocol.*`, `gpg.*`,
+  `push.gpgSign`, a credential helper, an `include`, or an HTTP proxy, TLS or name-resolution setting. The branch stays
+  local and the message names the settings. Global and system configuration are not checked.
+- **The push goes only to the origin recorded before any worker ran.** The origin URL is part of the Git identity taken
+  when a run starts: a run that ends with origin repointed is not ready, and publication refuses if origin no longer
+  matches the receipt. Receipts from 1.0.0 carry no origin and are published without this check.
 - **Draft PR creation runs under the same Git rules as the push.** `gh pr create` now gets Brahma's Git environment,
   with the protected settings pinned (no hooks, no fsmonitor, no pager, ...). Before, only the push had them.
 - **A commit whose readiness receipt cannot be made is reported, not lost.** If the commit lands and a later step of
