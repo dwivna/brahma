@@ -4,6 +4,43 @@ Brahma uses SemVer from 1.0.0 (decision Round 14; 0.x before): MAJOR for any bre
 exit codes, state schema or contract format; MINOR for new capabilities and backward-compatible additions; PATCH for
 fixes. Each merged PR bumps the version; a tag is a separate release decided by Abhinav. See `docs/decisions.md`.
 
+## 1.1.0
+
+The conversation reads as a chat, and the owner gets a six-field work report (docs/decisions.md, the 1.1.0 chat-view
+plan). All additions are backward compatible: stored events and their UTC timestamps, `brahma events` (JSON lines),
+every existing `--json` field, exit codes and the approval contract text are unchanged.
+
+**Added**
+- Coordinator `check_status` events store the approved argv, phase and observed completion code. Legacy `check` output remains available. `review_result` records accepted independent verdicts. Owner overrides remain separately attributed.
+- The real subprocess cleanup fixtures allow bounded startup time and exercise delayed fake workers for foreground and scheduled offline suite runs.
+- **One shared chat timeline in the terminal UI.** The manager, Codex and Claude panes are replaced by one timeline in
+  time order. Each message shows its local time, its speaker (You, Brahma, Codex or Claude, each in its own colour) and,
+  where there is one, who it is addressed to. A date heading appears when the day changes. Task assignments, reviews,
+  checks, quota changes, waits and reports read as sentences; raw JSON, repeated quota states and usage counters stay out
+  of the chat. Text is redacted and stripped of terminal controls at the rendering boundary. The status bar, board,
+  controls and slash commands are unchanged; `/status` now shows a readable summary with the latest work report.
+- **Work reports.** When a task ends (ready, blocked, incomplete, waiting, needs a decision or cancelled) and when a run
+  ends, Brahma stores a `work_report` event in the existing event envelope with six fields: Completed, Evidence, Current
+  work, Next work, Where we are and Needs you. Evidence names only the checks Brahma ran with their exit status and the
+  reviewer's verdict; a worker's claim is never evidence. A report that cannot be built or stored changes nothing about
+  the run. The chat shows each report as one Brahma message with six rows.
+- **`brahma --json status` has a `report` field**: the latest work report's six fields, or `null`. The human
+  `brahma status` output shows the same report as six rows after the status object.
+
+**Changed**
+- **`brahma run` and `brahma plan` print chat lines to stderr** (local time, speaker, optional addressee, text) instead
+  of `[provider/role] text` with raw JSON. Colour is used only when stderr is a terminal and `NO_COLOR` is not set.
+- **Times are shown in the system timezone.** `brahma usage`, `/usage`, the board and the chat show reset and
+  observation times as, for example, `Wed 25 Nov 2026 21:40 IST` instead of UTC. Stored times stay UTC.
+
+**Fixed**
+- **A verbose check keeps its result line.** A check whose output exceeded the 16,000-character retention limit was
+  stored with its first line cut away, so the coordinator's `COMMAND => exit N` result was lost and a line printed by the
+  check could stand in its place. The stored check event now always starts with the approved command and the exit
+  status Brahma observed from the process; only the captured output is shortened (marked as omitted). Reports and the
+  chat take the result only from the structured coordinator completion event, so a check that prints a success message but exits non-zero is reported as
+  failed.
+
 ## 1.0.1
 
 Fixes the two MEDIUM findings of independent review round 17 of 1.0.0 (docs/decisions.md, Round 26). That review was

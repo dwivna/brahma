@@ -135,10 +135,10 @@ class ProcessTests(unittest.IsolatedAsyncioTestCase):
         path.chmod(path.stat().st_mode | stat.S_IXUSR)
         return str(path)
 
-    async def invoke(self, body, timeout=5, provider="codex"):
+    async def invoke(self, body, timeout=5, provider="codex", terminate_grace=.03):
         executable = self.executable(body, provider)
         with patch.object(providers.shutil, "which", return_value=executable), patch.object(
-                providers, "doctor", AsyncMock(return_value={"available": True})), patch.object(providers, "TERMINATE_GRACE", .03):
+                providers, "doctor", AsyncMock(return_value={"available": True})), patch.object(providers, "TERMINATE_GRACE", terminate_grace):
             return await providers.run(provider, "instructions", self.directory, "builder", Settings(),
                                        self.events.append, self.cancel, timeout)
 
@@ -181,6 +181,7 @@ print(json.dumps({"type":"turn.completed","usage":{"input_tokens":3}}))
     async def test_timeout_kills_process_group_descendant(self):
         marker = self.directory / "descendant.txt"
         code = f'''import os, signal, time
+time.sleep(.4)
 child = os.fork()
 if child == 0:
     signal.signal(signal.SIGTERM, signal.SIG_IGN)
@@ -194,7 +195,7 @@ else:
     signal.signal(signal.SIGTERM, stop)
     time.sleep(30)
 '''
-        result = await self.invoke(code, timeout=.3)
+        result = await self.invoke(code, timeout=3, terminate_grace=1)
         self.assertEqual(result.status, "timeout")
         child = int(marker.read_text())
         with self.assertRaises(ProcessLookupError):
@@ -204,6 +205,7 @@ else:
         ready = self.directory / "child.ready"
         stopped = self.directory / "child.stopped"
         code = f'''import os, signal, time
+time.sleep(.4)
 child = os.fork()
 if child == 0:
     def stop(*args):
@@ -217,7 +219,7 @@ else:
         time.sleep(.005)
     raise SystemExit()
 '''
-        result = await self.invoke(code, timeout=.25)
+        result = await self.invoke(code, timeout=3, terminate_grace=1)
         self.assertEqual(result.status, "timeout")
         self.assertEqual(stopped.read_text(), "terminated")
 

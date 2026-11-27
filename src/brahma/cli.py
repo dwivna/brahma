@@ -9,6 +9,7 @@ import subprocess
 import sys
 
 from . import __version__, exitcodes
+from .chat import REPORT_FIELDS, report_rows
 from .config import Settings, state_home
 from .models import Plan
 from .store import Store
@@ -22,7 +23,7 @@ def parser():
     result.add_argument("--repo", type=Path, help="Explicit Git repository (defaults to current repository)")
     result.add_argument("--json", action="store_true", dest="json_output",
                         help="Machine-readable output: every result and error is one JSON object (see exit codes in README)")
-    result.add_argument("--demo", action="store_true", help="Run the three-pane interface without provider calls")
+    result.add_argument("--demo", action="store_true", help="Run the chat interface without provider calls")
     result.add_argument("--resume", metavar="SESSION", help="Reopen a local conversation/checkpoint")
     sub = result.add_subparsers(dest="command")
     sub.add_parser("doctor", help="Read-only CLI and subscription sign-in diagnostics")
@@ -149,6 +150,72 @@ def statusline_tap(home: Path, then: str | None) -> int:
     return exitcodes.READY
 
 
+def stored_report(store: Store, key: str) -> dict | None:
+    """The latest stored work report's six fields, or None when there is none (or it cannot be read)."""
+    from .report import latest_report
+    try:
+        value = latest_report(store, key)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(value, dict):
+        return None
+    return {field: value[field] if isinstance(value.get(field), str) else "" for field, _ in REPORT_FIELDS}
+
+
+def format_status(payload: dict) -> str:
+    """Human `brahma status`: the status object as before, followed by the latest work report as six rows."""
+    text = json.dumps({key: value for key, value in payload.items() if key != "report"}, indent=2)
+    report = payload.get("report")
+    if not report:
+        return text + "\n\nLatest work report: none recorded yet."
+    rows = ["  " + row for row in report_rows(report)]
+    return text + "\n\nLatest work report:\n" + "\n".join(rows)
+
+
+_SPEAKER_COLOURS = {"You": "\x1b[32m", "Brahma": "\x1b[33m", "Codex": "\x1b[36m", "Claude": "\x1b[35m"}
+_DIM, _RESET = "\x1b[2m", "\x1b[0m"
+
+
+def use_colour(stream) -> bool:
+    """Colour only on a terminal, and never when NO_COLOR is set (whatever its value)."""
+    if "NO_COLOR" in os.environ:
+        return False
+    try:
+        return bool(stream.isatty())
+    except (AttributeError, ValueError, OSError):
+        return False
+
+
+def chat_lines(message, colour: bool = False) -> list[str]:
+    """One self-contained line per row of a chat message: local time, speaker, optional addressee, text.
+    The first message of a day carries the date in its time stamp."""
+    stamp = f"{message.date} {message.time}" if message.date else message.time
+    who = f"{message.speaker} → {message.addressee}" if message.addressee else message.speaker
+    if colour:
+        stamp = _DIM + stamp + _RESET
+        who = _SPEAKER_COLOURS.get(message.speaker, "") + who + _RESET
+    return [f"{stamp}  {who}: {row}" for row in (message.text.split("\n") or [""])]
+
+
+class ChatLog:
+    """The stderr log of `brahma plan` and `brahma run`: stored events rendered as chat lines, never raw JSON."""
+
+    def __init__(self, stream=None, clock=None):
+        from datetime import datetime, timezone
+        from .chat import ChatRenderer
+        self.renderer = ChatRenderer()
+        self.stream = stream
+        # The event has just been stored, so it is shown at the current time (in UTC, rendered locally).
+        self.clock = clock or (lambda: datetime.now(timezone.utc))
+
+    def __call__(self, event) -> None:
+        stream = self.stream if self.stream is not None else sys.stderr
+        message = self.renderer.render(event, self.clock())
+        if message is None:
+            return
+        print("\n".join(chat_lines(message, use_colour(stream))), file=stream, flush=True)
+
+
 def session_status(store: Store, key: str) -> tuple[int, dict]:
     """One JSON object saying where a session stands; the exit code is the outcome."""
     saved = store.session(key)  # ValueError("Unknown session") becomes exit 20
@@ -166,7 +233,8 @@ def session_status(store: Store, key: str) -> tuple[int, dict]:
     return code, {"ok": code == exitcodes.READY, "session": key, "status": saved["status"],
                   "outcome": exitcodes.TABLE[code], "exit_code": code, "approved": approved,
                   "contract_digest": digest, "paused": bool(saved["paused"]), "stopped": bool(saved["stopped"]),
-                  "killed": store.killed, "job": job, "repo": saved["repo"], "worktree": saved["worktree"]}
+                  "killed": store.killed, "job": job, "repo": saved["repo"], "worktree": saved["worktree"],
+                  "report": stored_report(store, key)}
 
 
 def stream_events(store: Store, key: str, after: int, follow: bool) -> int:
@@ -499,7 +567,7 @@ def _main(argv):
         try:
             if args.command == "status":
                 code, payload = session_status(store, args.session)
-                return emit(payload, json.dumps(payload, indent=2), code, as_json)
+                return emit(payload, lambda: format_status(payload), code, as_json)
             return stream_events(store, args.session, args.after, args.follow)
         finally:
             store.close()
@@ -529,8 +597,7 @@ def _main(argv):
     if args.command in ("plan", "run"):
         store = Store(home)
         try:
-            def log(event):
-                print(f"[{event.provider}/{event.role}] {event.text}", file=sys.stderr, flush=True)
+            log = ChatLog()
             if args.command == "run" and args.session:
                 if args.plan_file or args.approve:
                     raise ValueError("Use either a plan file with --approve, or --session for an already approved session")

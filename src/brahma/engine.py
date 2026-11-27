@@ -151,6 +151,8 @@ async def _dispute_round(index, task, builder, reviewer, review, worktree, setti
         second = _review(again.text)
     except (ValueError, TypeError):
         return "repair", review
+    if second["verdict"] != "pass":
+        _emit(emit, "review_result", json.dumps(dict(second, index=index, reviewer=reviewer)))
     if second["verdict"] == "blocked":
         return "repair", second          # a blocked re-review is final: the caller blocks the task; no decision can override it
     if second["verdict"] == "pass":
@@ -722,9 +724,12 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                     return result("blocked", task, "File ownership check failed after review: " + reason)
                 try:
                     review = _review(reviewed.text)
+                    if review["verdict"] != "pass":
+                        _emit(emit, "review_result", json.dumps(dict(review, index=index, reviewer=reviewer)))
                 except (ValueError, TypeError):
                     review = {"verdict": "changes_requested", "summary": "Reviewer returned invalid JSON; no pass recorded",
                               "issues": ["A valid structured independent review is still required"]}
+            owner_override = False
             from . import dispute as _dispute
             if not (review["verdict"] == "changes_requested" and _dispute.high(_dispute.findings(review))):
                 budgets[index]["dispute_decision"] = None       # a decision applies only to the findings it was made on
@@ -750,6 +755,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                                  findings=len(dispute.high(dispute.findings(review))), usage=task_usage(index),
                                  seconds=spent(index))
                         return guarded(index, "needs_decision", task, payload)
+                    owner_override = kind == "overruled"
                     review = payload
             if review["verdict"] == "blocked":     # a blocked re-review stops the task; it is never escalated or overridden
                 _checkpoint(emit, index, task, "blocked", attempt, review["summary"])
@@ -764,9 +770,6 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 _outcome(emit, index, task, builder, attempt, ready=False, checks_passed=True,
                          findings=len(review.get("issues", [])) or 1, usage=task_usage(index), seconds=spent(index))
                 return guarded(index, "incomplete", task, "Independent review did not pass after the bounded repairs")
-            if review["verdict"] == "pass" and review["issues"]:
-                # Recorded for Abhinav; sanitized because dispute events are stored unredacted.
-                _emit(emit, "review_notes", json.dumps({"index": index, "notes": _dispute.findings(review)}, ensure_ascii=False))
             if review["verdict"] != "pass":        # allow-list: only an explicit pass may reach readiness
                 _checkpoint(emit, index, task, "blocked", attempt, "Review did not pass")
                 return guarded(index, "blocked", task, "Review did not pass")
@@ -793,6 +796,10 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                 if attempt < min(3, settings.repair_cycles):
                     continue
                 return guarded(index, "incomplete", task, detail + " (no repair attempts left)")
+            if not owner_override:
+                _emit(emit, "review_result", json.dumps(dict(review, index=index, reviewer=reviewer)))
+                if review["issues"]:
+                    _emit(emit, "review_notes", json.dumps({"index": index, "notes": _dispute.findings(review)}))
             verified_tree = checked_tree
             state = "needs_checks" if needs_checks else "ready"
             _outcome(emit, index, task, builder, attempt, ready=state == "ready", checks_passed=True,
@@ -864,7 +871,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
                           + (", ".join(changed[:10]) or "the commit") + "); nothing was accepted. "
                           "Run again to check and review the affected tasks.")
     if needs_checks:
-        return Result("brahma", "needs_checks", "Independent review and diff checks passed; configure and run project checks before readiness.\n"
+        return Result("brahma", "needs_checks", "Review stage complete and diff checks passed; configure and run project checks before readiness.\n"
                       + "; ".join(completed), usage, seconds=time.monotonic() - started)
     ready = result("ready")
     ready.tree = verified_tree

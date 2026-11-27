@@ -106,11 +106,22 @@ class ReadUsageTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(codex["quota"]["windows"][0]["used_percent"], 20)
         self.assertEqual(self.store.quota("codex"), codex["quota"])
         self.assertIsNone(claude["quota"])
-        output = format_usage(report)
+        import os
+        from brahma.chat import format_reset_time
+        self.addCleanup(time.tzset)
+        with patch.dict(os.environ, TZ="Asia/Kolkata"):
+            time.tzset()
+            output = format_usage(report)
+            reset = format_reset_time(codex["quota"]["windows"][0]["reset_at"])
+            observed = format_reset_time(codex["quota"]["observed_at"])
         self.assertIn("20% used, 80% remaining", output)
         self.assertIn("5h window", output)
         self.assertIn("7d window", output)
-        self.assertIn("UTC", output)
+        # Times are shown in the system timezone, never as UTC.
+        self.assertTrue(reset.endswith(" IST") and observed.endswith(" IST"))
+        self.assertIn(f"reset {reset}", output)
+        self.assertIn(f"({observed})", output)
+        self.assertNotIn("UTC", output)
         self.assertIn("codex.app_server", output)
         self.assertIn("0s ago", output)
         self.assertIn("Remaining capacity unknown", output)

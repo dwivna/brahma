@@ -15,7 +15,7 @@ import uuid
 import time
 from dataclasses import asdict, replace
 
-from . import safety, ownership
+from . import safety, ownership, report
 from .config import Settings
 from .models import Event, Plan, Result
 from . import gittools
@@ -165,7 +165,12 @@ class Session:
             event.text = json.dumps(state)
         event.text = CONTROL.sub("", event.text)
         self.store.event(self.key, event)
-        self.callback(event)
+        try:
+            self.callback(event)
+        finally:
+            if event.kind == "summary" or (event.kind == "task_state" and state.get("state") in report.REPORT_STATES):
+                _best_effort(lambda: self.emit(Event(kind="work_report",
+                                                     text=json.dumps(report.build_report(self.store, self.key)))))
         if event.provider in ("codex", "claude") and event.kind not in ("enforcement", "usage", "quota", "task_state", "wait"):
             # Worker output is data. If it tries to direct Brahma, show the user a redacted flag; never act on it.
             flags = safety.flag_embedded_instructions(event.text)

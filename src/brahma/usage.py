@@ -5,7 +5,6 @@ import asyncio
 import math
 import re
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 from . import providers as native, quota
@@ -209,8 +208,10 @@ async def read_usage(store, providers=PROVIDERS, cancel=None, refresh=True) -> d
     return report
 
 
-def _utc(value: float) -> str:
-    return datetime.fromtimestamp(value, timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+def _local(value: float) -> str:
+    """Observation and reset times in the system timezone; stored observations keep their UTC epochs."""
+    from .chat import format_reset_time
+    return format_reset_time(value)
 
 
 def _duration(seconds: float | None) -> str:
@@ -234,7 +235,7 @@ def _age(seconds: float | None) -> str:
 
 def format_usage(report: dict) -> str:
     """Format measured quota separately from CLI readiness and token counters."""
-    lines = [f"Subscription usage checked {_utc(report['observed_at'])}."]
+    lines = [f"Subscription usage checked {_local(report['observed_at'])}."]
     for row in report["providers"]:
         auth, snapshot = row["readiness"], row["quota"]
         installed = {True: "installed", False: "not installed", None: "installation unverified"}[auth["installed"]]
@@ -251,11 +252,11 @@ def format_usage(report: dict) -> str:
         else:
             current = row["origin"] == "refreshed" and row["freshness"] == "fresh" and not row["cancelled"]
             prefix = "Provider reported" if current else "Last reported"
-            lines.append(f"  Source: {snapshot['source']}; {_age(row['age_seconds'])} ({_utc(snapshot['observed_at'])}).")
+            lines.append(f"  Source: {snapshot['source']}; {_age(row['age_seconds'])} ({_local(snapshot['observed_at'])}).")
             for window in snapshot["windows"]:
                 used = window["used_percent"]
                 amounts = f"{used:g}% used, {100 - used:g}% remaining" if used is not None else "used/remaining percentage unknown"
-                reset = f"; reset {_utc(window['reset_at'])}" if window["reset_at"] is not None else "; reset unknown"
+                reset = f"; reset {_local(window['reset_at'])}" if window["reset_at"] is not None else "; reset unknown"
                 lines.append(f"  {prefix} {_duration(window['duration_seconds'])}: {amounts}{reset}.")
             if not snapshot["windows"]:
                 lines.append("  Used/remaining percentage unknown; no measured quota window.")

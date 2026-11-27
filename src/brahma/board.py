@@ -71,9 +71,10 @@ def _clean(text: object, limit: int = 160) -> str:
 
 
 def _when(epoch) -> str:
-    if not isinstance(epoch, (int, float)):
-        return "reset unknown"
-    return "resets " + time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime(epoch))
+    """A provider reset in the system timezone (stored values stay UTC epochs or ISO times)."""
+    from .chat import format_reset_time
+    shown = format_reset_time(epoch)
+    return "reset unknown" if shown == "unknown" else "resets " + shown
 
 
 def capacity(store, events: list[dict]) -> dict:

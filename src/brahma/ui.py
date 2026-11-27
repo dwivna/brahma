@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import deque
+from dataclasses import replace
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 
@@ -10,11 +12,12 @@ from textual.app import App, ComposeResult
 from textual.containers import Horizontal
 from textual.widgets import Button, Footer, Header, Input, RichLog, Static
 
+from .chat import ChatMessage, ChatRenderer, _clean, command_display
 from .config import Settings, run_settings_line, state_home
 from .gittools import repository
 from .models import Event, Plan, Task
 from .safety import redact
-from .session import CONTROL, Session
+from .session import Session, displayable
 from .store import Store
 from . import toolchain
 from .usage import format_usage, read_usage, usage_request
@@ -36,11 +39,28 @@ No automatic merges, releases or paid API fallback. Approved queues can continue
 Configure explicit test commands in brahma.toml. Without them a task stays needs_checks."""
 
 
+SPEAKER_COLOURS = {"Brahma": "#efcc87", "Codex": "#8ec9ee", "Claude": "#e6b6a0", "You": "#a8dcaa"}
+_STAMP_COLOUR = "#8da7bd"
+
+
+def chat_text(message: ChatMessage, *, field_rows: bool = False) -> Text:
+    """One timeline entry, coloured by its speaker. The text is redacted and stripped of terminal controls here, at the
+    final rendering boundary, whatever the renderer already did."""
+    colour = SPEAKER_COLOURS.get(message.speaker, SPEAKER_COLOURS["Brahma"])
+    who = f"{message.speaker} → {message.addressee}" if message.addressee else message.speaker
+    parts = [(f"── {message.date} ──\n", _STAMP_COLOUR)] if message.date else []
+    cleaned = _clean(message.text)
+    safe_text = "\n".join(redact(line) for line in cleaned.split("\n")) if field_rows else redact(cleaned)
+    parts += [(message.time + "  ", _STAMP_COLOUR), (who + ": ", "bold " + colour),
+              (safe_text, colour)]
+    return Text.assemble(*parts)
+
+
 class ConversationLog(RichLog):
     def on_resize(self, event):
         super().on_resize(event)
-        # Pane resize is delivered after its own layout, including the stacked layout.
-        self.call_after_refresh(self.app.redraw_log, self.id)
+        # Resize is delivered after the log's own layout, so the timeline reflows at its new width.
+        self.call_after_refresh(self.app.redraw_log)
 
 
 class BrahmaApp(App):
@@ -54,12 +74,9 @@ class BrahmaApp(App):
     #board { height: auto; max-height: 9; margin: 0 1; padding: 0 1; color: #b9d0e4; }
     #size-notice { display: none; height: 1fr; padding: 1; color: #efcc87; }
     Screen.too-small #size-notice { display: block; }
-    Screen.too-small #manager, Screen.too-small #workers, Screen.too-small #controls { display: none; }
-    #manager { height: 2fr; border: round #cda766; border-title-color: #f0d9a0; margin: 0 1; padding: 0 1; }
-    #workers { height: 2fr; margin: 0 1; }
-    #workers.narrow { layout: vertical; }
-    #codex { width: 1fr; height: 1fr; border: round #529aca; border-title-color: #89c9f3; padding: 0 1; }
-    #claude { width: 1fr; height: 1fr; border: round #a77e6c; border-title-color: #e9bba7; padding: 0 1; }
+    Screen.too-small #chat, Screen.too-small #controls { display: none; }
+    #chat { height: 1fr; border: round #cda766; border-title-color: #f0d9a0; margin: 0 1; padding: 0 1; }
+    #chat.narrow { margin: 0; padding: 0; }
     #controls { height: 3; margin: 0 1; }
     #prompt { width: 1fr; border: round #435d75; }
     Button { min-width: 10; margin-left: 1; }
@@ -83,7 +100,9 @@ class BrahmaApp(App):
         self.usage_job: asyncio.Task | None = None
         self.usage_cancel = asyncio.Event()
         self._seen_events = 0
-        self._pane_entries = {key: deque(maxlen=200) for key in ("manager", "codex", "claude")}
+        # One shared timeline: every speaker (You, Brahma, Codex, Claude) in the order the messages happened.
+        self._entries = deque(maxlen=600)
+        self._chat = ChatRenderer()
 
     def compose(self) -> ComposeResult:
         yield Header()
@@ -91,10 +110,7 @@ class BrahmaApp(App):
         yield Static("", id="board", markup=False)
         yield Static("Terminal too small. Resize to at least 80×24. Escape stops; Ctrl+Q quits.",
                      id="size-notice", markup=False)
-        yield ConversationLog(id="manager", min_width=1, wrap=True, markup=False, highlight=False, max_lines=1200)
-        with Horizontal(id="workers"):
-            yield ConversationLog(id="codex", min_width=1, wrap=True, markup=False, highlight=False, max_lines=800)
-            yield ConversationLog(id="claude", min_width=1, wrap=True, markup=False, highlight=False, max_lines=800)
+        yield ConversationLog(id="chat", min_width=1, wrap=True, markup=False, highlight=False, max_lines=3000)
         with Horizontal(id="controls"):
             yield Input(placeholder="Describe your task, or /help", id="prompt")
             yield Button("Approve", id="approve", variant="primary", disabled=True)
@@ -104,9 +120,7 @@ class BrahmaApp(App):
         yield Footer()
 
     def on_mount(self):
-        for key, title in (("manager", "A · BRAHMA — shared conversation"),
-                           ("codex", "A1 · CODEX"), ("claude", "A2 · CLAUDE")):
-            self.query_one("#" + key, RichLog).border_title = title
+        self.query_one("#chat", RichLog).border_title = "BRAHMA — shared conversation · You · Brahma · Codex · Claude"
         try:
             if self.resume_key:
                 saved = self.store.session(self.resume_key)
@@ -129,19 +143,20 @@ class BrahmaApp(App):
         self.query_one("#prompt", Input).focus()
 
     def on_resize(self, event):
-        matches = self.query("#workers")
+        matches = self.query("#chat")
         if len(matches):
             matches.first().set_class(event.size.width < 85, "narrow")
             self.screen.set_class(event.size.width < 80 or event.size.height < 24, "too-small")
             self.refresh_status()
 
-    def redraw_log(self, target: str):
-        log = self.query_one("#" + target, RichLog)
+    def redraw_log(self):
+        log = self.query_one("#chat", RichLog)
         log.clear()
-        for entry in self._pane_entries[target]:
+        for entry in self._entries:
             log.write(entry)
 
-    def write(self, event: Event, *, count_usage: bool = True):
+    def write(self, event: Event, *, count_usage: bool = True, created: str | None = None):
+        """Show one event in the shared timeline. `created` is the stored UTC time; local messages are shown at now."""
         if count_usage and event.kind == "usage":
             self.have_usage = True
             self.inputs += int(event.usage.get("input_tokens", 0) or 0)
@@ -151,12 +166,17 @@ class BrahmaApp(App):
                 or (event.role == "planner" and event.kind == "message")):
             self.refresh_status()
             return
-        target = event.provider if event.provider in ("codex", "claude") else "manager"
-        text = redact(CONTROL.sub("", event.text))     # the final rendering boundary: nothing reaches the screen unredacted
-        color = "#efcc87" if target == "manager" else "#8ec9ee" if target == "codex" else "#e6b6a0"
-        rendered = Text(f"{event.role} · {text}", style=color)
-        self._pane_entries[target].append(rendered)
-        self.query_one("#" + target, RichLog).write(rendered)
+        message = self._chat.render(event, created or datetime.now(timezone.utc))
+        if message is None:                 # repeated quota states and other bookkeeping stay out of the chat
+            self.refresh_status()
+            return
+        if event.kind == "plan_display":
+            # The plan and the approval contract are shown exactly as composed (already displayable and redacted);
+            # the chat's JSON and time rewriting must never alter what a person approves.
+            message = replace(message, text=event.text)
+        rendered = chat_text(message, field_rows=event.kind in {"work_report", "plan_display"})
+        self._entries.append(rendered)
+        self.query_one("#chat", RichLog).write(rendered)
         self.refresh_status()
 
     async def show_usage(self, names: tuple[str, ...]):
@@ -190,9 +210,9 @@ class BrahmaApp(App):
     def drain_session_events(self):
         # Local callbacks and scheduler polling share one ordered cursor. A callback
         # must render pending background records before advancing past its own event.
-        events = self.store.events(self.session.key)
+        events = self.store.events_since(self.session.key, 0)
         for row in events[self._seen_events:]:
-            self.write(Event(row["provider"], row["role"], row["kind"], row["text"], row["usage"]))
+            self.write(Event(row["provider"], row["role"], row["kind"], row["text"], row["usage"]), created=row["created"])
         self._seen_events = len(events)
         self.refresh_status()
 
@@ -236,42 +256,64 @@ class BrahmaApp(App):
         selected = Session(self.store, root, self.on_session_event, key)
         # Validate first, then replace the displayed conversation and its counters.
         self.session = selected
-        self._seen_events = len(self.store.events(selected.key))
-        for entries in self._pane_entries.values():
-            entries.clear()
+        events = self.store.events_since(selected.key, 0)
+        self._seen_events = len(events)
+        self._entries.clear()
+        self._chat = ChatRenderer()          # day headings and repeated-quota tracking start again with the conversation
         for log in self.query(RichLog):
             log.clear()
         self.inputs = self.outputs = 0
         self.have_usage = False
         self.demo_plan = None
-        self.write(Event(text=f"Selected {root}. Session {self.session.key}. Model routing is configurable in brahma.toml."))
         if key:
-            events = self.store.events(key)
             for event in events:
                 if event["kind"] == "usage":
                     self.have_usage = True
                     self.inputs += int(event["usage"].get("input_tokens", 0) or 0)
                     self.outputs += int(event["usage"].get("output_tokens", 0) or 0)
+            # Stored history first, at its stored times, so the timeline stays in time order.
             for event in events[-100:]:
                 self.write(Event(event["provider"], event["role"], event["kind"], event["text"], event["usage"]),
-                           count_usage=False)
-            if self.session.plan:
-                self.show_plan(self.session.plan)
+                           count_usage=False, created=event["created"])
+        self.write(Event(text=f"Selected {root}. Session {self.session.key}. Model routing is configurable in brahma.toml."))
+        if key and self.session.plan:
+            self.show_plan(self.session.plan)
         self.refresh_status()
 
     def inspect(self, value: str):
         if value == "/help":
             self.write(Event(text=HELP))
+        elif not self.session:
+            self.write(Event(text="Status: idle. Select a repository with /repo PATH."))
         else:
-            self.write(Event(text=json.dumps(self.store.session(self.session.key) if self.session else {"status": "idle"})))
+            # Readable status for the chat (the timeline never shows raw JSON); `brahma --json status` stays the
+            # machine-readable view.
+            from .cli import stored_report
+            saved = self.store.session(self.session.key)
+            lines = [f"Session {self.session.key}: status {saved['status']}"
+                     + (" · paused" if saved["paused"] else "") + (" · stopped" if saved["stopped"] else ""),
+                     f"Repository: {saved['repo']}", f"Worktree: {saved['worktree'] or 'not created yet'}"]
+            report = stored_report(self.store, self.session.key)
+            if report:
+                lines.append("Latest work report:")
+                self.write(Event(text="\n".join(lines)))
+                self.write(Event(kind="work_report", text=json.dumps(report)))
+                return
+            else:
+                lines.append("Latest work report: none recorded yet.")
+            self.write(Event(text="\n".join(lines)))
 
     def show_plan(self, plan: Plan):
-        lines = [plan.summary]
+        def field(value):
+            return redact(displayable(_clean(value)))
+
+        lines = [field(plan.summary)]
         for n, task in enumerate(plan.tasks, 1):
-            lines.extend((f"{n}. {task.title} [{task.provider}/{task.complexity}]",
-                          "   Files: " + ", ".join(task.files), "   Acceptance: " + "; ".join(task.acceptance)))
+            lines.extend((f"{n}. {field(task.title)} [{field(task.provider)}/{field(task.complexity)}]",
+                          "   Files: " + ", ".join(map(field, task.files)),
+                          "   Acceptance: " + "; ".join(map(field, task.acceptance))))
         if plan.questions:
-            lines.extend(["Decision needed:", *plan.questions])
+            lines.extend(["Decision needed:", *map(field, plan.questions)])
         else:
             if self.session:
                 saved = self.store.session(self.session.key)
@@ -294,7 +336,7 @@ class BrahmaApp(App):
                         lines.append("Cannot be approved now: " + str(error))
             lines.append("/approve locks this complete contract and permits queued resumption. /stop cancels restarts.")
         if self.session:
-            lines.append("Approved checks: " + ("; ".join(" ".join(c) for c in (plan.checks or self.session.settings.checks)) or
+            lines.append("Approved checks: " + ("; ".join(command_display(c) for c in (plan.checks or self.session.settings.checks)) or
                         "none configured — outcome cannot be marked ready"))
         self.write(Event(kind="plan_display", text="\n".join(lines)))
 

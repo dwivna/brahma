@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import fnmatch
 import hashlib
+import json
 import os
 import re
 import stat
@@ -708,6 +709,22 @@ async def _end_group(process, grace: float = 1.0) -> None:
         await process.wait()
 
 
+CHECK_OUTPUT_LIMIT = 16000
+_CHECK_TRUNCATED = "[earlier check output omitted]\n"
+
+
+def check_record(command, returncode: int, output: str, limit: int = CHECK_OUTPUT_LIMIT) -> str:
+    """The persisted text of a completed check: the coordinator's own result line first (the approved command and the
+    exit status Brahma observed from the process), then as much of the captured output's tail as fits in `limit`.
+    Only the captured output is shortened; the result line is never dropped, and nothing in the output can replace it."""
+    header = f"{' '.join(command)} => exit {returncode}\n"
+    room = limit - len(header)
+    if len(output) <= room:
+        return header + output
+    room -= len(_CHECK_TRUNCATED)
+    return header + _CHECK_TRUNCATED + (output[-room:] if room > 0 else "")
+
+
 async def run_checks(worktree, checks, cancel, timeout, emit, results=None, bound=None):
     """Run approved checks. If `results` is a list, one (argv, status, exit_code) per command is appended as the
     coordinator observed it (status passed|failed|not_run), for handoff packets."""
@@ -720,6 +737,7 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
     for command in commands:
         if cancel.is_set() or time.monotonic() >= deadline:
             return False, "Checks cancelled or time budget exhausted"
+        emit(Event(kind="check_status", text=json.dumps({"argv": list(command), "phase": "start"})))
         emit(Event(kind="check", text="Running approved check: " + " ".join(command)))
         environment = check_env()
         if command[0] == "git" and command is commands[0]:
@@ -743,8 +761,8 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
         async def drain():
             while chunk := await process.stdout.read(8192):
                 output.extend(chunk)
-                if len(output) > 16000:
-                    del output[:-16000]
+                if len(output) > CHECK_OUTPUT_LIMIT:
+                    del output[:-CHECK_OUTPUT_LIMIT]
             await process.wait()
         running = asyncio.create_task(drain())
         stopped = asyncio.create_task(cancel.wait())
@@ -757,9 +775,14 @@ async def run_checks(worktree, checks, cancel, timeout, emit, results=None, boun
                 await _stop(process)
                 await running
                 return False, "Checks cancelled or timed out"
-            summary = f"{' '.join(command)} => exit {process.returncode}\n" + output.decode(errors="replace")
+            captured = output.decode(errors="replace")
+            summary = f"{' '.join(command)} => exit {process.returncode}\n" + captured
             summaries.append(summary)
-            emit(Event(kind="check", text=summary[-16000:]))
+            # The result line comes from the coordinator (approved command, observed exit status) and always leads the
+            # record; only the captured output is cut to the retention limit.
+            emit(Event(kind="check_status", text=json.dumps({"argv": list(command), "phase": "complete",
+                                                            "exit_code": process.returncode})))
+            emit(Event(kind="check", text=check_record(command, process.returncode, captured)))
             if results is not None:
                 results.append((tuple(command), "failed" if process.returncode else "passed", process.returncode))
             if process.returncode:

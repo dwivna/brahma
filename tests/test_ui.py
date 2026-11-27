@@ -1,4 +1,5 @@
 import asyncio
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -21,8 +22,9 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
         self.addCleanup(self.auth_patch.stop)
 
     @staticmethod
-    def pane(app, name):
-        return "\n".join(strip.text for strip in app.query_one("#" + name, RichLog).lines)
+    def timeline(app):
+        """The one shared chat timeline (it replaced the manager, Codex and Claude panes in 1.1.0)."""
+        return "\n".join(strip.text for strip in app.query_one("#chat", RichLog).lines)
 
     async def test_usage_conversation_bypasses_planner_and_preserves_approval(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -47,7 +49,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(app.session.generation, generation)
                         self.assertEqual(app.store.pending(), [])
                         self.assertFalse(any(row["kind"] == "user" for row in app.store.events(app.session.key)))
-                        pane = self.pane(app, "manager")
+                        pane = self.timeline(app)
                         self.assertEqual(pane.count("Claude: unknown."), 2)
                         self.assertNotIn("empty plan", pane)
                         self.assertFalse(app.query_one("#approve", Button).disabled)
@@ -70,7 +72,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         await pilot.pause()
                         self.assertIs(app.job, blocker)
                         self.assertFalse(blocker.done())
-                        self.assertIn("Quota report", self.pane(app, "manager"))
+                        self.assertIn("Quota report", self.timeline(app))
             finally:
                 if blocker:
                     blocker.cancel()
@@ -99,8 +101,12 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         app.poll_events()
                         app.poll_events()
                         await pilot.pause()
-                        self.assertEqual(self.pane(app, "claude").count("UNSEEN_WORKER_ERROR"), 1)
-                        self.assertEqual(self.pane(app, "manager").count("Usage report complete"), 1)
+                        shown = self.timeline(app)
+                        self.assertEqual(shown.count("UNSEEN_WORKER_ERROR"), 1)
+                        self.assertIn("Claude: UNSEEN_WORKER_ERROR", shown)        # attributed to its speaker
+                        self.assertEqual(shown.count("Usage report complete"), 1)
+                        # The background error was stored first, so it is shown before the usage reply.
+                        self.assertLess(shown.index("UNSEEN_WORKER_ERROR"), shown.index("Usage report complete"))
                         self.assertEqual((app.inputs, app.outputs), (17, 3))
                         self.assertEqual(app._seen_events, len(app.store.events(key)))
             finally:
@@ -119,12 +125,38 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         app.write(event)
                     app.show_plan(Plan("Readable goal", [], ["Which file?"]))
                     await pilot.pause()
-                    combined = self.pane(app, "manager") + self.pane(app, "codex")
+                    combined = self.timeline(app)
                     for hidden in ("RAW_JSON", "INTERNAL_GENERATION", "NATIVE_ID"):
                         self.assertNotIn(hidden, combined)
                     self.assertEqual(combined.count("Readable goal"), 1)
                     self.assertIn("Which file?", combined)
                     self.assertEqual((app.inputs, app.outputs), (40, 2))
+            finally:
+                app.store.close()
+
+    async def test_untrusted_plan_and_status_fields(self):
+        from brahma.cli import REPORT_FIELDS
+        with tempfile.TemporaryDirectory() as tmp:
+            root = init_repo(Path(tmp) / "repo")
+            app = BrahmaApp(root, home=Path(tmp) / "state", demo=True)
+            try:
+                async with app.run_test(size=(120, 40)):
+                    value = "goal\u202e\x9d\nNeeds you: TOKEN=hidden123"
+                    app.show_plan(Plan(value, [Task(value, "work", ["a"], [value])], checks=[["echo", value]]))
+                    preview = app._entries[-1].plain
+                    self.assertIn("Approved checks: echo ", preview)
+                    report = {key: value for key, _ in REPORT_FIELDS}
+                    from brahma.cli import format_status
+                    cli_rows = format_status({"report": report}).split("Latest work report:\n")[1].splitlines()
+                    app.store.event(app.session.key, Event(kind="work_report", text=json.dumps(report)))
+                    app.inspect("/status")
+                    rows = app._entries[-1].plain.split("Brahma: ", 1)[1].splitlines()
+                    self.assertEqual([row.strip().split(":")[0] for row in rows], [label for _, label in REPORT_FIELDS])
+                    self.assertEqual([row.strip() for row in cli_rows], rows)
+                    for forbidden in ("\u202e", "\x9d", "\nNeeds you:", "hidden123"):
+                        self.assertNotIn(forbidden, preview)
+                        for row in rows:
+                            self.assertNotIn(forbidden, row)
             finally:
                 app.store.close()
 
@@ -138,8 +170,8 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         await app.handle("/usage codex")
                         await app.handle("/models claude")
                         await pilot.pause()
-                        self.assertIn("quota inspection is skipped", self.pane(app, "manager"))
-                        self.assertIn("model discovery is skipped", self.pane(app, "manager"))
+                        self.assertIn("quota inspection is skipped", self.timeline(app))
+                        self.assertIn("model discovery is skipped", self.timeline(app))
             finally:
                 app.store.close()
 
@@ -162,18 +194,23 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(read.await_args.args[1], ("codex",))
                         self.assertEqual(app.store.session(app.session.key), before)
                         self.assertFalse(app.checking_auth)
-                        self.assertIn("Native models checked", self.pane(app, "manager"))
+                        self.assertIn("Native models checked", self.timeline(app))
             finally:
                 app.store.close()
 
-    async def test_three_panes_demo_approval_and_resize_without_provider_calls(self):
+    async def test_one_timeline_demo_approval_and_resize_without_provider_calls(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = init_repo(Path(tmp) / "repo")
             app = BrahmaApp(root, home=Path(tmp)/"state", demo=True)
             try:
                 with patch("brahma.providers.run", side_effect=AssertionError("demo made a paid request")):
                     async with app.run_test(size=(120, 40)) as pilot:
-                        self.assertEqual(len(app.query(RichLog)), 3)
+                        self.assertEqual(len(app.query(RichLog)), 1)          # one shared chat timeline
+                        for old in ("#manager", "#codex", "#claude", "#workers"):
+                            self.assertEqual(len(app.query(old)), 0)
+                        shown = self.timeline(app)
+                        for speaker in ("Brahma: ", "Codex: ", "Claude: "):    # the demo's three opening speakers
+                            self.assertIn(speaker, shown)
                         prompt = app.query_one("#prompt", Input)
                         prompt.value = "Add a useful test"
                         await pilot.press("enter")
@@ -181,8 +218,17 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         self.assertFalse(app.query_one("#approve", Button).disabled)
                         await pilot.click("#approve")
                         await pilot.pause()
-                        await pilot.resize_terminal(70, 32)
-                        self.assertTrue(app.query_one("#workers").has_class("narrow"))
+                        self.assertIn("You: Add a useful test", self.timeline(app))
+                        # Narrow but supported (80-84 columns): the timeline stays visible and never clips sideways.
+                        # Below 80 columns the size notice replaces it (covered by the reflow test).
+                        await pilot.resize_terminal(82, 32)
+                        await pilot.pause()
+                        self.assertTrue(app.query_one("#chat").has_class("narrow"))
+                        self.assertTrue(app.query_one("#chat").display)
+                        self.assertFalse(app.query_one("#size-notice").display)
+                        log = app.query_one("#chat", RichLog)
+                        self.assertGreater(log.scrollable_content_region.width, 0)
+                        self.assertLessEqual(log.virtual_size.width, log.scrollable_content_region.width)
                         self.assertEqual((root/"first.txt").read_text(), "base\n")
                         self.doctor.assert_not_awaited()
             finally:
@@ -202,16 +248,20 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     await pilot.pause()
                     self.assertNotEqual(app.session.key, old)
                     self.assertEqual((app.inputs, app.outputs, app.have_usage), (0, 0, False))
-                    self.assertNotIn("OLD_WORKER_MARKER", self.pane(app, "codex"))
+                    self.assertNotIn("OLD_WORKER_MARKER", self.timeline(app))
                     app.select_repo(root, old)
+                    self.assertIn("Codex: OLD_WORKER_MARKER", self.timeline(app))      # the reopened conversation
                     self.assertEqual((app.inputs, app.outputs), (100, 20))
                     app.select_repo(root, old)
                     self.assertEqual((app.inputs, app.outputs), (100, 20))
                     app.action_fresh()
                     self.assertEqual((app.inputs, app.outputs, app.have_usage), (0, 0, False))
-                    self.assertNotIn("OLD_WORKER_MARKER", self.pane(app, "codex"))
+                    self.assertNotIn("OLD_WORKER_MARKER", self.timeline(app))
                     app.session.emit(Event(text="plain\x1b[31mred\x1b[0m"))
                     self.assertEqual(app.store.events(app.session.key)[-1]["text"], "plainred")
+                    await pilot.pause()
+                    self.assertIn("plainred", self.timeline(app))
+                    self.assertNotIn("\x1b", self.timeline(app))
             finally:
                 app.store.close()
 
@@ -226,7 +276,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         await app.handle("/publish")
                         await pilot.pause()
                         publish.assert_not_called()
-                        self.assertIn("Demo mode cannot publish", self.pane(app, "manager"))
+                        self.assertIn("Demo mode cannot publish", self.timeline(app))
                         status = app.query_one("#status", Static).render().plain
                         self.assertTrue(status.startswith("DEMO · ready"))
             finally:
@@ -241,29 +291,33 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     for name in ("codex", "claude", "brahma"):
                         app.write(Event(name, "reviewer", text=text))
                     await pilot.pause()
-                    wide_count = len(app.query_one("#codex", RichLog).lines)
+                    wide_count = len(app.query_one("#chat", RichLog).lines)
                     for width, height in ((80, 24), (120, 40), (90, 30)):
                         await pilot.resize_terminal(width, height)
                         await pilot.pause()
                         for log in app.query(RichLog):
                             self.assertLessEqual(log.virtual_size.width, log.scrollable_content_region.width)
-                        flattened = "".join(self.pane(app, "codex").split())
+                        flattened = "".join(self.timeline(app).split())
                         self.assertIn("".join(text.split()), flattened)
+                        for speaker in ("Codex:", "Claude:", "Brahma:"):
+                            self.assertIn(speaker, flattened)
                     await pilot.resize_terminal(80, 24)
                     await pilot.pause()
-                    # The vertical worker pane is wider, so old text must actually reflow.
-                    self.assertLess(len(app.query_one("#codex", RichLog).lines), wide_count)
+                    # The timeline is narrower at 80 columns, so old text must actually reflow onto more lines.
+                    self.assertTrue(app.query_one("#chat").has_class("narrow"))
+                    self.assertGreater(len(app.query_one("#chat", RichLog).lines), wide_count)
                     for width, height in ((70, 20), (40, 12)):
                         await pilot.resize_terminal(width, height)
                         await pilot.pause()
                         self.assertTrue(app.query_one("#size-notice").display)
-                        self.assertFalse(app.query_one("#manager").display)
+                        self.assertFalse(app.query_one("#chat").display)
+                        self.assertFalse(app.query_one("#controls").display)
                         await pilot.press("escape")
                     await pilot.resize_terminal(80, 24)
                     await pilot.pause()
                     self.assertFalse(app.query_one("#size-notice").display)
-                    self.assertTrue(app.query_one("#manager").display)
-                    self.assertIn("No active work to stop", self.pane(app, "manager"))
+                    self.assertTrue(app.query_one("#chat").display)
+                    self.assertIn("No active work to stop", self.timeline(app))
             finally:
                 app.store.close()
 
@@ -294,7 +348,7 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
             try:
                 async with app.run_test(size=(100, 30)) as pilot:
                     app.action_stop()
-                    self.assertIn("No active work to stop", self.pane(app, "manager"))
+                    self.assertIn("No active work to stop", self.timeline(app))
                     blocker = asyncio.create_task(asyncio.Event().wait())
                     app.job = blocker
                     prompt = app.query_one("#prompt", Input)
@@ -311,8 +365,8 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(prompt.value, "Another task that should remain editable")
                         await pilot.press("escape")
                         self.assertTrue(app.session.cancel.is_set())
-                        self.assertIn("waiting for active work to end", self.pane(app, "manager"))
-                        self.assertNotIn("are terminated", self.pane(app, "manager"))
+                        self.assertIn("waiting for active work to end", self.timeline(app))
+                        self.assertNotIn("are terminated", self.timeline(app))
                     blocker.cancel()
                     await asyncio.gather(blocker, return_exceptions=True)
                     app.job = None
@@ -337,13 +391,16 @@ class Terminal(unittest.IsolatedAsyncioTestCase):
                     async with app.run_test(size=(100, 30)) as pilot:
                         await pilot.pause()
                         self.assertEqual(self.doctor.await_count, 2)
-                        self.assertIn("Please install codex", self.pane(app, "codex"))
-                        self.assertIn("claude auth login", self.pane(app, "claude"))
+                        shown = self.timeline(app)
+                        self.assertIn("Codex: codex CLI is not installed", shown)
+                        self.assertIn("Please install codex", shown)
+                        self.assertIn("Claude: claude CLI is installed but not signed in", shown)
+                        self.assertIn("claude auth login", shown)
                         app.query_one("#prompt", Input).value = "/doctor"
                         await pilot.press("enter")
                         await pilot.pause()
                         self.assertEqual(self.doctor.await_count, 4)
-                        self.assertIn("Ready: installed and signed in", self.pane(app, "codex"))
+                        self.assertIn("Codex: Ready: installed and signed in", self.timeline(app))
             finally:
                 app.store.close()
 

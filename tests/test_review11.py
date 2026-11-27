@@ -121,13 +121,22 @@ class Finding15EveryInvocationCounted(unittest.TestCase):
 
 class Finding17TerminalRedaction(unittest.TestCase):
     def test_text_written_to_the_terminal_ui_is_redacted(self):
-        from brahma.ui import BrahmaApp
+        from brahma.chat import ChatMessage, ChatRenderer
+        from brahma.ui import BrahmaApp, chat_text
         shown = []
         log = SimpleNamespace(write=shown.append)
-        app = SimpleNamespace(_pane_entries={"manager": []}, query_one=lambda *a: log, refresh_status=lambda: None)
+        app = SimpleNamespace(_entries=[], _chat=ChatRenderer(), query_one=lambda *a: log, refresh_status=lambda: None)
         BrahmaApp.write(app, Event(kind="information", text="skill description with " + SECRET))
-        self.assertNotIn(SECRET, shown[0].plain)
-        self.assertIn(safety.REDACTED, shown[0].plain)
+        BrahmaApp.write(app, Event("codex", "builder", "progress", "progress with " + SECRET))
+        BrahmaApp.write(app, Event(kind="plan_display", text="plan with " + SECRET))      # shown verbatim otherwise
+        self.assertEqual(len(shown), 3)
+        for rendered in shown:
+            self.assertNotIn(SECRET, rendered.plain)
+            self.assertIn(safety.REDACTED, rendered.plain)
+        # The timeline's own boundary redacts and strips controls, even for a message no renderer cleaned.
+        raw = chat_text(ChatMessage("14:38 IST", "Codex", "leak " + SECRET + " \x1b[31mred"))
+        self.assertNotIn(SECRET, raw.plain)
+        self.assertNotIn("\x1b", raw.plain)
 
 
 class Finding18VerifiedAfterEveryWorker(unittest.IsolatedAsyncioTestCase):
@@ -151,17 +160,22 @@ class Finding18VerifiedAfterEveryWorker(unittest.IsolatedAsyncioTestCase):
 
     async def test_an_edit_by_the_reviewer_is_caught_before_a_repair(self):
         calls = []
+        events = []
 
-        async def run(provider, prompt, cwd, role, *args, **kwargs):
+        async def run(provider, prompt, cwd, role, settings, emit, *args, **kwargs):
             calls.append(role)
+            if role == "reviewer":
+                emit(Event(provider, role, "message", PASS))
             text = json.dumps({"verdict": "changes_requested", "summary": "fix", "issues": ["x"]}) if role == "reviewer" else "built"
             return Result(provider, "ok", text)
         p = engine_patches(owned=patch.object(gittools, "ownership_changes", side_effect=[(True, "ok"), (True, "ok"), (False, "outside.txt")]))
         with p["context"], p["snapshot"], p["identity"], p["owned"], p["checks"], p["tree"], \
                 patch.object(engine, "_restore_note", return_value=""), patch.object(engine.providers, "run", side_effect=run):
             result = await engine.execute(Plan("G", [Task("T", "do", ["a"], ["ok"], "codex")]), Path("/repo"),
-                                          Settings(checks=[["true"]]), lambda e: None, asyncio.Event())
+                                          Settings(checks=[["true"]]), events.append, asyncio.Event())
         self.assertEqual(result.status, "blocked")
+        self.assertTrue(any(event.text == PASS for event in events))
+        self.assertFalse(any(event.kind == "review_result" for event in events))
         self.assertEqual(calls, ["builder", "reviewer"])  # no repair builder ran after the reviewer's edit
 
 
