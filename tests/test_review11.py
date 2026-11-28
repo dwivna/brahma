@@ -78,13 +78,28 @@ class Finding6ResumeChecksChangeFiles(unittest.IsolatedAsyncioTestCase):
     async def test_checks_that_change_reviewed_files_on_resume_accept_nothing(self):
         trees = iter([{"head": "h", "changes": {"a": "1"}}, {"head": "h", "changes": {"a": "2"}}])
         p = engine_patches(tree=patch.object(engine, "_tree", side_effect=lambda *a: next(trees)))
+        events = []
         with p["context"], p["snapshot"], p["identity"], p["owned"], p["checks"], p["tree"], \
                 patch.object(engine.providers, "run", AsyncMock()) as run:
-            result = await engine.execute(Plan("G", [Task("T", "do", ["a"], ["ok"], "codex")]), Path("/repo"),
-                                          Settings(checks=[["true"]]), lambda e: None, asyncio.Event(), completed_indices={1})
+            plan = Plan("G", [Task("T", "do", ["a"], ["ok"], "codex"), Task("U", "do", ["b"], ["ok"], "codex")])
+            result = await engine.execute(plan, Path("/repo"), Settings(checks=[["true"]]),
+                                          events.append, asyncio.Event(), completed_indices={1, 2})
         self.assertEqual(result.status, "incomplete")
         self.assertIn("changed files after they were reviewed (a)", result.text)
+        self.assertEqual([json.loads(e.text) for e in events if e.kind == "evidence_invalidated"],
+                         [{"indices": [1], "paths": ["a"]}])
         run.assert_not_awaited()
+
+    async def test_changed_head_invalidates_every_checked_task(self):
+        p = engine_patches(tree=patch.object(engine, "_tree", side_effect=[
+            {"head": "before", "changes": {}}, {"head": "after", "changes": {}}]))
+        events = []
+        with p["context"], p["snapshot"], p["identity"], p["owned"], p["checks"], p["tree"]:
+            plan = Plan("G", [Task("T", "do", ["a"], ["ok"]), Task("U", "do", ["b"], ["ok"])])
+            result = await engine.execute(plan, Path("/repo"), Settings(checks=[["true"]]),
+                                          events.append, asyncio.Event(), completed_indices={1, 2})
+        self.assertEqual(result.status, "incomplete")
+        self.assertEqual([json.loads(e.text)["indices"] for e in events if e.kind == "evidence_invalidated"], [[1, 2]])
 
     async def test_an_ownership_failure_on_resume_restores(self):
         p = engine_patches(owned=patch.object(gittools, "ownership_changes", return_value=(False, "outside.txt")))

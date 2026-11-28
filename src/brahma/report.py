@@ -5,7 +5,6 @@ import json
 import re
 from collections import Counter, defaultdict
 
-from .dispute import findings
 from .store import Store
 
 
@@ -22,13 +21,15 @@ def _action(key, state, reason, wait, control, signin):
 
     if state == "needs_decision":
         return f"Resolve the disputed review with brahma decide {key} --for reviewer|author."
-    if state in {"blocked", "cancelled", "waiting"}:
+    if state in {"blocked", "cancelled", "waiting", "interrupted"}:
         if control == "stop":
             return "Approve a new plan to restart the stopped work."
         if "kill switch" in reason.lower():
             return f"Release the kill switch, then run brahma resume {key}."
         if control == "pause" or "pause" in reason.lower() or state == "cancelled":
             return f"Run brahma resume {key} to continue."
+        if state == "interrupted":
+            return f"Review the checkpoint and continue with brahma run --session {key}."
     if state == "incomplete":
         return "Create and approve a new plan for the unfinished work."
     if state in {"waiting", "blocked"} and wait and wait.get("state") in {"waiting", "blocked"}:
@@ -57,6 +58,8 @@ def build_report(store: Store, key: str) -> dict[str, str]:
     checks = defaultdict(list)
     reviews = defaultdict(list)
     passed_reviews = set()
+    invalidated = set()
+    verification_changed = False
     index = 0
     wait = receipt = pending_check = signin = None
     typed_check = False
@@ -68,19 +71,30 @@ def build_report(store: Store, key: str) -> dict[str, str]:
         if kind == "review_result" and event["role"] == "manager":
             review = json.loads(text)
             i = review["index"]
-            counts = Counter(issue["severity"] for issue in findings(review))
+            counts = Counter(issue["severity"] if isinstance(issue, dict) else "medium"
+                             for issue in review["issues"])
             detail = ", ".join(f"{n} {level}" for level, n in counts.items()) or "no findings"
             reviews[i].append(f"{review['reviewer'].title()} {review['verdict']} ({detail}, model judgement).")
             if review["verdict"] == "pass":
                 passed_reviews.add(i)
             else:
                 passed_reviews.discard(i)
+        elif kind == "evidence_invalidated" and event["role"] == "manager":
+            affected = json.loads(text)["indices"]
+            invalidated.update(affected)
+            passed_reviews.difference_update(affected)
+            verification_changed = True
+        elif kind == "approved":
+            verification_changed = False
         elif kind == "dispute_overruled":
             reviews[index].append("Owner decision: " + text)
         elif kind == "task_state":
             row = json.loads(text)
             index = row["index"]
             states[index] = row
+            verification_changed = False
+            if row["state"] == "ready":
+                invalidated.discard(index)
             if row["state"] in {"building", "changes_requested"}:
                 passed_reviews.discard(index)
             summary = ""
@@ -126,7 +140,7 @@ def build_report(store: Store, key: str) -> dict[str, str]:
 
     row = states.get(index, {})
     state = summary.partition(":")[0] if summary else row.get("state", "pending")
-    ready = [i for i, item in states.items() if item["state"] == "ready"]
+    ready = [i for i, item in states.items() if item["state"] == "ready" and i not in invalidated]
 
     def label(i):
         return f"Task {i} {states[i]['title'] if i in states else tasks[i - 1]['title']}"
@@ -136,6 +150,8 @@ def build_report(store: Store, key: str) -> dict[str, str]:
     for i in scope:
         if i:
             evidence.append(f"Task {i}:")
+        if i in invalidated:
+            evidence.append("Previously recorded evidence invalidated. Checks outstanding.")
         evidence.append("; ".join(checks[i]) or "No checks were run on record.")
         if states.get(i, {}).get("state") == "needs_checks":
             evidence.append("No project checks configured.")
@@ -152,7 +168,7 @@ def build_report(store: Store, key: str) -> dict[str, str]:
                   else f"Uncommitted changes at {receipt['head']}.")
     if summary and receipt and summary.splitlines()[-1].startswith("Draft PR: "):
         publication = summary.splitlines()[-1]
-    remaining = next((i for i in range(1, len(tasks) + 1) if i not in ready), None)
+    remaining = min(invalidated) if invalidated else next((i for i in range(1, len(tasks) + 1) if i not in ready), None)
     position = f"{len(ready)} of {len(tasks)} tasks ready. "
     position += f"Run {state}." if summary else f"Task {index} {state}."
     if receipt:
@@ -161,8 +177,11 @@ def build_report(store: Store, key: str) -> dict[str, str]:
         if i not in ready and i not in passed_reviews:
             position += f" Independent review outstanding for {label(i)}."
     reason = row.get("summary", "")
-    if summary and state in {"blocked", "cancelled", "waiting"}:
+    if summary and state in {"blocked", "cancelled", "waiting", "interrupted"}:
         reason = summary.partition(":")[2].strip()
+    action = _action(key, state, reason, wait, control, signin)
+    if verification_changed and state == "incomplete":
+        action = f"Run brahma run --session {key} to check and review the affected tasks."
     return {
         "completed": f"{completed}. {commit}",
         "evidence": " ".join(evidence),
@@ -170,5 +189,5 @@ def build_report(store: Store, key: str) -> dict[str, str]:
                          and state not in REPORT_STATES and state != "needs_checks" else "None"),
         "next_work": label(remaining) if remaining else "None",
         "where_we_are": position + " " + (publication or "No publication recorded."),
-        "needs_you": _action(key, state, reason, wait, control, signin),
+        "needs_you": action,
     }

@@ -185,7 +185,7 @@ class ChatRenderer:
         elif kind in {"review", "review_verdict", "review_notes"} or (
                 kind == "message" and event.role == "reviewer" and "verdict" in row):
             speaker, addressee, text = self._review(speaker, row, kind)
-            if kind == "message" and row.get("verdict") == "pass":
+            if kind != "review_notes" and row.get("verdict") == "pass":
                 text = "Proposed verdict (unverified). " + text
         elif kind == "task_state":
             addressee, text = self._task_state(row)
@@ -251,8 +251,10 @@ class ChatRenderer:
 
     def _review(self, speaker: str, row: dict, kind: str) -> tuple[str, str | None, str]:
         builder = _NAMES.get(_field(row, "builder")) or self._builder or _OTHER_WORKER.get(speaker)
-        verdict = _field(row, "verdict", "pass" if kind == "review_notes" else "recorded").replace("_", " ")
         task = f" for {_task(row).lower()}" if "index" in row else ""
+        if kind == "review_notes":
+            return speaker, builder, f"Review notes{task}: {_findings(row)}"
+        verdict = _field(row, "verdict", "recorded").replace("_", " ")
         summary = _field(row, "summary")
         text = f"Review{task}: {verdict} with {_findings(row)}"
         return speaker, builder, text + (f" — {summary}" if summary else "")
@@ -345,6 +347,7 @@ _STRUCTURED_RULES = {
     "origin_baseline": _origin,
     "ready_receipt": lambda row: "Recorded the verified readiness receipt",
     "work_report": _report,
+    "evidence_invalidated": lambda row: "Reviewed files changed. The affected tasks need fresh checks and independent review.",
     "user_note": lambda row: f"Left a note for {_task({'index': row.get('task')}).lower()}: {_field(row, 'text')}",
     "dispute_decision": lambda row: f"Sided with the {_field(row, 'for', 'review participant')} on {_task(row).lower()}",
     "dispute_reply": _dispute_reply,

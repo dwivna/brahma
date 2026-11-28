@@ -379,7 +379,7 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
     its initial attempt, up to three repairs, checks and reviews.
     """
     from .gittools import ownership_changes, restore_violations, run_checks, snapshot_changes, git_identity
-    from . import toolchain
+    from . import ownership, toolchain
     started = time.monotonic()
     worktree = Path(worktree)
     # Ownership is measured against this Git identity (gitdir, branch, HEAD). A worker or a check that commits, switches branch,
@@ -867,6 +867,19 @@ async def _execute(plan: Plan, worktree: Path, settings: Settings, emit: Emit,
             changed = sorted(set(verified_tree["changes"]) ^ set(reviewed["changes"])
                              | {p for p in set(verified_tree["changes"]) & set(reviewed["changes"])
                                 if verified_tree["changes"][p] != reviewed["changes"][p]})
+            checked_tasks = range(1, len(validated.tasks) + 1)
+            affected = set()
+            for path in changed:
+                owners = {i for i, task in enumerate(validated.tasks, 1)
+                          if any(ownership.owns(pattern, path) for pattern in task.files)}
+                if not owners:
+                    affected = set(checked_tasks)
+                    break
+                affected.update(owners)
+            if not affected or verified_tree["head"] != reviewed["head"]:
+                affected = set(checked_tasks)
+            _emit(emit, "evidence_invalidated", json.dumps({"indices": sorted(affected), "paths": changed}))
+            completed = [validated.tasks[i - 1].title for i in checked_tasks if i not in affected]
             return result("incomplete", detail="The checks changed files after they were reviewed ("
                           + (", ".join(changed[:10]) or "the commit") + "); nothing was accepted. "
                           "Run again to check and review the affected tasks.")

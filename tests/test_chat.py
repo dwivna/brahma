@@ -90,7 +90,8 @@ class ChatTest(unittest.TestCase):
         message = self.render(structured("review_notes", index=2, notes=[note]))
         self.assertEqual(message.speaker, "Brahma")
         self.assertEqual(message.addressee, "Codex")
-        self.assertIn("pass with 1 finding: F2 (low) at src/y.py: Clearer name", message.text)
+        self.assertIn("Review notes for task 2: 1 finding: F2 (low) at src/y.py: Clearer name", message.text)
+        self.assertNotIn("pass", message.text)
 
     def test_legacy_assignment_and_review_use_routed_builder(self):
         self.render(Event(kind="routing", text=json.dumps(

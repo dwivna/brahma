@@ -80,6 +80,24 @@ class WorkReports(unittest.TestCase):
         self.assertIn("Codex changes_requested", evidence)
         self.assertNotIn("Codex pass", evidence)
 
+    def test_severity_counts_include_findings_after_the_dispute_limit(self):
+        self.state("reviewing")
+        self.record("review_result", {"index": 1, "reviewer": "codex", "verdict": "changes_requested",
+                                      "issues": ["legacy"] * 20 + [{"severity": "high", "text": "late"}]})
+        self.assertIn("20 medium, 1 high", self.report()["evidence"])
+
+    def test_invalidated_ready_evidence_requires_check_and_review(self):
+        self.state("ready")
+        self.state("ready", index=2)
+        self.record("evidence_invalidated", {"indices": [1], "paths": ["a"]})
+        self.record("summary", "incomplete: Reviewed files changed")
+        report = self.report()
+        self.assertNotIn("Task 1", report["completed"])
+        self.assertIn("Task 2 Second", report["completed"])
+        self.assertEqual(report["next_work"], "Task 1 First")
+        self.assertIn("Checks outstanding", report["evidence"])
+        self.assertIn("Independent review outstanding for Task 1 First", report["where_we_are"])
+
     def test_owner_actions(self):
         for state, reason, action in [
             ("needs_decision", "Disputed finding", "brahma decide " + self.key),
@@ -155,6 +173,43 @@ class WorkReports(unittest.TestCase):
 
 
 class ReportIntegration(unittest.IsolatedAsyncioTestCase):
+    async def test_stranded_commit_gets_a_blocked_report_when_display_fails(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+            with closing(store):
+                def display(event):
+                    if event.kind == "error":
+                        raise RuntimeError("display failed")
+
+                session.callback = display
+                head = "a" * 40
+                steps = [((True, "ok"), True), (None, None, (OSError("untrusted detail"), head, True))]
+                with patch("brahma.engine.execute", ready_result), \
+                        patch("brahma.session._finish_in_thread", side_effect=steps), \
+                        self.assertRaisesRegex(RuntimeError, "display failed"):
+                    await session.execute(scheduled=True)
+                self.assertEqual(store.session(session.key)["status"], "blocked")
+                final = latest_report(store, session.key)
+                self.assertIn("Run blocked", final["where_we_are"])
+                self.assertIn(head, final["completed"])
+                self.assertNotIn("untrusted detail", str(final))
+
+    async def test_interruption_replaces_an_earlier_report_and_propagates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store, session, _ = approved_job(tmp)
+            with closing(store):
+                async def interrupt(plan, worktree, settings, emit, *args, **kwargs):
+                    emit(Event(kind="task_state", text=json.dumps({"index": 1, "title": "task", "state": "waiting"})))
+                    raise RuntimeError("untrusted detail")
+
+                with patch("brahma.engine.execute", interrupt), self.assertRaisesRegex(RuntimeError, "untrusted detail"):
+                    await session.execute(scheduled=True)
+                self.assertEqual(store.session(session.key)["status"], "interrupted")
+                reports = [json.loads(e["text"]) for e in store.events(session.key) if e["kind"] == "work_report"]
+                self.assertEqual(len(reports), 2)
+                self.assertIn("Run interrupted", reports[-1]["where_we_are"])
+                self.assertNotIn("untrusted detail", str(reports[-1]))
+
     async def test_report_failures_preserve_ready_run(self):
         for failure in ("none", "build", "store"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as tmp:

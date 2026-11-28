@@ -153,7 +153,7 @@ class Session:
             self._record_outcome(json.loads(event.text))
         if event.kind == "check":
             self._record_check_failure(event.text)
-        if event.kind == "verification_spent":
+        if event.kind in {"verification_spent", "evidence_invalidated"}:
             event.text = json.dumps(dict(json.loads(event.text), generation=self.generation))
         if event.kind == "task_state":
             state = json.loads(event.text)
@@ -654,7 +654,12 @@ class Session:
         # Taken before any blocking step: a stop or pause recorded after this was made during the run.
         run_control = self.store.last_control(self.key)
         self.cancel.clear()
-        with self.lock():
+
+        def record_interruption():
+            _best_effort(lambda: self.store.set(self.key, status="interrupted"))
+            _best_effort(lambda: self.emit(Event(kind="summary", text="interrupted: Execution interrupted.")))
+
+        with self.lock(), contextlib.ExitStack() as startup:
             worktree = gittools.create_worktree(self.repo, self.store.home, self.key, contract["payload"]["base_revision"])
             if gittools.git(worktree, "rev-parse", "HEAD") != contract["payload"]["base_revision"]:
                 raise ValueError("Worktree base changed outside this approval; review a new plan")
@@ -683,6 +688,7 @@ class Session:
                                  "start a new session and approve its plan")
             self.settings._git_identity = identity
             self.store.set(self.key, worktree=str(worktree), status="running")
+            startup.callback(record_interruption)
             self.emit(Event(kind="approved", text="Approved contract " + contract["digest"] + " in branch brahma/" + self.key))
             # Only fully verified task checkpoints are skipped; interrupted work stays for re-review.
             completed = set()
@@ -695,6 +701,10 @@ class Session:
             # checkpoint of that task already starts from the charged budget, so only charges after it still apply.
             charges = verification_charges(self.store.events(self.key), self.generation)
             for event in self.store.events(self.key):
+                if event["kind"] == "evidence_invalidated" and event["provider"] == "brahma" and event["role"] == "manager":
+                    invalidation = json.loads(event["text"])
+                    if invalidation["generation"] == self.generation:
+                        completed.difference_update(invalidation["indices"])
                 if event["kind"] == "native_session" and current_index in progress and event["role"] in ("builder", "reviewer"):
                     progress[current_index][event["role"] + "_session"] = event["text"]
                 if event["kind"] == "task_state":
@@ -773,6 +783,7 @@ class Session:
                     self.cancel.set()
                     return {"state": "unavailable", "next_at": None, "reason": reason}
                 return await capacity(provider)
+            startup.pop_all()  # From here the handler also knows the receipt and finalization state.
             try:
                 result = await engine.execute(self.plan, worktree, self.settings, self.emit, self.cancel,
                                               completed_indices=completed, task_progress=progress, provider_gate=gate)
@@ -849,7 +860,7 @@ class Session:
                             receipt_stored = True       # /publish can find it, whatever the display does next
                             self.callback(Event(kind=event.kind, text=displayable(event.text)))   # cleaned to show
                         def stranded_text(failed):
-                            error, head, committed = failed
+                            _, head, committed = failed
                             branch = "brahma/" + self.key
                             if committed:
                                 where = f"The verified work was committed as {head} on {branch}"
@@ -857,7 +868,7 @@ class Session:
                                 where = f"The branch {branch} now points to the unverified commit {head}"
                             else:
                                 where = f"The current commit on {branch} could not be identified"
-                            return (f"{where}. The readiness receipt could not be made ({type(error).__name__}: {error}). "
+                            return (f"{where}. The readiness receipt could not be made. "
                                     "Nothing was published. Inspect the branch before starting a new plan.")
                         try:
                             made, receipt, failed = await _finish_in_thread(commit_and_verify)
@@ -985,8 +996,9 @@ class Session:
                     # Its commit is on the branch: a resumed run would refuse it as a moved base, so never re-queue it.
                     _best_effort(lambda: self.store.set(self.key, status="blocked"))
                     _best_effort(lambda: self.store.finish_job(self.key, "blocked"))
+                    _best_effort(lambda: self.emit(Event(kind="summary", text="blocked: Inspect the branch before starting a new plan.")))
                 else:
-                    _best_effort(lambda: self.store.set(self.key, status="interrupted"))
+                    record_interruption()
                 raise
             finally:
                 monitor.cancel()

@@ -28,6 +28,7 @@ every existing `--json` field, exit codes and the approval contract text are unc
   `brahma status` output shows the same report as six rows after the status object.
 
 **Changed**
+- Historical review notes carry no verdict. Reports count every stored finding, identify tasks needing fresh checks and review after resume verification, and record interrupted or stranded run outcomes.
 - **`brahma run` and `brahma plan` print chat lines to stderr** (local time, speaker, optional addressee, text) instead
   of `[provider/role] text` with raw JSON. Colour is used only when stderr is a terminal and `NO_COLOR` is not set.
 - **Times are shown in the system timezone.** `brahma usage`, `/usage`, the board and the chat show reset and
